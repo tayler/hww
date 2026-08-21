@@ -148,8 +148,10 @@ pub enum FetchError {
     Timeout(Duration),
     #[error("refused https -> http downgrade at {0}")]
     SchemeDowngrade(Url),
+    /// Carries the hops, because a redirect loop is usually a consent wall and the chain is
+    /// what shows it.
     #[error("exceeded {MAX_REDIRECTS} redirects")]
-    TooManyRedirects,
+    TooManyRedirects(Vec<Url>),
     /// A `Location` header that is not a URL. Its own arm because it is a server fault with a
     /// useful message, not a transport failure.
     #[error("unusable redirect target: {0}")]
@@ -270,7 +272,7 @@ impl Fetcher {
                 truncation,
             });
         }
-        Err(FetchError::TooManyRedirects)
+        Err(FetchError::TooManyRedirects(hops))
     }
 }
 

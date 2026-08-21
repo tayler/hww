@@ -31,3 +31,36 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  # The reading GUI and the local-only corpus tooling. Explicit features, never
+  # `--all-features`: that would silently opt into whatever anyone adds later, which is the
+  # opposite of the auditability this client is for.
+  #
+  # No apt packages, deliberately. Every native library in this graph is opened at runtime
+  # rather than linked at build time — winit reaches X11 through `x11-dl` and keyboards
+  # through `xkbcommon-dl`, `wayland-dlopen` covers Wayland (which is why `winit` is a direct
+  # dependency), and wgpu loads Vulkan and EGL the same way. Add a package only if a build
+  # actually fails for want of it, and say here which one and why: an apt list nobody can
+  # justify is how CI accretes.
+  #
+  # Linux only for now. A compile-only macOS/Windows matrix is deferred, not rejected — see
+  # the Portability notes in AGENTS.md. No test may call `eframe::run_native`.
+  gui:
+    name: gui + tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked --features gui,tools -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --features gui,tools

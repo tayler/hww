@@ -66,6 +66,11 @@ pub enum Job {
     Image {
         req: ReqId,
         page: ReqId,
+        /// The `src` exactly as `ir::Image` carries it. It travels with the job rather than
+        /// being recovered from the response, because a redirect makes the fetched URL a
+        /// different string from the one the placeholder is keyed by — and then the picture
+        /// arrives and nothing on screen changes.
+        src: String,
         url: Url,
         referrer: Url,
         max_width: u32,
@@ -91,20 +96,29 @@ impl Job {
 
 pub enum Msg {
     /// Emitted before the request is dispatched. Charter point 4.
-    Notice { req: ReqId, notice: Notice },
+    Notice {
+        req: ReqId,
+        notice: Notice,
+    },
     Loaded {
         req: ReqId,
         loaded: Box<Loaded>,
     },
-    Failed { req: ReqId, error: LoadError },
+    Failed {
+        req: ReqId,
+        error: LoadError,
+    },
     Image {
         req: ReqId,
         page: ReqId,
-        url: Url,
+        src: String,
         result: Result<Decoded, ImageError>,
     },
     /// A worker unwound. Carries the page so the UI can stop waiting on it.
-    Panicked { req: ReqId, page: ReqId },
+    Panicked {
+        req: ReqId,
+        page: ReqId,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -229,6 +243,7 @@ fn run_job(session: &Session, job: Job, tx: &mpsc::Sender<Msg>, ctx: &egui::Cont
         Job::Image {
             req,
             page,
+            src,
             url,
             referrer,
             max_width,
@@ -237,7 +252,7 @@ fn run_job(session: &Session, job: Job, tx: &mpsc::Sender<Msg>, ctx: &egui::Cont
             let _ = tx.send(Msg::Image {
                 req,
                 page,
-                url,
+                src,
                 result,
             });
         }
@@ -257,5 +272,9 @@ fn load_image(
         max_width,
         ..DecodeLimits::default()
     };
-    Ok(image_decode::decode(&fetched.bytes, &fetched.partial, &limits)?)
+    Ok(image_decode::decode(
+        &fetched.bytes,
+        &fetched.partial,
+        &limits,
+    )?)
 }

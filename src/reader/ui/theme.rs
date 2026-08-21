@@ -22,8 +22,10 @@ pub struct Palette {
     pub code_bg: Color32,
     /// Rules, thread indent guides, block borders.
     pub rule: Color32,
-    /// Chrome that must be noticed: the rewrite notice, error headings, find matches.
+    /// Chrome that must be noticed: the rewrite notice, error headings, the current find match.
     pub accent: Color32,
+    /// The other find matches — visible at a glance without competing with the current one.
+    pub find_bg: Color32,
     pub chrome_bg: Color32,
     pub selection: Color32,
     pub dark_mode: bool,
@@ -47,6 +49,7 @@ pub fn palette(theme: Theme, system_dark: bool) -> Palette {
             code_bg: Color32::from_rgb(0xEE, 0xEE, 0xE9),
             rule: Color32::from_rgb(0xD8, 0xD8, 0xD2),
             accent: Color32::from_rgb(0x9A, 0x45, 0x0B),
+            find_bg: Color32::from_rgba_unmultiplied(0x9A, 0x45, 0x0B, 0x38),
             chrome_bg: Color32::from_rgb(0xF1, 0xF1, 0xEC),
             selection: Color32::from_rgba_unmultiplied(0x15, 0x4B, 0x9E, 0x40),
             dark_mode: false,
@@ -60,6 +63,7 @@ pub fn palette(theme: Theme, system_dark: bool) -> Palette {
             code_bg: Color32::from_rgb(0xE7, 0xDD, 0xC4),
             rule: Color32::from_rgb(0xD5, 0xC8, 0xA9),
             accent: Color32::from_rgb(0x8E, 0x3F, 0x12),
+            find_bg: Color32::from_rgba_unmultiplied(0x8E, 0x3F, 0x12, 0x40),
             chrome_bg: Color32::from_rgb(0xE9, 0xDF, 0xC8),
             selection: Color32::from_rgba_unmultiplied(0x1D, 0x4E, 0x77, 0x40),
             dark_mode: false,
@@ -73,6 +77,7 @@ pub fn palette(theme: Theme, system_dark: bool) -> Palette {
             code_bg: Color32::from_rgb(0x22, 0x25, 0x28),
             rule: Color32::from_rgb(0x33, 0x37, 0x3B),
             accent: Color32::from_rgb(0xE0, 0x9B, 0x54),
+            find_bg: Color32::from_rgba_unmultiplied(0xE0, 0x9B, 0x54, 0x45),
             chrome_bg: Color32::from_rgb(0x1E, 0x21, 0x23),
             selection: Color32::from_rgba_unmultiplied(0x7F, 0xB4, 0xF5, 0x40),
             dark_mode: true,
@@ -113,7 +118,21 @@ pub fn mono_font(opts: &ReadOpts) -> FontId {
 /// Chrome — status strip, URL bar, outline. Fixed relative to the body so a wide reading size
 /// does not turn the strip into a second column of prose.
 pub fn chrome_font(opts: &ReadOpts) -> FontId {
-    FontId::new((opts.base_size_pt * 0.78).max(11.0), FontFamily::Proportional)
+    FontId::new(
+        (opts.base_size_pt * 0.78).max(11.0),
+        FontFamily::Proportional,
+    )
+}
+
+/// Snap a length to egui's layout grid.
+///
+/// Every vertical measurement the reader derives from the font size is fractional, and a
+/// fractional one accumulates down a long page into a drifting baseline. egui checks the same
+/// grid and paints an "Unaligned" warning across the column in debug builds when a `Ui` misses
+/// it, which is how this was found.
+pub fn snap(v: f32) -> f32 {
+    use eframe::egui::emath::GuiRounding as _;
+    v.round_ui()
 }
 
 /// Line height in points, shared by every section of every galley.
@@ -122,7 +141,10 @@ pub fn chrome_font(opts: &ReadOpts) -> FontId {
 /// A segment that forgets it sits a pixel off its neighbours, and the eye reads that as a
 /// broken line rather than as a subtle bug.
 pub fn line_height_px(opts: &ReadOpts) -> f32 {
-    opts.base_size_pt * opts.line_height
+    // Rounded, because epaint advises an even number of pixels per row for even text and
+    // because a fractional row height accumulates into a visibly drifting baseline down a long
+    // page.
+    snap(opts.base_size_pt * opts.line_height)
 }
 
 /// The reading column's width in points.
@@ -133,12 +155,12 @@ pub fn line_height_px(opts: &ReadOpts) -> f32 {
 pub fn measure_px(ctx: &egui::Context, opts: &ReadOpts) -> f32 {
     const SAMPLE: &str = "abcdefghijklmnopqrstuvwxyz";
     let font = body_font(opts);
-    let width = ctx.fonts(|f| {
+    let width = ctx.fonts_mut(|f| {
         f.layout_no_wrap(SAMPLE.to_owned(), font, Color32::PLACEHOLDER)
             .rect
             .width()
     });
-    (width / SAMPLE.len() as f32) * opts.measure_chars
+    snap((width / SAMPLE.len() as f32) * opts.measure_chars)
 }
 
 /// Whether the desktop is asking for a dark reader. Only consulted for `Theme::System`.
@@ -150,7 +172,7 @@ pub fn system_is_dark(ctx: &egui::Context) -> bool {
 /// measure change takes effect on the frame it happens rather than on the next navigation.
 pub fn apply(ctx: &egui::Context, opts: &ReadOpts) -> Palette {
     let pal = palette(opts.theme, system_is_dark(ctx));
-    let mut style = (*ctx.style()).clone();
+    let mut style = egui::Style::default();
 
     let mut visuals = if pal.dark_mode {
         egui::Visuals::dark()
@@ -184,10 +206,13 @@ pub fn apply(ctx: &egui::Context, opts: &ReadOpts) -> Palette {
     ]
     .into();
 
-    style.spacing.item_spacing = egui::vec2(0.0, opts.base_size_pt * opts.paragraph_spacing);
-    style.spacing.interact_size.y = opts.base_size_pt * 1.2;
-    // Drag-to-select depends on a mouse drag never being taken by the scroll area, so the
-    // scroll area's `DragScroll` mode is pinned in `app.rs` rather than left to a default.
-    ctx.set_style(style);
+    // Vertical spacing is the gap between blocks. Horizontal spacing is for *chrome* — prose
+    // sets it to zero locally in `inline_ui`, because word spacing there comes from the text
+    // itself and any widget spacing would double it.
+    style.spacing.item_spacing = egui::vec2(6.0, snap(opts.base_size_pt * opts.paragraph_spacing));
+    style.spacing.interact_size.y = snap(opts.base_size_pt * 1.2);
+    // The reader owns every colour it draws, so both of egui's theme slots get the same style:
+    // which one egui would otherwise pick is not a decision that should reach the page.
+    ctx.all_styles_mut(|s| *s = style.clone());
     pal
 }

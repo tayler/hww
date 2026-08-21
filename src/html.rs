@@ -467,9 +467,17 @@ fn inlines_from(node: NodeRef<'_, Node>, base: &Url) -> Vec<Inline> {
     for child in node.children() {
         match child.value() {
             Node::Text(t) => {
-                let s = t.replace(['\n', '\t'], " ");
-                if !s.trim().is_empty() {
-                    out.push(Inline::Text(squeeze(&s)));
+                let s = squeeze(&t.replace(['\n', '\t'], " "));
+                if s.trim().is_empty() {
+                    // A whitespace-only node *between* two inline elements is a word
+                    // boundary, and dropping it welds them together —
+                    // `<a>written language</a> <a>legible</a>` became "written
+                    // languagelegible". Markup indentation produces these constantly.
+                    if !s.is_empty() {
+                        push_space(&mut out);
+                    }
+                } else {
+                    out.push(Inline::Text(s));
                 }
             }
             Node::Element(e) => {
@@ -506,6 +514,20 @@ fn inlines_from(node: NodeRef<'_, Node>, base: &Url) -> Vec<Inline> {
         }
     }
     out
+}
+
+/// Add a separating space, unless we are at the start or the previous inline already ends in
+/// one. Never two spaces, and never a leading one.
+fn push_space(out: &mut Vec<Inline>) {
+    match out.last_mut() {
+        None => {}
+        Some(Inline::Text(prev)) => {
+            if !prev.ends_with(' ') {
+                prev.push(' ');
+            }
+        }
+        Some(_) => out.push(Inline::Text(" ".to_owned())),
+    }
 }
 
 fn squeeze(s: &str) -> String {
@@ -699,6 +721,22 @@ mod tests {
     /// Regression: `comment` was in NOISE_HINT, which deleted every comment body on thread
     /// pages. Both trafilatura and the first cut of this extractor returned only usernames
     /// and timestamps on Hacker News. See docs/phase0-findings.md.
+    /// Markup indentation puts a whitespace-only text node between adjacent inline elements
+    /// constantly, and dropping it welds two words into one.
+    #[test]
+    fn whitespace_between_inline_elements_is_a_word_boundary() {
+        let html = r#"<html><body><article><p>make <a href="/a">written language</a>
+            <a href="/b">legible</a>, <em>readable</em> <strong>and</strong> appealing when
+            displayed on a screen that is wide enough to need a paragraph of prose.</p>
+            </article></body></html>"#;
+        let doc = extract(html, &Url::parse("https://example.com/").unwrap());
+        let text = crate::render::to_text(&doc, &crate::render::TextOpts::default());
+        assert!(text.contains("written language legible"), "got: {text}");
+        assert!(text.contains("_readable_ *and* appealing"), "got: {text}");
+        // And no doubled or leading spaces from the indentation itself.
+        assert!(!text.contains("  "), "got: {text}");
+    }
+
     #[test]
     fn comment_class_is_not_treated_as_chrome() {
         let d = doc(

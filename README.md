@@ -14,10 +14,11 @@ A quiet reading experience.
 
 ## Status
 
-Phase 1. Working end to end for HTML:
+Working end to end for HTML, as a CLI that prints text and as a keyboard-driven reading GUI:
 
 ```
-cargo run -- [--no-rewrite] [--show-rewrites] <url>
+cargo run -- [--no-rewrite] [--show-rewrites] <url>            # text to stdout
+cargo run --features gui --bin hww-gui -- [--no-rewrite] <url> # the reader
 ```
 
 | Piece | State |
@@ -26,11 +27,13 @@ cargo run -- [--no-rewrite] [--show-rewrites] <url>
 | `rewrite` | Per-site rules; builtin table only, every rewrite reported on stderr |
 | `html` | Parse, article extraction, IR mapping |
 | `thread` | Forum/discussion extraction (structural, not heuristic) |
+| `session` | The pipeline in one place; the rewrite notice reported before dispatch |
 | `render` | Plain text |
 | `ir` | Document / Block / Inline / Thread / Comment |
+| `reader` | Reading model: inline runs, outline, history, threads, image decoding |
+| GUI | egui reader — links, back/forward, outline, find, threads, images. **Linux verified**; macOS and Windows are believed to build and are not tested |
 | feeds, gemini, gopher, markdown | not started |
-| archive | not started |
-| GUI | not started |
+| TUI, archive | not started |
 
 ## Measured
 
@@ -70,13 +73,34 @@ one function that owns the pipeline and reports the rewrite before it dispatches
     src/html.rs    HTML -> IR (article path)
     src/thread.rs  HTML -> IR (discussion path)
     src/render.rs  IR -> text
+    src/reader/    IR -> reading model (pure, tested) + reader/ui (egui, feature-gated)
+    src/bin/hww-gui thin main: argv -> reader::ui::run
     src/bin/corpus build a test corpus from local browser history. Checks how many of the sites you browse will work on hww.
     src/bin/bench  calibration harness vs a reference extractor (needs a local cache)
     src/bin/dbg    inspect extraction of one cached page
 
+## The reader
+
+    cargo run --features gui --bin hww-gui -- <url>
+
+Keyboard first, but nothing is keyboard-only: `?` lists the keys, and the status strip along
+the bottom carries back/forward and a clickable URL so a mouse alone can navigate. That strip
+never hides — the URL bar, outline, find bar, and help all dismiss on `Esc`, but a rewrite
+notice has to be on screen *before* the request goes out, so the strip stays.
+
+One centred reading column, measured in characters (`[` and `]`). Zoom is egui's own, so
+`Ctrl`+`+`/`-`/`0`, `Ctrl`+wheel, and trackpad pinch behave the way a browser does. Themes are
+light, sepia, dark, and follow-the-system (`d`).
+
+**Images are placeholders that name their host** — `[image] load from cdn.example.net` — and
+load only on an explicit click, never automatically, never on hover, never prefetched. Each
+load is counted in the status strip alongside cookie attempts, and nothing is written to disk.
+Image requests, and only image requests, carry an origin-only `Referer`; documents carry none.
+See AGENTS.md for why that one header is worth its exception.
+
 ## Building a corpus
 
-    cargo run --bin corpus -- --limit 150 --per-host 3 --out corpus.jsonl
+    cargo run --features tools --bin corpus -- --limit 150 --per-host 3 --out corpus.jsonl
 
 Finds a Firefox profile, stages a copy (the DB is locked while the browser runs), and samples
 document-shaped URLs. **Sampled by recency, never by `visit_count`** — frequency ranking
@@ -86,12 +110,18 @@ Its output is real browsing history. It is gitignored, and it should stay that w
 
 ## Tests
 
-    cargo test
+    cargo test                              # default features; egui never compiled
+    cargo test --features gui,tools         # adds the reader's pure modules
 
 Covers IR mapping, relative-URL resolution, malformed-markup recovery, nested-document
 recovery, encoding prescan bounds, host matching at a label boundary (`evil-example.com` is
-not `example.com`), and two regressions worth keeping named: comment bodies being stripped as
-chrome, and styling leaking into the IR.
+not `example.com`), inline flattening, thread reconstruction, outline and fragment matching,
+history, title de-duplication, image decoding and its ceilings, and the origin-only `Referer`.
+
+Regressions worth keeping named: comment bodies stripped as chrome; styling leaking into the
+IR; a whitespace-only node between two inline elements welding two words together; and the
+text renderer's markdown output, which is checked against a verbatim copy of the walker it
+replaced.
 
 ## License
 
