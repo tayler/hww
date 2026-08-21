@@ -4,8 +4,13 @@
 //! 150 real URLs. Observed there: 56% of responses tried to set a cookie. None were stored,
 //! because no cookie jar exists — reqwest is built without its `cookies` feature, so the
 //! capability is absent at compile time rather than merely unused.
+//!
+//! Errors are typed. The charter asks that a read-timeout stay distinct from a transport
+//! fault — Phase 0 measured bot detection failing as a silent hang rather than a 403 — and
+//! [`FetchError`] keeps that distinction *in the type system* rather than distinct-then-erased
+//! by an `anyhow::bail!`. That is what lets a reader show the right diagnosis instead of a
+//! generic network error.
 
-use anyhow::{Result, bail};
 use std::time::Duration;
 use url::Url;
 
@@ -32,12 +37,29 @@ pub struct Response {
 pub enum FetchError {
     /// Phase 0 finding: bot detection fails as a silent read-timeout, not a 403.
     /// A hang is a block signal, not a network error, and must be surfaced as such.
+    ///
+    /// Measured on *document* fetches only. A subresource that runs out of time is
+    /// [`FetchError::Timeout`] instead — accusing a CDN of blocking when the link is merely
+    /// slow would be the same mistake in the other direction.
     #[error("timed out — treat as bot-block, not a network fault")]
     LikelyBlocked,
+    /// Ran out of time on a request where a hang is *not* evidence of a block.
+    #[error("timed out after {0:?}")]
+    Timeout(Duration),
     #[error("refused https -> http downgrade at {0}")]
     SchemeDowngrade(Url),
     #[error("exceeded {MAX_REDIRECTS} redirects")]
     TooManyRedirects,
+    /// A `Location` header that is not a URL. Its own arm because it is a server fault with a
+    /// useful message, not a transport failure.
+    #[error("unusable redirect target: {0}")]
+    BadLocation(String),
+    #[error(transparent)]
+    Transport(#[from] reqwest::Error),
+    /// The connection died partway through the body. Distinct from `Transport` because it is
+    /// the arm that carries partial bytes in the subresource case.
+    #[error("read failed: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub struct Fetcher {
@@ -45,7 +67,7 @@ pub struct Fetcher {
 }
 
 impl Fetcher {
-    pub fn new() -> Result<Self> {
+    pub fn new() -> Result<Self, FetchError> {
         let client = reqwest::blocking::Client::builder()
             .user_agent(UA)
             // Manual redirect handling: the policy below must inspect every hop.
@@ -56,7 +78,7 @@ impl Fetcher {
         Ok(Self { client })
     }
 
-    pub fn get(&self, url: &Url) -> Result<Response> {
+    pub fn get(&self, url: &Url) -> Result<Response, FetchError> {
         let mut current = url.clone();
         let mut hops = Vec::new();
         let mut cookie_attempts = 0usize;
@@ -73,7 +95,7 @@ impl Fetcher {
                 .send()
             {
                 Ok(r) => r,
-                Err(e) if e.is_timeout() => bail!(FetchError::LikelyBlocked),
+                Err(e) if e.is_timeout() => return Err(FetchError::LikelyBlocked),
                 Err(e) => return Err(e.into()),
             };
 
@@ -86,9 +108,14 @@ impl Fetcher {
                 let Some(loc) = resp.headers().get(reqwest::header::LOCATION) else {
                     break;
                 };
-                let next = current.join(loc.to_str()?)?;
+                let loc = loc.to_str().map_err(|_| {
+                    FetchError::BadLocation(String::from_utf8_lossy(loc.as_bytes()).into_owned())
+                })?;
+                let next = current
+                    .join(loc)
+                    .map_err(|_| FetchError::BadLocation(loc.to_owned()))?;
                 if current.scheme() == "https" && next.scheme() == "http" {
-                    bail!(FetchError::SchemeDowngrade(next));
+                    return Err(FetchError::SchemeDowngrade(next));
                 }
                 hops.push(next.clone());
                 current = next;
@@ -113,12 +140,12 @@ impl Fetcher {
                 truncated,
             });
         }
-        bail!(FetchError::TooManyRedirects)
+        Err(FetchError::TooManyRedirects)
     }
 }
 
 /// Read at most `MAX_BYTES`, so a hostile or accidental multi-GB response cannot exhaust memory.
-fn read_capped(resp: reqwest::blocking::Response) -> Result<Vec<u8>> {
+fn read_capped(resp: reqwest::blocking::Response) -> Result<Vec<u8>, FetchError> {
     use std::io::Read;
     let mut buf = Vec::new();
     resp.take(MAX_BYTES as u64).read_to_end(&mut buf)?;
@@ -166,6 +193,15 @@ fn meta_charset_prescan(bytes: &[u8]) -> Option<&'static encoding_rs::Encoding> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reader shares one `Fetcher` across worker threads. If this stops holding, the
+    /// threading model in `reader::ui::net` stops compiling — which is the point of asserting
+    /// it here, next to the builder that could quietly break it.
+    #[test]
+    fn fetcher_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Fetcher>();
+    }
 
     #[test]
     fn charset_from_http_header_wins() {

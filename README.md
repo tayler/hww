@@ -29,7 +29,8 @@ cargo run -- [--no-rewrite] [--show-rewrites] <url>
 | `render` | Plain text |
 | `ir` | Document / Block / Inline / Thread / Comment |
 | feeds, gemini, gopher, markdown | not started |
-| TUI, archive, GUI | not started |
+| archive | not started |
+| GUI | not started |
 
 ## Measured
 
@@ -57,13 +58,15 @@ will never be builtin: they move your reading to an unrelated operator, which is
 this client exists not to do.
 
 `src/rewrite.rs` is the only file in the crate that contains a hostname, and the module graph
-keeps it that way — it imports no extractor, and nothing imports it but `main.rs`.
+keeps it that way — it imports no extractor, and nothing imports it but `src/session.rs`, the
+one function that owns the pipeline and reports the rewrite before it dispatches.
 
 ## Layout
 
     src/ir.rs      the IR — no styling
     src/fetch.rs   HTTP with privacy as code
     src/rewrite.rs per-site rules (a JS-gated host -> its own server-rendered alternate)
+    src/session.rs the pipeline: rewrite -> fetch -> decode -> extract, plus provenance
     src/html.rs    HTML -> IR (article path)
     src/thread.rs  HTML -> IR (discussion path)
     src/render.rs  IR -> text

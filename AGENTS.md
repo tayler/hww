@@ -36,23 +36,28 @@ Local-only tools. These need gitignored inputs and are **not** run by CI:
 
 Everything funnels through the IR:
 
-    main.rs ──> rewrite.rs (entry URL only) ──> fetch.rs (bytes + decode)
+    main.rs ───┐
+               ├─> session.rs ─> rewrite.rs (entry URL only) ─> fetch.rs (bytes + decode)
+    reader/ ───┘        │                                              │
+                        └── Notice, before dispatch                    │
+                              ┌────────────────────────────────────────┴─┐
+                              │                                          │
+                    html.rs (article path)              thread.rs (discussion path)
+                              └──────────────> ir::Document <────────────┘
                                                     │
                               ┌─────────────────────┴──────────────────┐
-                              │                                        │
-                    html.rs (article path)              thread.rs (discussion path)
-                              └──────────────> ir::Document <──────────┘
-                                                    │
-                                              render.rs (text)
+                        render.rs (text)                       reader/ (GUI)
 
 `src/ir.rs` is the contract. Every future format (gemtext, RSS, gopher, Markdown) maps *into*
 it and every future renderer (TUI, GUI, speech, e-ink) consumes *only* it. Adding a format is
 a new module producing `ir::Document`; adding a renderer is a new module consuming it. Neither
 touches the other. That is what makes a multi-protocol reader one program instead of five.
 
-Text length is the shared scoring currency: `Document::text_len` (`src/ir.rs`), wrapped by
-`html_inlines_len` (`src/lib.rs`) and `thread::comments_text_len`. Reuse these rather than
-adding a fourth counter.
+Text length is the shared scoring currency: `Document::text_len`, `ir::blocks_text_len`, and
+`thread::comments_text_len`. Reuse these rather than adding a fourth counter. The same rule now
+covers *text itself*: `ir::plain_text` is the one presentation-neutral flatten, and
+`reader::inline::flatten` is the one styled one, with `render::inline_text` built on top of it.
+Four walkers disagreeing about where an emphasis boundary falls is a bug nobody finds.
 
 **Extraction order in `html::extract`** — easy to break, and the merge is load-bearing:
 
@@ -83,8 +88,10 @@ generic transport errors.
 
 **`src/rewrite.rs` is the only file in the crate that contains a hostname.** `html.rs` scores
 subtrees, `thread.rs` groups siblings by class signature, `bin/corpus.rs` classifies by URL
-shape — none of them know a domain name. Nothing imports `rewrite` except `main.rs`, and
-`rewrite` imports no extractor. A builtin rule ships only if all four hold:
+shape — none of them know a domain name. Nothing imports `rewrite` except `src/session.rs`, and
+`rewrite` imports no extractor. `session::load` owns the whole pipeline, so the notice is a value
+it hands back before it dispatches rather than an `eprintln!` a second driver could forget — the
+rule is structural, not a convention. A builtin rule ships only if all four hold:
 
 1. **Same operator.** The target host is run by the same entity as the source. A third-party
    frontend proxy relocates the reader onto an unrelated party — exactly the "no third-party

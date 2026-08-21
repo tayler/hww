@@ -103,8 +103,33 @@ impl Document {
     }
 }
 
-fn blocks_text_len(blocks: &[Block]) -> usize {
+/// Visible text length of a block list. Text length is the shared scoring currency of this
+/// crate — reuse this rather than adding another counter.
+pub fn blocks_text_len(blocks: &[Block]) -> usize {
     blocks.iter().map(block_text_len).sum()
+}
+
+/// Inlines as plain text, with no renderer's sigils, indentation, or link decoration.
+///
+/// Presentation-neutral by construction, which is why it belongs here beside [`text_len`]
+/// rather than in any one renderer: title de-duplication, find-in-page, and outline slugs all
+/// need *the words*, and they must all agree on what the words are.
+pub fn plain_text(inlines: &[Inline]) -> String {
+    let mut out = String::new();
+    push_plain(inlines, &mut out);
+    out
+}
+
+fn push_plain(inlines: &[Inline], out: &mut String) {
+    for i in inlines {
+        match i {
+            Inline::Text(t) | Inline::Code(t) => out.push_str(t),
+            Inline::Emph(v) | Inline::Strong(v) => push_plain(v, out),
+            Inline::Link { inlines, .. } => push_plain(inlines, out),
+            Inline::Image(img) => out.push_str(img.alt.as_deref().unwrap_or("")),
+            Inline::Break => out.push('\n'),
+        }
+    }
 }
 
 fn block_text_len(b: &Block) -> usize {
@@ -137,4 +162,54 @@ fn inlines_text_len(inlines: &[Inline]) -> usize {
             Inline::Image(_) | Inline::Break => 0,
         })
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(s: &str) -> Inline {
+        Inline::Text(s.to_owned())
+    }
+
+    #[test]
+    fn plain_text_drops_markup_and_keeps_words() {
+        let inlines = vec![
+            t("a "),
+            Inline::Emph(vec![t("b")]),
+            t(" "),
+            Inline::Link {
+                href: "https://example.com/".into(),
+                inlines: vec![Inline::Strong(vec![t("c")])],
+            },
+            Inline::Code("d".into()),
+        ];
+        assert_eq!(plain_text(&inlines), "a b cd");
+    }
+
+    #[test]
+    fn plain_text_uses_image_alt_and_nothing_for_missing_alt() {
+        let with_alt = Inline::Image(Image {
+            src: "x".into(),
+            alt: Some("a cat".into()),
+        });
+        let without = Inline::Image(Image {
+            src: "x".into(),
+            alt: None,
+        });
+        assert_eq!(plain_text(&[with_alt]), "a cat");
+        assert_eq!(plain_text(&[without]), "");
+    }
+
+    #[test]
+    fn blocks_text_len_sums_nested_structure() {
+        let blocks = vec![
+            Block::Paragraph(vec![t("1234")]),
+            Block::Quote {
+                blocks: vec![Block::Paragraph(vec![t("567")])],
+                cite: None,
+            },
+        ];
+        assert_eq!(blocks_text_len(&blocks), 7);
+    }
 }

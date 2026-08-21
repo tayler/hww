@@ -11,18 +11,5 @@ pub mod html;
 pub mod ir;
 pub mod render;
 pub mod rewrite;
+pub mod session;
 pub mod thread;
-
-/// Length of the text carried by a list of inlines. Shared by the extractors.
-pub(crate) fn html_inlines_len(blocks: &[ir::Block]) -> usize {
-    ir::Document {
-        url: String::new(),
-        title: None,
-        byline: None,
-        published: None,
-        site_name: None,
-        lang: None,
-        blocks: blocks.to_vec(),
-    }
-    .text_len()
-}

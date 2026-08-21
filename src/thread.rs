@@ -43,7 +43,7 @@ pub fn extract_thread(html: &Html, base: &Url) -> Option<Vec<Comment>> {
     let mut comments: Vec<Comment> = Vec::new();
     for el in &group {
         let body = body_of(el, base);
-        if crate::html_inlines_len(&body) == 0 && body.is_empty() {
+        if body.is_empty() {
             continue;
         }
         comments.push(Comment {
