@@ -90,7 +90,7 @@ pub enum Inline {
     Break,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Image {
     pub src: String,
     pub alt: Option<String>,

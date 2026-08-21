@@ -9,6 +9,7 @@
 pub mod fetch;
 pub mod html;
 pub mod ir;
+pub mod reader;
 pub mod render;
 pub mod rewrite;
 pub mod session;

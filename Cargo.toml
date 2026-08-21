@@ -5,14 +5,50 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 default-run = "hww"
 
+[features]
+default = []
+# The reading GUI. Off by default so the `hww` CLI keeps compile-time absence of the one
+# network capability the reader adds — loading an image subresource on an explicit click.
+gui = ["dep:eframe", "dep:image", "dep:winit"]
+# Local-only corpus tooling. Behind a feature because `rusqlite = { bundled }` compiles a C
+# SQLite that exists solely for `bin/corpus`.
+tools = ["dep:rusqlite"]
+
 [dependencies]
 anyhow = "1.0.104"
 ego-tree = "0.11.0"
 encoding_rs = "0.8.35"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls", "http2", "gzip", "brotli", "deflate", "charset"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
 url = "2.5.8"
+
+# Do not declare `egui` directly — `eframe` re-exports it as `eframe::egui`, and a separate
+# entry is a version-skew trap. `links` is off (it hands URLs to a system browser via
+# `webbrowser`; hww never shells out to Chrome unasked) and `persistence` is off (it pulls
+# `ron` in to remember a window size; settings are hand-rolled JSON via `serde_json`).
+eframe = { version = "0.36.1", default-features = false, features = ["wgpu", "x11", "wayland", "default_fonts", "accesskit"], optional = true }
+# Direct dep purely to restore winit's defaults — `wayland-dlopen` (no link-time libwayland)
+# and `wayland-csd-adwaita` (client-side decorations; without it the window has no titlebar on
+# GNOME/Wayland). It cannot be done as `features = ["winit/default"]` on eframe: cargo rejects
+# a slash in a dependency's feature list unless eframe re-exports it, which it does not.
+winit = { version = "0.30", optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"], optional = true }
+rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
+
+# An explicit [[bin]] whose `path` matches an auto-discovered file takes precedence and merges
+# cleanly, so these two get their `required-features` while `hww`, `bench`, and `dbg` keep
+# being found on their own. Do NOT add `autobins = false` to "declare them all explicitly":
+# auto-discovery covers src/main.rs too, so switching it off deletes the `hww` target and
+# `default-run = "hww"` then fails to resolve before anything compiles.
+[[bin]]
+name = "hww-gui"
+path = "src/bin/hww-gui.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "corpus"
+path = "src/bin/corpus.rs"
+required-features = ["tools"]

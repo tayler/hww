@@ -14,7 +14,7 @@
 //! impossible. The alternative — "entry-point drivers only" — permits N drivers each
 //! re-implementing the notice, and every new one is a chance to drop it.
 
-use crate::fetch::{self, FetchError, Fetcher, MAX_BYTES};
+use crate::fetch::{self, FetchError, Fetcher, Limits, Truncation};
 use crate::{html, ir};
 use url::Url;
 
@@ -68,7 +68,7 @@ pub struct Provenance {
     pub chars: usize,
     pub hops: Vec<Url>,
     pub cookie_attempts: usize,
-    pub truncated: bool,
+    pub truncation: Truncation,
 }
 
 impl std::fmt::Display for Provenance {
@@ -83,12 +83,15 @@ impl std::fmt::Display for Provenance {
         } else {
             String::new()
         };
-        // `truncated` is fetched today and was never reported. Appending it here is a
-        // deliberate output change on exactly the pages whose output was a silent lie.
-        let truncated = if self.truncated {
-            format!(" | truncated at {} MB", MAX_BYTES / 1_000_000)
-        } else {
-            String::new()
+        // Truncation is fetched today and was never reported. Appending it here is a
+        // deliberate output change on exactly the pages whose output was a silent lie — and it
+        // hedges where the evidence hedges, because `len >= cap` alone cannot tell a body that
+        // was cut from one that happened to end there.
+        let truncated = match self.truncation {
+            Truncation::Complete => String::new(),
+            Truncation::AtCap(n) => format!(" | truncated at {} MB", n / 1_000_000),
+            Truncation::MaybeAtCap(n) => format!(" | may be truncated at {} MB", n / 1_000_000),
+            Truncation::Timeout(d) => format!(" | truncated: timed out after {}s", d.as_secs()),
         };
         write!(
             f,
@@ -115,6 +118,94 @@ pub struct Loaded {
 pub enum LoadError {
     #[error(transparent)]
     Fetch(#[from] FetchError),
+    /// The response was not a web page.
+    ///
+    /// Without this, a PDF, a zip, or a bare image reaches `html::extract`, yields nothing,
+    /// and lands on "this page may require JavaScript" — a confident, wrong diagnosis, and the
+    /// worst kind, because it blames the site.
+    #[error("{content_type} — not a web page")]
+    NotWebPage { content_type: String },
+}
+
+/// What following a link should do, decided **before** anything is dispatched.
+///
+/// `html::extract` absolutizes every href through `base.join`, which passes non-HTTP schemes
+/// through untouched — and nothing looked at what came back, because typing a URL made the
+/// question rare. Clicking one makes it routine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Navigate(Url),
+    /// hww does not hand a URL to a system handler — the same reason eframe's `links` feature
+    /// is off. Offer the text instead and let the user decide.
+    OfferCopy {
+        url: String,
+        note: &'static str,
+    },
+    /// Refused with a reason, never opaquely.
+    Refuse {
+        url: String,
+        reason: String,
+    },
+}
+
+pub fn classify_link(href: &str) -> Target {
+    let Ok(url) = Url::parse(href) else {
+        return Target::Refuse {
+            url: href.to_owned(),
+            reason: "not a usable address".to_owned(),
+        };
+    };
+    match url.scheme() {
+        "http" | "https" => Target::Navigate(url),
+        "mailto" => Target::OfferCopy {
+            url: href.to_owned(),
+            note: "an email address — hww does not open a mail client",
+        },
+        "tel" => Target::OfferCopy {
+            url: href.to_owned(),
+            note: "a phone number — hww does not open a dialler",
+        },
+        "javascript" => Target::Refuse {
+            url: href.to_owned(),
+            reason: "a javascript: link — there is no JavaScript here to run it".to_owned(),
+        },
+        "data" => Target::Refuse {
+            url: href.to_owned(),
+            reason: "a data: link — hww will not render bytes a page inlines into a link"
+                .to_owned(),
+        },
+        other => Target::Refuse {
+            url: href.to_owned(),
+            reason: format!("no handler for {other}: links yet"),
+        },
+    }
+}
+
+/// Whether a `Content-Type` describes something `html::extract` can read.
+///
+/// Deliberately generous: an absent header, and anything `text/*`, passes through, because
+/// refusing on absence would break a great many pages and a `.txt` file is at least words.
+/// What it catches is the confident wrong diagnosis — a PDF, an archive, a bare image.
+fn is_web_page(content_type: Option<&str>) -> bool {
+    let Some(ct) = content_type else {
+        return true;
+    };
+    let essence = ct
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    essence.is_empty()
+        || essence.starts_with("text/")
+        || matches!(
+            essence.as_str(),
+            "application/xhtml+xml"
+                | "application/xml"
+                | "application/rss+xml"
+                | "application/atom+xml"
+                | "application/json"
+        )
 }
 
 pub struct Session {
@@ -153,6 +244,18 @@ impl Session {
         }
 
         let resp = self.fetcher.get(&url)?;
+        if !is_web_page(resp.content_type.as_deref()) {
+            return Err(LoadError::NotWebPage {
+                content_type: resp
+                    .content_type
+                    .unwrap_or_default()
+                    .split(';')
+                    .next()
+                    .unwrap_or("unknown")
+                    .trim()
+                    .to_owned(),
+            });
+        }
         let (source, enc) = fetch::decode(&resp.body, resp.content_type.as_deref());
         let doc = html::extract(&source, &resp.final_url);
 
@@ -171,9 +274,35 @@ impl Session {
             chars: doc.text_len(),
             hops: resp.hops,
             cookie_attempts: resp.cookie_attempts,
-            truncated: resp.truncated,
+            truncation: resp.truncation,
         };
         Ok(Loaded { doc, prov })
+    }
+}
+
+/// One image subresource. Bytes and their partial-ness; decoding is the reader's job, and
+/// deliberately not this module's — see `reader::image_decode` for why the only parser of
+/// untrusted binary input in this crate lives outside the feature-gated half.
+pub struct FetchedImage {
+    pub bytes: Vec<u8>,
+    pub partial: Truncation,
+    pub final_url: Url,
+    pub cookie_attempts: usize,
+}
+
+impl Session {
+    /// Fetch an image on behalf of `page`. Reached only from an explicit click.
+    ///
+    /// `page` is the document being read, and only its **origin** is disclosed — see
+    /// [`fetch::Referer::PageOrigin`] for the whole argument.
+    pub fn fetch_image(&self, url: &Url, page: &Url) -> Result<FetchedImage, FetchError> {
+        let resp = self.fetcher.get_with(url, Some(page), &Limits::IMAGE)?;
+        Ok(FetchedImage {
+            bytes: resp.body,
+            partial: resp.truncation,
+            final_url: resp.final_url,
+            cookie_attempts: resp.cookie_attempts,
+        })
     }
 }
 
@@ -193,7 +322,7 @@ mod tests {
             chars: 567,
             hops: vec![],
             cookie_attempts: 2,
-            truncated: false,
+            truncation: Truncation::Complete,
         }
     }
 
@@ -223,11 +352,69 @@ mod tests {
     fn truncation_is_reported_and_only_when_it_happened() {
         let mut p = prov("https://example.com/a");
         assert!(!p.to_string().contains("truncated"));
-        p.truncated = true;
+        p.truncation = Truncation::AtCap(crate::fetch::MAX_BYTES);
         assert!(
             p.to_string()
                 .ends_with("cookie attempt(s) discarded | truncated at 5 MB]")
         );
+        // No Content-Length to check against: hedge rather than assert.
+        p.truncation = Truncation::MaybeAtCap(crate::fetch::MAX_BYTES);
+        assert!(p.to_string().contains("may be truncated at 5 MB"));
+    }
+
+    #[test]
+    fn web_schemes_navigate_and_everything_else_says_what_it_is() {
+        assert!(matches!(
+            classify_link("https://example.com/a"),
+            Target::Navigate(_)
+        ));
+        assert!(matches!(
+            classify_link("mailto:someone@example.com"),
+            Target::OfferCopy { .. }
+        ));
+        assert!(matches!(
+            classify_link("tel:+15550100"),
+            Target::OfferCopy { .. }
+        ));
+        for href in [
+            "javascript:alert(1)",
+            "data:text/html,<b>x",
+            "ftp://example.com/f",
+        ] {
+            match classify_link(href) {
+                Target::Refuse { reason, .. } => assert!(!reason.is_empty()),
+                other => panic!("{href} should be refused, got {other:?}"),
+            }
+        }
+        // gemini and gopher are on the roadmap; until then, say which scheme it was.
+        match classify_link("gemini://example.com/") {
+            Target::Refuse { reason, .. } => assert!(reason.contains("gemini")),
+            other => panic!("expected a named refusal, got {other:?}"),
+        }
+    }
+
+    /// The point is not to be strict, it is to stop blaming the site for a PDF.
+    #[test]
+    fn only_clearly_non_page_content_types_are_refused() {
+        for ct in [
+            None,
+            Some("text/html; charset=utf-8"),
+            Some("TEXT/HTML"),
+            Some("application/xhtml+xml"),
+            Some("text/plain"),
+            Some(""),
+        ] {
+            assert!(is_web_page(ct), "{ct:?} should be readable");
+        }
+        for ct in [
+            "application/pdf",
+            "image/jpeg",
+            "application/zip",
+            "video/mp4",
+            "application/octet-stream",
+        ] {
+            assert!(!is_web_page(Some(ct)), "{ct} is not a web page");
+        }
     }
 
     #[test]
