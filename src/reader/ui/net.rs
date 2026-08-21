@@ -74,6 +74,8 @@ pub enum Job {
         url: Url,
         referrer: Url,
         max_width: u32,
+        /// The settings toggle, carried to the fetch rather than applied to the report.
+        send_referer: bool,
     },
 }
 
@@ -247,8 +249,9 @@ fn run_job(session: &Session, job: Job, tx: &mpsc::Sender<Msg>, ctx: &egui::Cont
             url,
             referrer,
             max_width,
+            send_referer,
         } => {
-            let result = load_image(session, &url, &referrer, max_width);
+            let result = load_image(session, &url, &referrer, max_width, send_referer);
             let _ = tx.send(Msg::Image {
                 req,
                 page,
@@ -265,8 +268,9 @@ fn load_image(
     url: &Url,
     referrer: &Url,
     max_width: u32,
+    send_referer: bool,
 ) -> Result<Decoded, ImageError> {
-    let fetched = session.fetch_image(url, referrer)?;
+    let fetched = session.fetch_image(url, referrer, send_referer)?;
     let _serialized = DECODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let limits = DecodeLimits {
         max_width,

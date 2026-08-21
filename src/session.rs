@@ -14,7 +14,7 @@
 //! impossible. The alternative — "entry-point drivers only" — permits N drivers each
 //! re-implementing the notice, and every new one is a chance to drop it.
 
-use crate::fetch::{self, FetchError, Fetcher, Limits, Truncation};
+use crate::fetch::{self, FetchError, Fetcher, Limits, Referer, Truncation};
 use crate::{html, ir};
 use url::Url;
 
@@ -295,8 +295,28 @@ impl Session {
     ///
     /// `page` is the document being read, and only its **origin** is disclosed — see
     /// [`fetch::Referer::PageOrigin`] for the whole argument.
-    pub fn fetch_image(&self, url: &Url, page: &Url) -> Result<FetchedImage, FetchError> {
-        let resp = self.fetcher.get_with(url, Some(page), &Limits::IMAGE)?;
+    ///
+    /// `send_referer` is the settings toggle, and it is applied *here*, by choosing the
+    /// `Limits` — not by the caller counting differently. A setting that changes a report
+    /// rather than the request is the kind of no-op this project has already deleted once.
+    pub fn fetch_image(
+        &self,
+        url: &Url,
+        page: &Url,
+        send_referer: bool,
+    ) -> Result<FetchedImage, FetchError> {
+        let limits = if send_referer {
+            Limits::IMAGE
+        } else {
+            Limits {
+                referer: Referer::None,
+                ..Limits::IMAGE
+            }
+        };
+        // `get_with` debug-asserts that a PageOrigin request names its page; with the policy
+        // off there is nothing to name, so pass nothing rather than something ignored.
+        let referrer = send_referer.then_some(page);
+        let resp = self.fetcher.get_with(url, referrer, &limits)?;
         Ok(FetchedImage {
             bytes: resp.body,
             partial: resp.truncation,

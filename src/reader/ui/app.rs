@@ -312,6 +312,7 @@ impl ReaderApp {
             url,
             referrer: base,
             max_width,
+            send_referer: self.settings.send_image_referer,
         });
         self.say(format!("loading one image from {host}"));
     }

@@ -100,6 +100,10 @@ pub struct Decoded {
 pub enum DecodeError {
     #[error("not a recognised image format")]
     UnknownFormat,
+    /// A format hww deliberately does not decode. Named, so the strip can say which rather
+    /// than calling a perfectly valid file unrecognisable.
+    #[error("{0} not shown")]
+    Unsupported(&'static str),
     #[error("image is {0}x{1}; the limit is {2} px on a side")]
     TooLarge(u32, u32, u32),
     /// Includes the truncated PNG/GIF/WebP case, which cannot yield a partial frame.
@@ -140,6 +144,10 @@ pub fn decode(
         return Err(DecodeError::Empty);
     }
 
+    if let Some(name) = deliberately_unsupported(bytes) {
+        return Err(DecodeError::Unsupported(name));
+    }
+
     let reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| DecodeError::Decode(e.to_string()))?;
@@ -174,6 +182,28 @@ pub fn decode(
         rgba: rgba.into_raw(),
         partial: partial_label(*transfer),
     })
+}
+
+/// Formats this reader declines on purpose, recognised from their bytes so the failure names
+/// the format instead of calling a valid file unrecognisable.
+///
+/// **SVG** would need a second layout engine — `resvg` is exactly that, and a client whose
+/// whole thesis is not running the page's layout should not acquire one to draw a logo.
+/// **AVIF** would need `dav1d`, a C decoder surface, on untrusted input; the only module in
+/// this crate that parses untrusted binary input is pure Rust and stays that way.
+fn deliberately_unsupported(bytes: &[u8]) -> Option<&'static str> {
+    // ISO-BMFF: [4-byte size][b"ftyp"][brand]. `avif` and `avis` are the AVIF brands.
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && matches!(&bytes[8..12], b"avif" | b"avis") {
+        return Some("AVIF");
+    }
+    // SVG is XML, so sniff the root element within the leading whitespace, BOM, XML
+    // declaration, and doctype rather than requiring it first.
+    let head = &bytes[..bytes.len().min(1024)];
+    let head = String::from_utf8_lossy(head).to_ascii_lowercase();
+    if head.contains("<svg") {
+        return Some("SVG");
+    }
+    None
 }
 
 fn alloc_limits(limits: &DecodeLimits) -> image::Limits {
@@ -279,6 +309,27 @@ mod tests {
                 "{format:?} must not produce a silent half-image"
             );
         }
+    }
+
+    /// Declined on purpose, and named — "SVG not shown" is a different statement from "not a
+    /// recognised image format", and only one of them is true.
+    #[test]
+    fn svg_and_avif_are_declined_by_name() {
+        let svg = br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>"#;
+        assert!(matches!(
+            decode(svg, &Truncation::Complete, &limits(4096)),
+            Err(DecodeError::Unsupported("SVG"))
+        ));
+        let mut avif = vec![0u8, 0, 0, 0x20];
+        avif.extend_from_slice(b"ftypavif");
+        avif.extend_from_slice(&[0u8; 16]);
+        assert!(matches!(
+            decode(&avif, &Truncation::Complete, &limits(4096)),
+            Err(DecodeError::Unsupported("AVIF"))
+        ));
+        // A format that *is* supported must not be caught by the sniffs above.
+        let png = encode(16, 16, ImageFormat::Png);
+        assert!(decode(&png, &Truncation::Complete, &limits(4096)).is_ok());
     }
 
     #[test]
