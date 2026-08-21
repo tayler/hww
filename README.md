@@ -35,6 +35,35 @@ cargo run --features gui --bin hww-gui -- [--no-rewrite] <url> # the reader
 | feeds, gemini, gopher, markdown | not started |
 | TUI, archive | not started |
 
+## Running
+
+A stable Rust toolchain new enough for edition 2024 (1.85 or later) is the only prerequisite.
+Every native library in the graph is opened at runtime rather than linked at build time, so
+there is no system package to install first.
+
+```
+cargo run --features gui --bin hww-gui                          # the reader, URL bar focused
+cargo run --features gui --bin hww-gui -- example.com/article   # straight to a page
+cargo run -- https://example.com/article                        # the same page as text
+```
+
+The reader's URL argument is optional; without one it opens empty with the URL bar focused,
+`g` reopens that bar later, and `?` lists every key. It also accepts a bare host and fills in
+`https://`. The `hww` CLI wants a full URL, and prints the article to stdout with its
+provenance on stderr.
+
+Both binaries take `--no-rewrite` to switch off per-site rules and `--show-rewrites` to print
+the table and exit. The reader lives behind the `gui` feature because it adds one network
+capability the CLI does not have, loading an image on an explicit click; in the `hww` binary
+that code is not compiled at all.
+
+For everyday use, build once and run the binary:
+
+```
+cargo build --release --features gui
+./target/release/hww-gui example.com/article
+```
+
 ## Measured
 
 Against 150 real URLs sampled from browsing history ([full findings](docs/phase0-findings.md)):

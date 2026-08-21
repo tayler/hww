@@ -25,6 +25,13 @@ pub struct Settings {
     /// hotlink protection then substitutes or refuses images, and the substitution case is
     /// undetectable (see `fetch::Referer::PageOrigin`).
     pub send_image_referer: bool,
+    /// Lines of text per scroll step: one mouse-wheel notch, and one press of `j`/`k`.
+    ///
+    /// Lines rather than points, because the distance that reads as "one step" is a property
+    /// of the text being read, not of the display. egui's own default is 40 points a notch,
+    /// which is 1.5 lines of the default body and lands short of a step; three is the browser
+    /// convention and is what `j`/`k` already moved.
+    pub scroll_lines: f32,
 }
 
 impl Default for Settings {
@@ -33,7 +40,27 @@ impl Default for Settings {
             read: ReadOpts::default(),
             zoom_factor: 1.0,
             send_image_referer: true,
+            scroll_lines: 3.0,
         }
+    }
+}
+
+impl Settings {
+    pub const SCROLL_LINES_MIN: f32 = 0.5;
+    pub const SCROLL_LINES_MAX: f32 = 20.0;
+
+    /// [`Self::scroll_lines`] as something safe to multiply a line height by.
+    ///
+    /// The file is hand-edited, and `0` (a wheel that does nothing) or a negative (a wheel that
+    /// scrolls the wrong way) are the sort of typo that reads as a broken reader rather than as
+    /// a bad setting. `NaN` fails every comparison, so it falls out of the clamp and is caught
+    /// on its own.
+    pub fn scroll_lines(&self) -> f32 {
+        if self.scroll_lines.is_nan() {
+            return Self::default().scroll_lines;
+        }
+        self.scroll_lines
+            .clamp(Self::SCROLL_LINES_MIN, Self::SCROLL_LINES_MAX)
     }
 }
 
@@ -165,6 +192,7 @@ mod tests {
         want.read.measure_chars = 82.0;
         want.zoom_factor = 1.25;
         want.send_image_referer = false;
+        want.scroll_lines = 5.0;
         save(&want).unwrap();
         let (got, err) = load();
         assert_eq!(got, want);
@@ -195,6 +223,26 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"zoom_factor": 1.5}"#).unwrap();
         assert_eq!(s.zoom_factor, 1.5);
         assert!(s.send_image_referer);
+        assert_eq!(s.scroll_lines, Settings::default().scroll_lines);
         assert_eq!(s.read, ReadOpts::default());
+    }
+
+    /// A hand-edited file is the only way in, so the accessor and not the field is what the
+    /// reader multiplies by: zero, negative, and `NaN` all have to come out of it as a scroll
+    /// that still moves down the page.
+    #[test]
+    fn a_hand_edited_scroll_lines_cannot_stop_or_invert_the_wheel() {
+        let with = |v: f32| Settings {
+            scroll_lines: v,
+            ..Settings::default()
+        };
+        assert_eq!(with(0.0).scroll_lines(), Settings::SCROLL_LINES_MIN);
+        assert_eq!(with(-3.0).scroll_lines(), Settings::SCROLL_LINES_MIN);
+        assert_eq!(with(1e9).scroll_lines(), Settings::SCROLL_LINES_MAX);
+        assert_eq!(
+            with(f32::NAN).scroll_lines(),
+            Settings::default().scroll_lines
+        );
+        assert_eq!(with(4.5).scroll_lines(), 4.5);
     }
 }

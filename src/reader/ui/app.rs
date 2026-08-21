@@ -142,10 +142,27 @@ pub struct ReaderApp {
     focus_url_bar: bool,
 }
 
+/// Distance one wheel notch moves, in points.
+///
+/// egui reports a discrete wheel in lines and multiplies by `line_scroll_speed`, whose default
+/// 40 points is a display measurement rather than a reading one: at the default body it is a
+/// line and a half, which registers as the page not quite having moved. Deriving it from
+/// [`theme::line_height_px`] instead makes a notch and a press of `j` the same distance, and
+/// keeps them the same distance when the body size changes.
+fn apply_scroll_speed(ctx: &egui::Context, settings: &Settings) {
+    let step = scroll_step(settings);
+    ctx.options_mut(|o| o.input_options.line_scroll_speed = step);
+}
+
+fn scroll_step(settings: &Settings) -> f32 {
+    theme::line_height_px(&settings.read) * settings.scroll_lines()
+}
+
 impl ReaderApp {
     fn new(cc: &eframe::CreationContext<'_>, launch: Launch) -> Result<Self, LoadError> {
         let net = Net::new(cc.egui_ctx.clone())?;
         cc.egui_ctx.set_zoom_factor(launch.settings.zoom_factor);
+        apply_scroll_speed(&cc.egui_ctx, &launch.settings);
         let mut app = Self {
             net,
             settings: launch.settings,
@@ -483,6 +500,7 @@ impl ReaderApp {
             self.go_forward();
         }
 
+        let step = scroll_step(&self.settings);
         let line = theme::line_height_px(&self.settings.read);
         let page = (self.viewport_height - line * 2.0).max(line);
         // `consume_key` ignores *extra* Shift and Alt, so every shifted binding must be tested
@@ -536,10 +554,10 @@ impl ReaderApp {
 
         // --- unshifted bindings
         if k(Modifiers::NONE, Key::J) || k(Modifiers::NONE, Key::ArrowDown) {
-            self.scroll_delta -= line * 3.0;
+            self.scroll_delta -= step;
         }
         if k(Modifiers::NONE, Key::K) || k(Modifiers::NONE, Key::ArrowUp) {
-            self.scroll_delta += line * 3.0;
+            self.scroll_delta += step;
         }
         if k(Modifiers::NONE, Key::Space) || k(Modifiers::NONE, Key::PageDown) {
             self.scroll_delta -= page;
@@ -700,6 +718,9 @@ impl eframe::App for ReaderApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let pal = theme::apply(&ctx, &self.settings.read);
+        // Cheap, and the body size it is derived from can change under `[`/`]` and a settings
+        // reload, so it is re-derived rather than trusted from startup.
+        apply_scroll_speed(&ctx, &self.settings);
         self.drain(&ctx);
         self.handle_keys(&ctx);
 
