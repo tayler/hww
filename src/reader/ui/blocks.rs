@@ -9,7 +9,7 @@
 //! nowhere to put the overflow. Each gets its **own horizontal `ScrollArea`**, sized to the
 //! measure: the column stays honest, wide content stays reachable, and the page never scrolls
 //! sideways as a whole. Code additionally keeps its monospace metric rather than being
-//! re-wrapped — a wrapped code line is a changed code line.
+//! re-wrapped: a wrapped code line is a changed code line.
 
 use crate::ir;
 use crate::reader::inline::{self, Run};
@@ -117,7 +117,7 @@ fn code_ui(ui: &mut Ui, lang: Option<&str>, text: &str, ctx: &mut RenderCtx<'_>)
                 ui.label(RichText::new(l).color(pal.dim).small());
             }
             // Its own horizontal scroll area, so a long line stays reachable without the page
-            // scrolling sideways — and no re-wrapping, because a wrapped code line is a
+            // scrolling sideways, and no re-wrapping, because a wrapped code line is a
             // changed code line.
             egui::ScrollArea::horizontal()
                 .id_salt(("code", text.len(), text.as_ptr() as usize))
@@ -148,12 +148,12 @@ fn table_ui(
         return;
     }
     // Cells must be told how wide they may be. `horizontal_wrapped` inside a grid cell wraps
-    // at the *grid's* remaining width, which is the whole row — so without this every cell
+    // at the *grid's* remaining width, which is the whole row, so without this every cell
     // lays out as one long line, the grid mis-measures its rows, and they overlap.
     let measure = ui.max_rect().width().max(120.0);
     let cell_width = (measure / columns as f32).max(measure * 0.25);
-    // `egui_extras::TableBuilder` is excluded — its image loaders would take fetching out of
-    // the audited `Fetcher` — so this is `egui::Grid`, which clips rather than scrolls. Hence
+    // `egui_extras::TableBuilder` is excluded (its image loaders would take fetching out of
+    // the audited `Fetcher`), so this is `egui::Grid`, which clips rather than scrolls. Hence
     // the scroll area around it.
     egui::ScrollArea::horizontal()
         .id_salt(("table", headers.len(), rows.len()))
@@ -193,7 +193,7 @@ fn cell_ui(ui: &mut Ui, width: f32, cell: &[ir::Inline], set: &Setting, ctx: &mu
     });
 }
 
-/// `Block::Embed` is never constructed today — `html.rs` drops iframes as noise — but the arm
+/// `Block::Embed` is never constructed today (`html.rs` drops iframes as noise), but the arm
 /// exists so the match stays exhaustive and the variant goes live the day it stops.
 fn embed_ui(ui: &mut Ui, kind: ir::EmbedKind, url: &str, ctx: &mut RenderCtx<'_>) {
     let pal = ctx.pal;
@@ -217,7 +217,7 @@ fn embed_ui(ui: &mut Ui, kind: ir::EmbedKind, url: &str, ctx: &mut RenderCtx<'_>
         });
 }
 
-/// The document's own header: title, byline, date. Not a `Block` — `doc.title` is metadata,
+/// The document's own header: title, byline, and date. Not a `Block`: `doc.title` is metadata,
 /// and rendering it as an H1 is the reader's decision.
 pub fn document_header(ui: &mut Ui, doc: &ir::Document, ctx: &mut RenderCtx<'_>) {
     if let Some(t) = &doc.title {

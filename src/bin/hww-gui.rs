@@ -1,7 +1,7 @@
 //! The reading GUI. A thin main: argv in, `reader::ui::run` out.
 //!
 //! Everything this binary can do that `hww` cannot is behind the `gui` feature, so the CLI
-//! keeps compile-time absence of the reader's one added network capability — loading an image
+//! keeps compile-time absence of the reader's one added network capability: loading an image
 //! subresource on an explicit click.
 
 use hww::reader::{settings, ui};
@@ -49,7 +49,7 @@ fn main() -> eframe::Result {
         }
     };
 
-    // A parse failure costs the settings, not the launch — and the reason is shown in the
+    // A parse failure costs the settings, not the launch, and the reason is shown in the
     // status strip rather than swallowed.
     let (settings, settings_note) = settings::load();
     ui::run(ui::Launch {

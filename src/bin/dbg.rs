@@ -9,7 +9,7 @@ const USAGE: &str = "usage: dbg <signals.jsonl> <cache-dir> <url-substring> [--t
 /// Truncate to at most `max` *bytes*, on a character boundary.
 ///
 /// `&s[..max]` panics when the boundary lands inside a multi-byte character, which for a
-/// three-byte character is most of the time — so this tool used to die on any CJK page.
+/// three-byte character is most of the time, so this tool used to die on any CJK page.
 fn head(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;

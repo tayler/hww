@@ -2,11 +2,11 @@
 //!
 //! Ported from the Phase 0 spike (`spike/fetch.py`), which validated these rules against
 //! 150 real URLs. Observed there: 56% of responses tried to set a cookie. None were stored,
-//! because no cookie jar exists — reqwest is built without its `cookies` feature, so the
+//! because no cookie jar exists: reqwest is built without its `cookies` feature, so the
 //! capability is absent at compile time rather than merely unused.
 //!
 //! Errors are typed. The charter asks that a read-timeout stay distinct from a transport
-//! fault — Phase 0 measured bot detection failing as a silent hang rather than a 403 — and
+//! fault (Phase 0 measured bot detection failing as a silent hang rather than a 403), and
 //! [`FetchError`] keeps that distinction *in the type system* rather than distinct-then-erased
 //! by an `anyhow::bail!`. That is what lets a reader show the right diagnosis instead of a
 //! generic network error.
@@ -24,7 +24,7 @@ pub const TIMEOUT: Duration = Duration::from_secs(15);
 /// An image is allowed to be bigger than a document, and the asymmetry is deliberate rather
 /// than sloppy: article photography lands in the 1–10 MB range routinely, and by the time this
 /// cap applies the user has already clicked to ask for the picture. The cap is not a privacy
-/// control — the click settled disclosure. It bounds resident bytes during transfer and
+/// control; the click settled disclosure. It bounds resident bytes during transfer and
 /// nothing else; it does **not** raise the decoded-memory ceiling, which
 /// `reader::image_decode` owns independently.
 pub const MAX_IMAGE_BYTES: usize = 10_000_000;
@@ -40,20 +40,20 @@ pub const ACCEPT_IMAGE: &str = "image/webp,image/avif,image/png,image/jpeg,image
 pub enum Referer {
     /// The absolute default for documents. No document fetch ever carries a Referer.
     None,
-    /// Scheme and host of the page being read — **never** the path.
+    /// Scheme and host of the page being read, **never** the path.
     ///
     /// `referer(false)` stays in the builder: reqwest still never attaches a Referer on its
     /// own, on any request or redirect hop. What this adds is one header, set deliberately, at
     /// one call site, under manual redirect control.
     ///
     /// The reason it exists is a failure hww cannot otherwise detect. Hotlink protection that
-    /// answers 403 degrades safely — no picture, visible failure. Hotlink protection that
+    /// answers 403 degrades safely: no picture, visible failure. Hotlink protection that
     /// answers **200 with a substitute image** degrades silently: a valid JPEG that decodes
     /// clean and renders in the reading column, with no status code, decode check, or
     /// heuristic available to tell it from the real one. Sending the origin removes the
     /// trigger; sending it only after a 403 cannot, because there is no 403 to react to.
     ///
-    /// The origin adds nearly nothing to what the request already discloses — a CDN asked for
+    /// The origin adds nearly nothing to what the request already discloses: a CDN asked for
     /// a host's asset inferred the referring site from the path before we said a word. The
     /// *path* is the real leak, and it is the part never sent. Browsers converged on the same
     /// split (`strict-origin-when-cross-origin`), and hotlink checks compare hosts rather than
@@ -61,7 +61,7 @@ pub enum Referer {
     PageOrigin,
 }
 
-/// Per-request policy. One `Client`, several classes of request — so every privacy rule
+/// Per-request policy. One `Client`, several classes of request, so every privacy rule
 /// (manual redirect inspection, downgrade refusal, `referer(false)`, cookie counting, the byte
 /// cap) is inherited unchanged rather than re-implemented on a second path.
 #[derive(Debug, Clone, Copy)]
@@ -94,7 +94,7 @@ impl Limits {
 
 /// Why a body might be short, and how sure we are.
 ///
-/// A partial body still renders — the cap and the timeout bound cost, they do not decide the
+/// A partial body still renders: the cap and the timeout bound cost, they do not decide the
 /// user has earned nothing, and the HTML path has always behaved this way. What must not
 /// happen is an *unlabelled* partial, which the reader cannot tell from a bad image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,9 +143,9 @@ pub enum FetchError {
     /// A hang is a block signal, not a network error, and must be surfaced as such.
     ///
     /// Measured on *document* fetches only. A subresource that runs out of time is
-    /// [`FetchError::Timeout`] instead — accusing a CDN of blocking when the link is merely
+    /// [`FetchError::Timeout`] instead; accusing a CDN of blocking when the link is merely
     /// slow would be the same mistake in the other direction.
-    #[error("timed out — treat as bot-block, not a network fault")]
+    #[error("timed out; treat as bot-block, not a network fault")]
     LikelyBlocked,
     /// Ran out of time on a request where a hang is *not* evidence of a block.
     #[error("timed out after {0:?}")]
@@ -161,7 +161,7 @@ pub enum FetchError {
     #[error("unusable redirect target: {0}")]
     BadLocation(String),
     /// A 3xx with no `Location` at all. Its own arm because falling out of the redirect loop
-    /// reported it as [`FetchError::TooManyRedirects`] with an *empty* hop list — telling the
+    /// reported it as [`FetchError::TooManyRedirects`] with an *empty* hop list, telling the
     /// reader a single 304 was a consent wall, which is the confidently-wrong diagnosis
     /// `LoadError::NotWebPage` exists to avoid.
     #[error("{0} redirect with no Location header")]
@@ -195,7 +195,7 @@ impl Fetcher {
         self.get_with(url, None, &Limits::HTML)
     }
 
-    /// `referrer` is the *page* the request is made on behalf of — never the target. Required
+    /// `referrer` is the *page* the request is made on behalf of, never the target. Required
     /// when `limits.referer` is [`Referer::PageOrigin`]; a debug assertion catches the
     /// mismatch, and `None` degrades to sending no header rather than to a panic in a release
     /// build.
@@ -217,7 +217,7 @@ impl Fetcher {
 
         // One budget for the whole fetch. Applying `limits.timeout` per hop instead let a
         // 5-redirect chain run six times the timeout that is documented, surfaced on the
-        // failure screen, and used to decide `LikelyBlocked` — the reader sat on "Loading"
+        // failure screen, and used to decide `LikelyBlocked`: the reader sat on "Loading"
         // for 90s with nothing to distinguish it from a hang.
         let deadline = Instant::now() + limits.timeout;
 
@@ -233,7 +233,7 @@ impl Fetcher {
                 .header("Accept-Language", "en-US,en;q=0.9")
                 // Overrides the client default; no second `Client`, so nothing else changes.
                 .timeout(remaining);
-            // Same value across every hop — CDNs that bounce to a signed URL break otherwise.
+            // Same value across every hop; CDNs that bounce to a signed URL break otherwise.
             if let Some(v) = &referer_value {
                 req = req.header(reqwest::header::REFERER, v);
             }
@@ -298,7 +298,7 @@ impl Fetcher {
 
 /// The Referer header's value, or `None` for no header at all.
 ///
-/// Built from [`Url::origin`] so that no code path can emit a full URL even by mistake — the
+/// Built from [`Url::origin`] so that no code path can emit a full URL even by mistake: the
 /// path is the disclosure that matters, and this function is where "never the path" is a
 /// property of the construction rather than a promise in a comment.
 fn referer_header(policy: Referer, referrer: Option<&Url>) -> Option<String> {
@@ -320,7 +320,7 @@ fn timeout_error(limits: &Limits) -> FetchError {
     }
 }
 
-/// Decide what a short body means — and, for a read that failed outright with nothing to show,
+/// Decide what a short body means and, for a read that failed outright with nothing to show,
 /// hand back the error instead.
 fn classify(
     body: &[u8],
@@ -364,7 +364,7 @@ fn io_is_timeout(e: &std::io::Error) -> bool {
 }
 
 /// Read at most `max_bytes`, so a hostile or accidental multi-GB response cannot exhaust
-/// memory — and **keep whatever arrived** when the read fails partway.
+/// memory, and **keep whatever arrived** when the read fails partway.
 ///
 /// Discarding the buffer through `?` is what the old version did, and it is what makes a
 /// half-loaded photograph impossible to show. Whether those bytes are worth rendering is the
@@ -422,7 +422,7 @@ mod tests {
     use super::*;
 
     /// The reader shares one `Fetcher` across worker threads. If this stops holding, the
-    /// threading model in `reader::ui::net` stops compiling — which is the point of asserting
+    /// threading model in `reader::ui::net` stops compiling, which is the point of asserting
     /// it here, next to the builder that could quietly break it.
     #[test]
     fn fetcher_is_send_and_sync() {
@@ -559,7 +559,7 @@ mod tests {
     }
 
     /// A 3xx with no `Location` used to fall out of the redirect loop into
-    /// `TooManyRedirects` — with an *empty* hop list — so the reader told the user a single
+    /// `TooManyRedirects` (with an *empty* hop list), so the reader told the user a single
     /// 304 was "usually a consent wall".
     #[test]
     fn a_redirect_without_a_location_is_not_a_redirect_loop() {
@@ -577,8 +577,8 @@ mod tests {
         );
     }
 
-    /// `MaybeAtCap` names a limit. Naming one that was never approached — "may be truncated at
-    /// 5 MB" after 3 KB arrived — both misstates the size and hides the dropped connection.
+    /// `MaybeAtCap` names a limit. Naming one that was never approached ("may be truncated at
+    /// 5 MB" after 3 KB arrived) both misstates the size and hides the dropped connection.
     #[test]
     fn a_dropped_connection_is_not_reported_as_hitting_the_cap() {
         use std::io::Write;

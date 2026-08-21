@@ -1,4 +1,4 @@
-//! `ReaderApp` — state machine, keymap, chrome, and error screens.
+//! `ReaderApp`: state machine, keymap, chrome, and error screens.
 //!
 //! # Chrome, and the one piece of it that never hides
 //!
@@ -6,7 +6,7 @@
 //! strip at the bottom does not, and cannot, because charter point 4 requires that a rewrite is
 //! reported *before* the request goes out, unconditionally, so a hang cannot swallow the
 //! notice. A permanently visible one-line strip is what makes "chrome hidden until summoned"
-//! and that requirement compatible — and the GUI actually realizes the invariant better than
+//! and that requirement compatible, and the GUI actually realizes the invariant better than
 //! the CLI does: the notice travels the channel before the blocking fetch starts, so it is on
 //! screen for the whole of a 15 s hang instead of being interleaved with page text in a
 //! terminal after the fact.
@@ -19,11 +19,11 @@
 //! # Zoom is egui's, not ours
 //!
 //! egui already binds `Ctrl`+`+`/`=`/`-`/`0` to `zoom_factor` and folds `Ctrl`+wheel and pinch
-//! into the same value. Binding font size to those keys does not resolve the collision — it
+//! into the same value. Binding font size to those keys does not resolve the collision; it
 //! lands on top of it, because egui consumes the shortcut only *after* `update()` has run. So
 //! the reader implements no zoom at all: the built-in is browser-identical, brings `Ctrl`+`0`
 //! and trackpad pinch for free, and scales chrome with text the way full-page zoom should.
-//! `[` and `]` — the reading measure — stay hww's own, because that is the knob a browser does
+//! `[` and `]` (the reading measure) stay hww's own, because that is the knob a browser does
 //! not have.
 //!
 //! Every `Ctrl` in the keymap is `Modifiers::COMMAND`, which is Cmd on macOS and Ctrl
@@ -65,7 +65,7 @@ pub fn run(launch: Launch) -> eframe::Result {
 }
 
 enum Page {
-    /// Nothing asked for yet — the URL bar is open and focused.
+    /// Nothing asked for yet: the URL bar is open and focused.
     Idle,
     Loading {
         url: Url,
@@ -116,7 +116,7 @@ pub struct ReaderApp {
     hover_href: Option<String>,
     chrome: Chrome,
     images: ImageStore,
-    /// Toggles against the auto-collapse default — see `thread_ui::is_collapsed`.
+    /// Toggles against the auto-collapse default (see `thread_ui::is_collapsed`).
     collapsed: HashSet<CommentKey>,
     find_current: usize,
     find_total: usize,
@@ -209,7 +209,7 @@ impl ReaderApp {
         });
     }
 
-    /// Follow a link. The scheme gate runs here, before anything is dispatched — one place, so
+    /// Follow a link. The scheme gate runs here, before anything is dispatched: one place, so
     /// no widget can route around it.
     fn follow(&mut self, href: &str, rewrite: bool) {
         match session::classify_link(href) {
@@ -225,7 +225,7 @@ impl ReaderApp {
             }
             Target::OfferCopy { url, note } => {
                 self.copy(&url);
-                self.say(format!("{url} is {note} — copied instead"));
+                self.say(format!("{url} is {note}, copied instead"));
             }
             Target::Refuse { url, reason } => {
                 self.say(format!("{reason}: {url}"));
@@ -343,7 +343,7 @@ impl ReaderApp {
         // Last, not first: `load_image` ends with its own "loading one image from …", so
         // saying this up front meant the strip only ever showed the final host and "load all"
         // became the one place the reader does not say who it is about to contact. Nothing has
-        // been drawn yet — these are queued jobs, not completed ones — so the disclosure still
+        // been drawn yet (these are queued jobs, not completed ones), so the disclosure still
         // precedes any pixels.
         self.say(format!(
             "loading {count} image(s) from {}",
@@ -406,7 +406,7 @@ impl ReaderApp {
         // rule is dead, and that is the whole early-warning system.
         if loaded.prov.rule_appears_dead {
             self.say(format!(
-                "{} redirected away — that rewrite rule appears dead",
+                "{} redirected away; that rewrite rule appears dead",
                 loaded
                     .prov
                     .rewritten_to
@@ -506,7 +506,7 @@ impl ReaderApp {
                     self.copy(&h);
                     self.say(format!("copied {h}"));
                 }
-                None => self.say("no link focused — Tab to one first".to_owned()),
+                None => self.say("no link focused; Tab to one first".to_owned()),
             }
         }
         if k(Modifiers::SHIFT, Key::Z) {
@@ -570,7 +570,7 @@ impl ReaderApp {
             match self.focused_image.clone() {
                 Some(src) => self.load_image(ctx, &src),
                 None => self
-                    .say("no image focused — Tab to a placeholder, or Shift+I for all".to_owned()),
+                    .say("no image focused; Tab to a placeholder, or Shift+I for all".to_owned()),
             }
         }
         if k(Modifiers::NONE, Key::Y)
@@ -599,7 +599,7 @@ impl ReaderApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         // Enter follows the focused link. egui's own Tab order does the cycling, because links
-        // and comment toggles — and nothing else — are made focusable.
+        // and comment toggles (and nothing else) are made focusable.
         if k(Modifiers::NONE, Key::Enter)
             && let Some(h) = self.focused_href.clone()
         {
@@ -690,7 +690,7 @@ fn collect_image_srcs(doc: &ir::Document) -> Vec<String> {
     // places (a logo in header and footer, a repeated sprite) does not put them side by side.
     // The count feeds the "loading N image(s) from …" disclosure, so an inflated N is a
     // misstatement of what is about to be fetched. Sort by src to make the pairs adjacent, but
-    // hand back document order — the reading column loads top to bottom.
+    // hand back document order: the reading column loads top to bottom.
     let mut seen = std::collections::HashSet::new();
     out.retain(|s| seen.insert(s.clone()));
     out
@@ -812,7 +812,7 @@ impl ReaderApp {
                         action = Some(StripAction::Forward);
                     }
 
-                    // The URL itself summons the URL bar — the pointer's route to typing one.
+                    // The URL itself summons the URL bar: the pointer's route to typing one.
                     let shown = self.status_url();
                     if ui
                         .add(egui::Button::new(RichText::new(shown).color(pal.fg)).frame(false))
@@ -859,14 +859,14 @@ impl ReaderApp {
         match &self.page {
             Page::Loading { url, started } => {
                 format!(
-                    "loading {} — {:.1}s",
+                    "loading {} ({:.1}s)",
                     host_and_path(url),
                     started.elapsed().as_secs_f32()
                 )
             }
             Page::Ready(r) => host_and_path(&r.loaded.prov.final_url),
             Page::Failed { url, .. } => host_and_path(url),
-            Page::Idle => "hww — press Ctrl+L for a URL, ? for help".to_owned(),
+            Page::Idle => "hww: press Ctrl+L for a URL, ? for help".to_owned(),
         }
     }
 
@@ -1060,7 +1060,7 @@ impl ReaderApp {
     fn central(&mut self, ui: &mut Ui, pal: &theme::Palette) {
         // Rounded to whole *pixels*, not points: at a fractional zoom a column on a half-pixel
         // boundary makes every glyph in it resample, which reads as soft text rather than as a
-        // bug — and egui's debug build paints an "Unaligned" warning over the page to say so.
+        // bug, and egui's debug build paints an "Unaligned" warning over the page to say so.
         let to_pixel = theme::snap;
         let measure = to_pixel(theme::measure_px(ui.ctx(), &self.settings.read));
         let mut scroll = egui::ScrollArea::vertical()
@@ -1087,7 +1087,7 @@ impl ReaderApp {
                     // Rounded to whole points: a column on a half-pixel boundary makes every
                     // glyph in it resample, which reads as soft text rather than as a bug.
                     // The outline panel takes width from the column, so the measure is a
-                    // ceiling rather than a promise — without the clamp the text is simply cut
+                    // ceiling rather than a promise; without the clamp the text is simply cut
                     // off on the right when the panel opens.
                     let measure = to_pixel(measure.min(ui.available_width()));
                     let margin = to_pixel(((ui.available_width() - measure) * 0.5).max(0.0));
@@ -1163,7 +1163,7 @@ impl ReaderApp {
             // the markup, so this is a banner over the content, not instead of it.
             ui.label(
                 RichText::new(format!(
-                    "The server answered {} — showing what it sent anyway.",
+                    "The server answered {}. Showing what it sent anyway.",
                     ready.loaded.prov.status
                 ))
                 .color(ctx.pal.accent),
@@ -1172,7 +1172,7 @@ impl ReaderApp {
         }
         if doc.text_len() < 200 {
             ui.label(
-                RichText::new("Little content extracted — this page may require JavaScript.")
+                RichText::new("Little content extracted. This page may require JavaScript.")
                     .color(ctx.pal.accent),
             );
             ui.add_space(8.0);
@@ -1180,7 +1180,7 @@ impl ReaderApp {
         if let Some(f) = &ready.fragment_note {
             ui.label(
                 RichText::new(format!(
-                    "No section matching {f} — showing the top of the page."
+                    "No section matching {f}. Showing the top of the page."
                 ))
                 .color(ctx.pal.dim)
                 .small(),
@@ -1367,8 +1367,8 @@ impl Button {
     }
 }
 
-/// Written with the glyphs egui's embedded fonts actually carry. `→` is not one of them — it
-/// renders as tofu — while `←`, `↑`, and `↓` are, which is why this table looks asymmetric and
+/// Written with the glyphs egui's embedded fonts actually carry. `→` is not one of them; it
+/// renders as tofu, while `←`, `↑`, and `↓` are, which is why this table looks asymmetric and
 /// is meant to.
 const HELP: &[(&str, &str)] = &[
     ("j k ↓ ↑", "scroll"),

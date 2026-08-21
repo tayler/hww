@@ -3,8 +3,8 @@
 //! `&[ir::Inline]` is a tree; every renderer needs it as a sequence of styled segments. This
 //! is that sequence, and it is deliberately the *only* styled flatten in the crate:
 //! `render::inline_text` is built on top of it, and so is the GUI. Two walkers disagreeing
-//! about where an emphasis boundary falls — the text renderer and the reader drawing different
-//! spans from the same document — is exactly the bug nobody finds.
+//! about where an emphasis boundary falls (the text renderer and the reader drawing different
+//! spans from the same document) is exactly the bug nobody finds.
 //!
 //! No egui types appear here, so the default CI job compiles and tests it.
 //!
@@ -13,8 +13,8 @@
 //! Flattening cannot preserve everything a tree can express, and both losses are improvements:
 //!
 //! 1. **Adjacent equal-styled segments merge.** `<em>a</em><em>b</em>` becomes one run, not
-//!    two. This is required — the GUI emits one widget per run, and one per DOM element would
-//!    be both slower and worse at wrapping — and it renders as `_ab_` where the old recursive
+//!    two. This is required (the GUI emits one widget per run, and one per DOM element would
+//!    be both slower and worse at wrapping), and it renders as `_ab_` where the old recursive
 //!    walker wrote `_a__b_`. Same words, fewer sigils.
 //! 2. **Emphasis nesting order is normalized.** `<b><i>x</i></b>` and `<i><b>x</b></i>` both
 //!    become `{emph, strong}` and both render `_*x*_`. Order carries no meaning in the IR and
@@ -25,7 +25,7 @@
 
 use crate::ir;
 
-/// Which marks apply to a segment. A set, not a stack — see the module doc.
+/// Which marks apply to a segment. A set, not a stack (see the module doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Style {
     pub emph: bool,
@@ -39,7 +39,7 @@ pub enum Run {
         text: String,
         style: Style,
     },
-    /// A link's own runs. Nested links are flattened onto the outer href — the inner one is
+    /// A link's own runs. Nested links are flattened onto the outer href; the inner one is
     /// unreachable in any renderer, and hww will not guess which was meant.
     Link {
         href: String,

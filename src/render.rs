@@ -16,8 +16,8 @@ pub struct TextOpts {
     pub show_links: bool,
     /// Levels of reply indent before nesting stops accumulating.
     ///
-    /// `Comment::depth` is page-controlled — `thread::depth_of` parses an `indent` attribute
-    /// as a `u16` and does not clamp it — and the pad is emitted once per *word*, because a
+    /// `Comment::depth` is page-controlled (`thread::depth_of` parses an `indent` attribute
+    /// as a `u16` and does not clamp it), and the pad is emitted once per *word*, because a
     /// pad wider than `width` drives the wrap width to zero. Uncapped, one comment carrying
     /// `indent="60000"` and a 240-character body renders 5.9 MB of spaces. The GUI has always
     /// capped this via [`crate::reader::opts::ReadOpts::max_thread_indent`]; this is the same
@@ -175,7 +175,7 @@ fn runs_text(runs: &[Run], o: &TextOpts) -> String {
     s
 }
 
-/// Sigils, innermost first: code, then strong, then emph — the order the recursive walker
+/// Sigils, innermost first: code, then strong, then emph, the order the recursive walker
 /// produced for the nestings that actually occur.
 fn marked(text: &str, style: Style) -> String {
     let mut t = text.to_owned();
@@ -193,7 +193,7 @@ fn marked(text: &str, style: Style) -> String {
 
 /// Wrap to `width`, never narrower than this.
 ///
-/// A wrap width of zero puts every word on its own line, each carrying the full pad — so a
+/// A wrap width of zero puts every word on its own line, each carrying the full pad, so a
 /// wide indent does not merely look bad, it multiplies the output by the word count. The
 /// indent cap in [`TextOpts::indent_for`] is the primary bound; this is the floor that holds
 /// when indents nest or `width` is set very small.

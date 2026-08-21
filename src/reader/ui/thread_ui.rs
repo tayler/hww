@@ -3,8 +3,8 @@
 //! Traversal is **iterative**, matching `reader::thread_tree::dfs`: a pathological thread is
 //! untrusted input, and a recursive walk over one is a crash rather than a bad render.
 //!
-//! Indent is capped at [`ReadOpts::max_thread_indent`] — a 40-deep thread would otherwise
-//! render two pixels wide — and deep or very long subtrees start collapsed, so a huge thread
+//! Indent is capped at [`ReadOpts::max_thread_indent`] (a 40-deep thread would otherwise
+//! render two pixels wide), and deep or very long subtrees start collapsed, so a huge thread
 //! opens navigable instead of as forty screens of nesting.
 
 use crate::ir;
@@ -55,7 +55,7 @@ pub fn thread_ui(ui: &mut Ui, comments: &[ir::Comment], ctx: &mut RenderCtx<'_>)
 /// The collapse control, painted rather than typeset.
 ///
 /// A glyph would be simpler, but egui's embedded fonts are not guaranteed to carry any
-/// particular triangle — `▸` and `▾` both come out as tofu — and a reader that renders a box
+/// particular triangle (`▸` and `▾` both come out as tofu), and a reader that renders a box
 /// where its only structural control should be is broken in a way no test would catch. A shape
 /// is font-independent and scales with the reading size.
 fn disclosure(ui: &mut Ui, collapsed: bool, size: f32, color: egui::Color32) -> egui::Response {

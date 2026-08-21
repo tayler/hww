@@ -13,7 +13,7 @@
 //! and its result is thrown away. Every navigation mints a fresh [`ReqId`] and the UI drops any
 //! message whose id is not the current one. That is the entire stale-response defense, and it
 //! covers "the user hit back twice during a slow load". Do **not** introduce async to make
-//! cancellation real — it drags in tokio and rewrites `fetch.rs`, the file the charter guards
+//! cancellation real: it drags in tokio and rewrites `fetch.rs`, the file the charter guards
 //! most closely.
 //!
 //! # Panic containment
@@ -21,7 +21,7 @@
 //! Image decoding is untrusted-input parsing. "Treat a dead thread as a failed load" is not a
 //! mechanism here: each worker holds a *cloned* `Sender`, so an unwinding thread closes nothing
 //! and the UI would wait forever on a reply that never comes. Every job therefore runs under a
-//! [`ReplyGuard`] that emits a failure on unwind — which also covers a panic outside the decode
+//! [`ReplyGuard`] that emits a failure on unwind, which also covers a panic outside the decode
 //! call, unlike wrapping the decode in `catch_unwind`. The unwind still ends the thread, so
 //! [`RespawnOnPanic`] refills the pool slot; containing the reply and containing the pool are
 //! two jobs. Both depend on `panic = "unwind"`; a future `panic = "abort"` in
@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use url::Url;
 
 /// Four, because transfers are I/O-bound and the pool exists so a slow one cannot block a
-/// fast one. Decoding is serialized separately — see [`DECODE_LOCK`].
+/// fast one. Decoding is serialized separately (see [`DECODE_LOCK`]).
 const WORKERS: usize = 4;
 
 /// Decode is CPU-bound and each decode may hold up to the alloc ceiling in transient buffer,
@@ -65,13 +65,13 @@ pub enum Job {
     },
     /// An image subresource, on an explicit click only. `page` is the navigation it belongs to,
     /// so a result that arrives after the reader moved on is discarded like any other stale
-    /// reply. `referrer` is the page being read — see `fetch::Referer`.
+    /// reply. `referrer` is the page being read (see `fetch::Referer`).
     Image {
         req: ReqId,
         page: ReqId,
         /// The `src` exactly as `ir::Image` carries it. It travels with the job rather than
         /// being recovered from the response, because a redirect makes the fetched URL a
-        /// different string from the one the placeholder is keyed by — and then the picture
+        /// different string from the one the placeholder is keyed by, and then the picture
         /// arrives and nothing on screen changes.
         src: String,
         url: Url,
@@ -158,7 +158,7 @@ impl Drop for ReplyGuard {
 /// One pool worker, which replaces itself if it dies.
 ///
 /// [`ReplyGuard`] turns a panic into a failed tab, but the unwind continues out of the
-/// closure and takes the thread with it — and the receive loop lives *inside* that closure.
+/// closure and takes the thread with it, and the receive loop lives *inside* that closure.
 /// Nothing used to respawn, so each panic permanently cost a worker; after [`WORKERS`] of
 /// them the pool was empty, the last `Arc` on the job receiver dropped, and every subsequent
 /// `submit` failed silently and left the tab on `Page::Loading` forever. Containing the reply
@@ -275,7 +275,7 @@ impl Net {
     }
 
     pub fn submit(&self, job: Job) {
-        // A closed channel means every worker died — the *receiver* lives in the pool, not
+        // A closed channel means every worker died. The *receiver* lives in the pool, not
         // here, so holding the sender does not keep it open. `spawn_worker` refills the pool
         // on panic, so this should now be unreachable; dropping the job is still better than
         // a panic in a reader.

@@ -11,7 +11,7 @@
 //! Naming *this* module rather than `main.rs` strengthens the third. As an `eprintln!` in a
 //! driver, the notice was something a second driver could simply forget; as a value the one
 //! function owning the pipeline hands back before it dispatches, skipping it is structurally
-//! impossible. The alternative — "entry-point drivers only" — permits N drivers each
+//! impossible. The alternative ("entry-point drivers only") permits N drivers each
 //! re-implementing the notice, and every new one is a chance to drop it.
 
 use crate::fetch::{self, FetchError, Fetcher, Limits, Referer, Truncation};
@@ -57,7 +57,7 @@ impl std::fmt::Display for Notice {
 pub struct Provenance {
     pub requested: Url,
     pub rewritten_to: Option<Url>,
-    /// The request did not end on the host the rule aimed at. Not an error — but the rule is
+    /// The request did not end on the host the rule aimed at. Not an error, but the rule is
     /// dead, and saying so is the whole early-warning system, because a failed rewrite is
     /// never retried.
     pub rule_appears_dead: bool,
@@ -76,7 +76,7 @@ impl std::fmt::Display for Provenance {
         let dead = if self.rule_appears_dead {
             let to = self.rewritten_to.as_ref().and_then(Url::host_str);
             format!(
-                " | {} redirected to {} — rule appears dead",
+                " | {} redirected to {}, rule appears dead",
                 to.unwrap_or("?"),
                 self.final_url.host_str().unwrap_or("?")
             )
@@ -84,7 +84,7 @@ impl std::fmt::Display for Provenance {
             String::new()
         };
         // Truncation is fetched today and was never reported. Appending it here is a
-        // deliberate output change on exactly the pages whose output was a silent lie — and it
+        // deliberate output change on exactly the pages whose output was a silent lie, and it
         // hedges where the evidence hedges, because `len >= cap` alone cannot tell a body that
         // was cut from one that happened to end there.
         let truncated = match self.truncation {
@@ -122,21 +122,21 @@ pub enum LoadError {
     /// The response was not a web page.
     ///
     /// Without this, a PDF, a zip, or a bare image reaches `html::extract`, yields nothing,
-    /// and lands on "this page may require JavaScript" — a confident, wrong diagnosis, and the
+    /// and lands on "this page may require JavaScript": a confident, wrong diagnosis, and the
     /// worst kind, because it blames the site.
-    #[error("{content_type} — not a web page")]
+    #[error("{content_type} is not a web page")]
     NotWebPage { content_type: String },
 }
 
 /// What following a link should do, decided **before** anything is dispatched.
 ///
 /// `html::extract` absolutizes every href through `base.join`, which passes non-HTTP schemes
-/// through untouched — and nothing looked at what came back, because typing a URL made the
+/// through untouched, and nothing looked at what came back, because typing a URL made the
 /// question rare. Clicking one makes it routine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Navigate(Url),
-    /// hww does not hand a URL to a system handler — the same reason eframe's `links` feature
+    /// hww does not hand a URL to a system handler, the same reason eframe's `links` feature
     /// is off. Offer the text instead and let the user decide.
     OfferCopy {
         url: String,
@@ -160,19 +160,19 @@ pub fn classify_link(href: &str) -> Target {
         "http" | "https" => Target::Navigate(url),
         "mailto" => Target::OfferCopy {
             url: href.to_owned(),
-            note: "an email address — hww does not open a mail client",
+            note: "an email address (hww does not open a mail client)",
         },
         "tel" => Target::OfferCopy {
             url: href.to_owned(),
-            note: "a phone number — hww does not open a dialler",
+            note: "a phone number (hww does not open a dialler)",
         },
         "javascript" => Target::Refuse {
             url: href.to_owned(),
-            reason: "a javascript: link — there is no JavaScript here to run it".to_owned(),
+            reason: "a javascript: link (there is no JavaScript here to run it)".to_owned(),
         },
         "data" => Target::Refuse {
             url: href.to_owned(),
-            reason: "a data: link — hww will not render bytes a page inlines into a link"
+            reason: "a data: link (hww will not render bytes a page inlines into a link)"
                 .to_owned(),
         },
         other => Target::Refuse {
@@ -186,7 +186,7 @@ pub fn classify_link(href: &str) -> Target {
 ///
 /// Deliberately generous: an absent header, and anything `text/*`, passes through, because
 /// refusing on absence would break a great many pages and a `.txt` file is at least words.
-/// What it catches is the confident wrong diagnosis — a PDF, an archive, a bare image.
+/// What it catches is the confident wrong diagnosis: a PDF, an archive, or a bare image.
 fn is_web_page(content_type: Option<&str>) -> bool {
     let Some(ct) = content_type else {
         return true;
@@ -282,7 +282,7 @@ impl Session {
 }
 
 /// One image subresource. Bytes and their partial-ness; decoding is the reader's job, and
-/// deliberately not this module's — see `reader::image_decode` for why the only parser of
+/// deliberately not this module's; see `reader::image_decode` for why the only parser of
 /// untrusted binary input in this crate lives outside the feature-gated half.
 pub struct FetchedImage {
     pub bytes: Vec<u8>,
@@ -294,11 +294,11 @@ pub struct FetchedImage {
 impl Session {
     /// Fetch an image on behalf of `page`. Reached only from an explicit click.
     ///
-    /// `page` is the document being read, and only its **origin** is disclosed — see
+    /// `page` is the document being read, and only its **origin** is disclosed; see
     /// [`fetch::Referer::PageOrigin`] for the whole argument.
     ///
     /// `send_referer` is the settings toggle, and it is applied *here*, by choosing the
-    /// `Limits` — not by the caller counting differently. A setting that changes a report
+    /// `Limits`, not by the caller counting differently. A setting that changes a report
     /// rather than the request is the kind of no-op this project has already deleted once.
     pub fn fetch_image(
         &self,
@@ -365,7 +365,7 @@ mod tests {
         p.final_url = Url::parse("https://www.example.com/a").unwrap();
         assert!(
             p.to_string()
-                .contains("| alt.example.com redirected to www.example.com — rule appears dead |")
+                .contains("| alt.example.com redirected to www.example.com, rule appears dead |")
         );
     }
 

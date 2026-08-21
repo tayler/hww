@@ -6,7 +6,7 @@
 //! them in the same face does not.
 //!
 //! Handled here and never in the extractor. `html::extract` reports what the page contains,
-//! and "these two strings are the same headline" is a reading decision — a different renderer
+//! and "these two strings are the same headline" is a reading decision; a different renderer
 //! is entitled to a different answer, and a lossy extractor is not recoverable.
 
 use crate::ir;

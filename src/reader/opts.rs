@@ -1,4 +1,4 @@
-//! Reading style — the GUI's `render::TextOpts`.
+//! Reading style: the GUI's `render::TextOpts`.
 //!
 //! **This is the only legal home for width, colour, font, and spacing.** The IR carries no
 //! styling and never will; if you find yourself wanting a `color`, `width`, `align`, or
@@ -7,7 +7,7 @@
 //! characters and a terminal wrapped at 78 columns are different presentation decisions about
 //! the same document.
 //!
-//! No egui types appear in this file, so the default CI job — which never compiles egui —
+//! No egui types appear in this file, so the default CI job, which never compiles egui,
 //! still type-checks and tests it.
 
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,7 @@ pub enum FontChoice {
     /// egui's embedded monospace face. A whole page in it is a real preference, not a joke.
     Mono,
     // No `Serif`. egui's `default_fonts` ship no serif face, so the variant would be a setting
-    // with nothing behind it — the same reason there is no `justify` field. It arrives with the
+    // with nothing behind it, the same reason there is no `justify` field. It arrives with the
     // embedded face, and the two are one decision.
 }
 
@@ -27,7 +27,7 @@ pub enum FontChoice {
 pub enum Theme {
     Light,
     Dark,
-    /// Warm paper. Not a tint of `Light` — the whole point is a lower-contrast ground.
+    /// Warm paper. Not a tint of `Light`: the whole point is a lower-contrast ground.
     Sepia,
     /// Follow the desktop.
     System,
@@ -50,7 +50,7 @@ impl Theme {
 pub enum ImagePolicy {
     /// Show a one-line strip naming the host. Loads only on an explicit click or `i`.
     Placeholder,
-    /// Never offer to load. The strip still says an image was there — silently dropping
+    /// Never offer to load. The strip still says an image was there; silently dropping
     /// content is how a reader lies about a page.
     Never,
 }
@@ -59,7 +59,7 @@ pub enum ImagePolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReadOpts {
-    /// Reading measure in characters — the analogue of `render::TextOpts::width`. Typography's
+    /// Reading measure in characters, the analogue of `render::TextOpts::width`. Typography's
     /// answer is 66; 66–78 is the usable band.
     pub measure_chars: f32,
     /// A typographic baseline, set once. **Not** a hotkey: live resizing is egui's
@@ -102,7 +102,7 @@ impl ReadOpts {
     pub const MEASURE_MIN: f32 = 45.0;
     pub const MEASURE_MAX: f32 = 110.0;
 
-    /// `[` and `]`. hww's own reading knob — the one a browser does not have.
+    /// `[` and `]`. hww's own reading knob, the one a browser does not have.
     pub fn widen(&mut self) {
         self.measure_chars = (self.measure_chars + 4.0).min(Self::MEASURE_MAX);
     }
@@ -152,7 +152,7 @@ mod tests {
     }
 
     /// Settings round-trip through the on-disk JSON, and an older file missing a field still
-    /// loads — the reason for `#[serde(default)]`.
+    /// loads: the reason for `#[serde(default)]`.
     #[test]
     fn partial_settings_json_fills_in_defaults() {
         let o: ReadOpts = serde_json::from_str(r#"{"measure_chars": 80.0}"#).unwrap();

@@ -13,18 +13,18 @@ pub struct Palette {
     pub bg: Color32,
     /// Body text.
     pub fg: Color32,
-    /// Metadata, provenance, placeholders — present but not competing with the prose.
+    /// Metadata, provenance, and placeholders: present but not competing with the prose.
     pub dim: Color32,
     pub link: Color32,
     /// `Strong` is colour until an embedded bold face lands: egui's default fonts ship no
     /// bold and there is no synthetic bold, so weight is not available to ask for.
     pub strong: Color32,
     pub code_bg: Color32,
-    /// Rules, thread indent guides, block borders.
+    /// Rules, thread indent guides, and block borders.
     pub rule: Color32,
-    /// Chrome that must be noticed: the rewrite notice, error headings, the current find match.
+    /// Chrome that must be noticed: the rewrite notice, error headings, and the current find match.
     pub accent: Color32,
-    /// The other find matches — visible at a glance without competing with the current one.
+    /// The other find matches, visible at a glance without competing with the current one.
     pub find_bg: Color32,
     pub chrome_bg: Color32,
     pub selection: Color32,
@@ -115,8 +115,8 @@ pub fn mono_font(opts: &ReadOpts) -> FontId {
     FontId::new(opts.base_size_pt * 0.92, FontFamily::Monospace)
 }
 
-/// Chrome — status strip, URL bar, outline. Fixed relative to the body so a wide reading size
-/// does not turn the strip into a second column of prose.
+/// Chrome: status strip, URL bar, and outline. Fixed relative to the body so a wide reading
+/// size does not turn the strip into a second column of prose.
 pub fn chrome_font(opts: &ReadOpts) -> FontId {
     FontId::new(
         (opts.base_size_pt * 0.78).max(11.0),
@@ -151,7 +151,7 @@ pub fn line_height_px(opts: &ReadOpts) -> f32 {
 ///
 /// `measure_chars` is a count of characters, so it has to be turned into pixels by asking the
 /// font how wide its characters actually are. The average lowercase advance is the right proxy
-/// for a typographic measure — em width would overshoot badly on a proportional face.
+/// for a typographic measure; em width would overshoot badly on a proportional face.
 pub fn measure_px(ctx: &egui::Context, opts: &ReadOpts) -> f32 {
     const SAMPLE: &str = "abcdefghijklmnopqrstuvwxyz";
     let font = body_font(opts);
@@ -168,7 +168,7 @@ pub fn system_is_dark(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.raw.system_theme) == Some(egui::Theme::Dark)
 }
 
-/// Install the palette and metrics. Called every frame — cheap, and it means a theme or
+/// Install the palette and metrics. Called every frame; cheap, and it means a theme or
 /// measure change takes effect on the frame it happens rather than on the next navigation.
 pub fn apply(ctx: &egui::Context, opts: &ReadOpts) -> Palette {
     let pal = palette(opts.theme, system_is_dark(ctx));
@@ -206,7 +206,7 @@ pub fn apply(ctx: &egui::Context, opts: &ReadOpts) -> Palette {
     ]
     .into();
 
-    // Vertical spacing is the gap between blocks. Horizontal spacing is for *chrome* — prose
+    // Vertical spacing is the gap between blocks. Horizontal spacing is for *chrome*; prose
     // sets it to zero locally in `inline_ui`, because word spacing there comes from the text
     // itself and any widget spacing would double it.
     style.spacing.item_spacing = egui::vec2(6.0, snap(opts.base_size_pt * opts.paragraph_spacing));

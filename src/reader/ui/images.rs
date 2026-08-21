@@ -1,4 +1,4 @@
-//! Texture upload and the LRU. **No decoding happens here** — that is
+//! Texture upload and the LRU. **No decoding happens here**: that is
 //! `reader::image_decode`, deliberately outside this directory so it is tested rather than
 //! merely compiled.
 //!
@@ -14,7 +14,7 @@
 //! deliberate user action, the load is counted in the provenance strip, and the capability
 //! lives behind the `gui` feature, so the `hww` CLI retains compile-time absence of it.
 //!
-//! Never auto-load, never prefetch, never load on hover.
+//! Nothing is auto-loaded, prefetched, or loaded on hover.
 
 use crate::ir;
 use crate::reader::image_decode::Decoded;
@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 /// Textures held at once.
 ///
 /// Bounded because a photo-heavy page that filled an unbounded cache would be a GPU-memory
-/// problem driven by untrusted input — but not so tight that `I` on a page with thirty images
+/// problem driven by untrusted input, but not so tight that `I` on a page with thirty images
 /// silently reverts the first ones to placeholders while the reader is still scrolling toward
 /// them. Each texture is already downscaled to the reading column, so the ceiling is tens of
 /// megabytes, not hundreds.
@@ -45,7 +45,7 @@ pub struct Ready {
     pub height: u32,
     pub source_width: u32,
     pub source_height: u32,
-    /// Set when the bytes were incomplete. Always shown — a half-gray photograph the user
+    /// Set when the bytes were incomplete. Always shown: a half-gray photograph the user
     /// cannot tell from the real one is worse than no photograph.
     pub partial: Option<String>,
 }
@@ -141,7 +141,7 @@ impl ImageStore {
     /// `LRU_CAPACITY` images left the queue over capacity while requests were outstanding;
     /// the next `insert` then dropped the oldest, which was still `Loading`. That made
     /// `is_pending` false, so the placeholder offered itself again and a second click issued a
-    /// duplicate third-party request — counted twice in `hosts`, `loaded`, and
+    /// duplicate third-party request, counted twice in `hosts`, `loaded`, and
     /// `referer_requests`, which are the reader's account of what it disclosed. Skipping
     /// pending entries can leave `order` briefly over capacity; it drains as they resolve.
     fn evict(&mut self) {
@@ -166,7 +166,7 @@ enum Snapshot {
 
 /// The compact strip a figure or an inline image shows before it is loaded.
 ///
-/// One line, because no dimensions live in `ir::Image` — so a tall placeholder would reserve
+/// One line, because no dimensions live in `ir::Image`, so a tall placeholder would reserve
 /// the wrong box and shift the page when it filled. One line shifts by almost nothing, and a
 /// revisit reserves the right box from [`ImageStore::reserved`].
 pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
@@ -179,7 +179,7 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
         let label = if alt.is_empty() {
             "[image] not shown".to_owned()
         } else {
-            format!("[image] {alt} — not shown")
+            format!("[image] {alt} (not shown)")
         };
         ui.label(RichText::new(label).color(pal.dim).italics());
         return;
@@ -204,7 +204,7 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
         Snapshot::Failed(why) => {
             let mut retry = false;
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("[image] {why} — {host}")).color(pal.accent));
+                ui.label(RichText::new(format!("[image] {why}: {host}")).color(pal.accent));
                 retry = ui.small_button("retry").clicked();
             });
             if retry {

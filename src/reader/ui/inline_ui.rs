@@ -1,4 +1,4 @@
-//! `Vec<Run>` -> wrapped, selectable, clickable text.
+//! `Vec<Run>` -> wrapped, selectable, and clickable text.
 //!
 //! # The approach
 //!
@@ -11,7 +11,7 @@
 //! - *Wrapping quality.* `Label::layout_in_ui` has an explicit branch for wrapped
 //!   left-to-right layouts: it computes `first_row_indentation`, sets it as the first section's
 //!   `leading_space`, and merges one rect per row into a single `Response`. A label that starts
-//!   mid-line continues from that point and wraps at full width — exactly what flowed text
+//!   mid-line continues from that point and wraps at full width, exactly what flowed text
 //!   needs. (The branch is skipped for `WidgetText::Galley`, which is why nothing here hands
 //!   egui a pre-laid galley.)
 //! - *Selection across the paragraph.* `LabelSelectionState` is a `Context` plugin whose
@@ -26,7 +26,7 @@
 //! mitigation is one line: every section of every segment carries the same
 //! [`theme::line_height_px`] and the same `valign`.
 //!
-//! The other thing a single galley would buy is full justification, which this cannot do — so
+//! The other thing a single galley would buy is full justification, which this cannot do, so
 //! there is deliberately no `justify` field in `ReadOpts`. If justification is ever wanted
 //! badly enough it arrives together with the galley renderer, and the two are one decision.
 
@@ -78,7 +78,7 @@ impl Setting {
 /// Lay out one run list. Actions and hover/focus state land on `ctx`.
 pub fn runs_ui(ui: &mut Ui, runs: &[Run], set: &Setting, ctx: &mut RenderCtx<'_>) {
     ui.horizontal_wrapped(|ui| {
-        // Word spacing comes from the text itself — `flatten` preserves boundary whitespace
+        // Word spacing comes from the text itself; `flatten` preserves boundary whitespace
         // for exactly this reason. Any horizontal item spacing here would double it.
         ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
         ui.style_mut().wrap_mode = Some(TextWrapMode::Wrap);
@@ -183,7 +183,7 @@ fn format_for(style: Style, set: &Setting, pal: &Palette, line_height: f32) -> T
         font_id: font,
         // egui's default fonts ship no bold face and there is no synthetic bold, so weight is
         // not available to ask for. Colour is the honest stand-in until a real face is
-        // embedded — at which point this line is the only one that changes.
+        // embedded, at which point this line is the only one that changes.
         color: if style.strong && set.allow_strong_color {
             pal.strong
         } else {
@@ -202,7 +202,7 @@ fn format_for(style: Style, set: &Setting, pal: &Palette, line_height: f32) -> T
         // TOP, everywhere, and the choice is load-bearing. epaint positions a glyph at
         // `font_ascent + valign_factor * (row_height - section_line_height)`. With TOP the
         // factor is zero, so every section sits on the same baseline *no matter what line
-        // height it carries* — which is what lets the link sections below run a tighter line
+        // height it carries*, which is what lets the link sections below run a tighter line
         // height purely to move their underline, without moving the words.
         valign: Align::TOP,
         ..Default::default()
@@ -220,7 +220,7 @@ fn link_ui(
     let mut job = new_job();
     let underline = Stroke::new(1.0, ctx.pal.link);
     // epaint draws an underline at the bottom of the glyph's *logical* rect, whose height is
-    // the section's line height — so at a reading line height of 1.55 the rule lands most of a
+    // the section's line height, so at a reading line height of 1.55 the rule lands most of a
     // line below the words, close enough to the next row to read as a stray horizontal line.
     // A tighter line height on the link's own sections puts it back under the text, and
     // `valign: TOP` above is what keeps that from also moving the text.
@@ -260,7 +260,7 @@ fn link_ui(
     ctx.job_has_current_match = false;
     let resp = ui.add(Label::new(job).wrap().sense(Sense::click()));
 
-    // `Sense::click()` alone does not put a widget in egui's tab order — focusability is a
+    // `Sense::click()` alone does not put a widget in egui's tab order; focusability is a
     // separate property. Only links ask for it; if plain text did, Tab would walk every label
     // on the page.
     ui.memory_mut(|m| m.interested_in_focus(resp.id, ui.layer_id()));
@@ -306,8 +306,8 @@ fn link_ui(
 
 /// A one-line strip standing in for an image, used by figures and inline images alike.
 ///
-/// Deliberately compact: no dimensions live in `ir::Image` — the extractor does not capture
-/// them and adding them is contract creep in the direction the charter guards — so a tall
+/// Deliberately compact: no dimensions live in `ir::Image` (the extractor does not capture
+/// them and adding them is contract creep in the direction the charter guards), so a tall
 /// placeholder would reserve the wrong box and shift the page when it loaded. A single line
 /// shifts by almost nothing, and once an image *has* been decoded its dimensions are cached
 /// per `src`, so a revisit reserves the right box for free.

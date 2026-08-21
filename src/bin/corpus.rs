@@ -2,7 +2,7 @@
 //!
 //! Replaces the Phase 0 Python sampler. Carries forward its one durable finding: **sample by
 //! recency from the visits table, never by `visit_count`.** Frequency ranking surfaces search
-//! engines, webmail, and dashboards — the pages a reader never needs — while the articles
+//! engines, webmail, and dashboards (the pages a reader never needs), while the articles
 //! actually under test are read once and sit at `visit_count = 1`.
 //!
 //! Classification here is purely structural. No host lists: what a given person reads is not

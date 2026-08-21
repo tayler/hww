@@ -1,8 +1,8 @@
-# hww — a quiet-web client
+# hww: a quiet-web client
 
 [![CI](https://github.com/tayler/hww/actions/workflows/ci.yml/badge.svg)](https://github.com/tayler/hww/actions/workflows/ci.yml)
 
-A reading client for the non-app web: stripped HTML, feeds, gemini, gopher, local Markdown.
+A reading client for the non-app web: stripped HTML, feeds, gemini, gopher, and local Markdown.
 A browser without JavaScript, CSS, ads, third-party requests, or cookies.
 
 It is a *second* browser, not a Chrome replacement. Single-page apps render blank, and that is
@@ -31,7 +31,7 @@ cargo run --features gui --bin hww-gui -- [--no-rewrite] <url> # the reader
 | `render` | Plain text |
 | `ir` | Document / Block / Inline / Thread / Comment |
 | `reader` | Reading model: inline runs, outline, history, threads, image decoding |
-| GUI | egui reader — links, back/forward, outline, find, threads, images. **Linux verified**; macOS and Windows are believed to build and are not tested |
+| GUI | egui reader: links, back/forward, outline, find, threads, images. **Linux verified**; macOS and Windows are believed to build and are not tested |
 | feeds, gemini, gopher, markdown | not started |
 | TUI, archive | not started |
 
@@ -41,7 +41,7 @@ Against 150 real URLs sampled from browsing history ([full findings](docs/phase0
 
 - **72%** of document-shaped pages are readable with zero JavaScript
 - **59%** of pages extract at or above trafilatura's output, 21% below
-- On a threaded discussion page: **19,180 chars extracted vs trafilatura's 341** —
+- On a threaded discussion page: **19,180 chars extracted vs trafilatura's 341**;
   article extraction cannot represent a thread, so threads get their own algorithm
 - On the one JS-gated discussion site in that sample: **0 chars, then 8,331** once a per-site
   rule reaches the operator's own server-rendered domain
@@ -55,18 +55,18 @@ site among its JS-only losses, which is why per-site rules are a feature rather 
 The table is compiled in and deliberately tiny. A rule ships only if it is the **same
 operator** as the host it replaces, **cites** a measured failure in the findings doc, stays
 **offline** (never fetched, never auto-updated), and is **reported** on stderr before the
-request goes out — hww never silently contacts a host you did not name, and a fetch that fails
+request goes out; hww never silently contacts a host you did not name, and a fetch that fails
 or hangs cannot swallow the notice. Third-party frontend proxies are expressible but
 will never be builtin: they move your reading to an unrelated operator, which is the thing
 this client exists not to do.
 
 `src/rewrite.rs` is the only file in the crate that contains a hostname, and the module graph
-keeps it that way — it imports no extractor, and nothing imports it but `src/session.rs`, the
+keeps it that way: it imports no extractor, and nothing imports it but `src/session.rs`, the
 one function that owns the pipeline and reports the rewrite before it dispatches.
 
 ## Layout
 
-    src/ir.rs      the IR — no styling
+    src/ir.rs      the IR (no styling)
     src/fetch.rs   HTTP with privacy as code
     src/rewrite.rs per-site rules (a JS-gated host -> its own server-rendered alternate)
     src/session.rs the pipeline: rewrite -> fetch -> decode -> extract, plus provenance
@@ -85,25 +85,25 @@ one function that owns the pipeline and reports the rewrite before it dispatches
 
 Keyboard first, but nothing is keyboard-only: `?` lists the keys, and the status strip along
 the bottom carries back/forward and a clickable URL so a mouse alone can navigate. That strip
-never hides — the URL bar, outline, find bar, and help all dismiss on `Esc`, but a rewrite
+never hides: the URL bar, outline, find bar, and help all dismiss on `Esc`, but a rewrite
 notice has to be on screen *before* the request goes out, so the strip stays.
 
 One centred reading column, measured in characters (`[` and `]`). Zoom is egui's own, so
 `Ctrl`+`+`/`-`/`0`, `Ctrl`+wheel, and trackpad pinch behave the way a browser does. Themes are
 light, sepia, dark, and follow-the-system (`d`).
 
-**Images are placeholders that name their host** — `[image] load from cdn.example.net` — and
-load only on an explicit click, never automatically, never on hover, never prefetched. Each
-load is counted in the status strip alongside cookie attempts, and nothing is written to disk.
-Image requests, and only image requests, carry an origin-only `Referer`; documents carry none.
-See AGENTS.md for why that one header is worth its exception.
+**Images are placeholders that name their host** (`[image] load from cdn.example.net`), and
+load only on an explicit click. They are never loaded automatically, on hover, or in advance.
+Each load is counted in the status strip alongside cookie attempts, and nothing is written to
+disk. Image requests, and only image requests, carry an origin-only `Referer`; documents carry
+none. See AGENTS.md for why that one header is worth its exception.
 
 ## Building a corpus
 
     cargo run --features tools --bin corpus -- --limit 150 --per-host 3 --out corpus.jsonl
 
 Finds a Firefox profile, stages a copy (the DB is locked while the browser runs), and samples
-document-shaped URLs. **Sampled by recency, never by `visit_count`** — frequency ranking
+document-shaped URLs. **Sampled by recency, never by `visit_count`**; frequency ranking
 surfaces search engines, webmail, and dashboards, while the articles under test are read once.
 
 Its output is real browsing history. It is gitignored, and it should stay that way.

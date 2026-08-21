@@ -3,22 +3,22 @@
 Guidance for Claude Code and other agents working in this repository.
 
 `README.md` carries the status table, module layout, and Phase 0/2 measurements; this file
-carries what it does not — the CI gates, the extraction order, the invariants, and the
+carries what it does not: the CI gates, the extraction order, the invariants, and the
 decisions measurement has already closed. Reference symbols (`html::extract`), not line
 numbers: the files move.
 
 ## What this is
 
-A reading client for the non-app web: stripped HTML, feeds, gemini, gopher, local Markdown.
-No JavaScript, no CSS cascade, no ads, no third-party requests, no cookies. It is a *second*
-browser, not a Chrome replacement — single-page apps render blank, and that is expected. The
-HTML path works end to end, in a CLI that prints text and in a keyboard-driven reading GUI;
-feeds, gemini, gopher, Markdown, TUI, and archive are not started.
+A reading client for the non-app web: stripped HTML, feeds, gemini, gopher, and local Markdown.
+JavaScript, the CSS cascade, ads, third-party requests, and cookies are all absent. It is a
+*second* browser, not a Chrome replacement; single-page apps render blank, and that is
+expected. The HTML path works end to end, in a CLI that prints text and in a keyboard-driven
+reading GUI; feeds, gemini, gopher, Markdown, TUI, and archive are not started.
 
-The archive — saving a page and reading it back offline — is deliberately **not** started. It
-is a second doctrine: reading history at rest, a directory to protect, an eviction policy, a
-schema to version. Nothing in the reader writes page content to disk, and the only thing that
-survives a run is `settings.json`.
+The archive (saving a page and reading it back offline) is deliberately **not** started. It
+is a second doctrine: reading history at rest, a directory to protect, an eviction policy,
+and a schema to version. Nothing in the reader writes page content to disk, and the only
+thing that survives a run is `settings.json`.
 
 ## Commands
 
@@ -26,7 +26,7 @@ survives a run is `settings.json`.
     cargo run --features gui --bin hww-gui -- <url>       # the reading GUI
     cargo test                                            # synthetic fixtures; no network
 
-CI gates (`.github/workflows/ci.yml`) — two jobs, five commands, all must pass:
+CI gates (`.github/workflows/ci.yml`). Two jobs run five commands, and all five must pass:
 
     cargo fmt --all -- --check
     cargo clippy --all-targets --locked -- -D warnings    # warnings are errors
@@ -35,7 +35,7 @@ CI gates (`.github/workflows/ci.yml`) — two jobs, five commands, all must pass
     cargo test --locked --features gui,tools
 
 The first job never compiles egui; keep it that way, and keep it fast. The second uses
-**explicit features, never `--all-features`** — that would silently opt into whatever anyone
+**explicit features, never `--all-features`**; that would silently opt into whatever anyone
 adds later, the opposite of the auditability posture. No test may call `eframe::run_native`.
 Neither job installs an apt package, and neither should need to: every native library in this
 graph is opened at runtime rather than linked at build time.
@@ -71,7 +71,7 @@ and `session::Loaded` and touches no extractor.
 
 `src/reader/` splits by *what a test can reach*, not by "gui vs non-gui files":
 
-    reader/opts.rs         ReadOpts — the GUI's TextOpts. No egui types.
+    reader/opts.rs         ReadOpts: the GUI's TextOpts. No egui types.
     reader/inline.rs       Inline tree -> flat Vec<Run>. The one styled flatten.
     reader/outline.rs      headings -> outline; level normalization; fragment slugs
     reader/history.rs      back/forward over a cursor
@@ -91,35 +91,35 @@ covers *text itself*: `ir::plain_text` is the one presentation-neutral flatten, 
 `reader::inline::flatten` is the one styled one, with `render::inline_text` built on top of it.
 Four walkers disagreeing about where an emphasis boundary falls is a bug nobody finds.
 
-**Extraction order in `html::extract`** — easy to break, and the merge is load-bearing:
+**Extraction order in `html::extract`.** Easy to break, and the merge is load-bearing:
 
 1. Score for a content root, map it to blocks.
 2. Run `thread::extract_thread`. The thread *replaces* the document if it is longer; it is
    *appended* if it exceeds 200 chars. The append branch is what recovers comment trees the
-   thread detector under-counts — see Closed decisions.
+   thread detector under-counts (see Closed decisions).
 3. Fall back to `<body>` only if the result is still under 200 chars. This bleeds navigation,
    but a thin page beats a blank one.
 
 ## Invariants
 
 **No styling in the IR.** No color, font, width, alignment, or spacing fields in `src/ir.rs`,
-ever. Wanting one means the answer is a renderer setting — `render::TextOpts` for the text
+ever. Wanting one means the answer is a renderer setting: `render::TextOpts` for the text
 renderer, `reader::opts::ReadOpts` for the GUI. `reader/ui/theme.rs` is the only file in the
 crate where a `Color32` appears, and that is a property worth keeping greppable. Same for
 `Block::Table`: simple grid only, no colspan/rowspan, because layout tables are precisely what
-this client refuses to reproduce. And no dimensions on `ir::Image` — the extractor does not
+this client refuses to reproduce. And no dimensions on `ir::Image`: the extractor does not
 capture them, so the reader reserves layout from what it has actually decoded instead.
 
 **Privacy is compile-time absence, not policy.** `reqwest` is built with
-`default-features = false`, so no cookie jar exists — the capability is absent, not merely
+`default-features = false`, so no cookie jar exists: the capability is absent, not merely
 unused. Alongside it in `src/fetch.rs`: `referer(false)`, manual redirect handling so every
-hop is inspected, https→http downgrade refused, 5 MB body cap, 5 redirect cap, 15 s timeout.
-Cookie attempts are counted for reporting and never stored. Do not add a dependency or feature
-flag that restores any of these capabilities.
+hop is inspected, https→http downgrade refused, 5 MB body cap, 5 redirect cap, and 15 s
+timeout. Cookie attempts are counted for reporting and never stored. Do not add a dependency
+or feature flag that restores any of these capabilities.
 
 **A read-timeout is a bot-block signal, not a network fault.** Phase 0 measured bot detection
 failing as a silent hang rather than a 403. Keep `FetchError::LikelyBlocked` distinct from
-generic transport errors — and keep it distinct from `FetchError::Timeout`, which is the same
+generic transport errors, and keep it distinct from `FetchError::Timeout`, which is the same
 event on a *subresource*, where the finding does not apply. 10 MB inside 15 s needs 5.3 Mbit/s
 sustained; calling a slow CDN a bot-block is the same mistake pointing the other way.
 `Limits::timeout_is_block` is where the two part company.
@@ -133,37 +133,37 @@ counted in the status strip alongside cookie attempts, and nothing is ever auto-
 prefetched, or loaded on hover. `I` (load all) still names the distinct hosts first. No image
 touches disk.
 
-**`referer(false)` remains** — reqwest never attaches a Referer on its own, on any request or
+**`referer(false)` remains.** `reqwest` never attaches a Referer on its own, on any request or
 any redirect hop. Image subresource requests, and only those, set an explicit origin-only
 `Referer` naming the page being read: scheme and host, never the path, built from
 `Url::origin()` so no code path can emit a full URL even by mistake. **Document fetches carry
 no Referer, ever.**
 
 This buys hotlink checks, which the client cannot otherwise pass, and the reason is a failure
-it cannot otherwise detect: hotlink protection that answers 403 degrades safely — no picture,
-visible failure — while hotlink protection that answers **200 with a substitute image** is
+it cannot otherwise detect: hotlink protection that answers 403 degrades safely (no picture,
+visible failure), while hotlink protection that answers **200 with a substitute image** is
 indistinguishable from the real one. No status code, decode check, or heuristic available to
 us can tell them apart, and a reader that shows a hostile picture and calls it the article's
 photograph has failed worse than one that shows no picture. Sending the origin removes the
 trigger; sending it only after a 403 cannot, because there is no 403 to react to. The origin
-adds nearly nothing to what the request already discloses — the CDN inferred the referring
-site from the path before we said a word — while the *path*, which is the real leak, is never
+adds nearly nothing to what the request already discloses (the CDN inferred the referring
+site from the path before we said a word), while the *path*, which is the real leak, is never
 sent. Reported in the status strip, and disableable in the settings file, accepting the
 breakage.
 
 **`src/rewrite.rs` is the only file in the crate that contains a hostname.** `html.rs` scores
 subtrees, `thread.rs` groups siblings by class signature, `bin/corpus.rs` classifies by URL
-shape — none of them know a domain name. Nothing imports `rewrite` except `src/session.rs`, and
+shape; none of them know a domain name. Nothing imports `rewrite` except `src/session.rs`, and
 `rewrite` imports no extractor. `session::load` owns the whole pipeline, so the notice is a value
-it hands back before it dispatches rather than an `eprintln!` a second driver could forget — the
+it hands back before it dispatches rather than an `eprintln!` a second driver could forget; the
 rule is structural, not a convention. A builtin rule ships only if all four hold:
 
 1. **Same operator.** The target host is run by the same entity as the source. A third-party
-   frontend proxy relocates the reader onto an unrelated party — exactly the "no third-party
+   frontend proxy relocates the reader onto an unrelated party, exactly the "no third-party
    requests" line this client exists to hold. Never builtin.
 2. **Cited.** The rule names a measured failure in `docs/phase0-findings.md`. No speculative
    entries, no curated directory of the web.
-3. **Offline.** Compiled in, never fetched, never auto-updated — a remotely updated rule list
+3. **Offline.** Compiled in, never fetched, never auto-updated: a remotely updated rule list
    is a channel that reports what you read.
 4. **Reported.** Every applied rule prints on stderr *before* the request goes out, so a fetch
    that fails or hangs cannot swallow it. hww never silently contacts a host the user did not
@@ -175,13 +175,13 @@ passed through untouched, first match wins and applies exactly once.
 
 **Never commit corpus output.** `corpus.jsonl`, `urls.jsonl`, `fetched.jsonl`, `signals.jsonl`,
 `extract.json`, `cache/`, and `extracted/` are somebody's real browsing history. They are
-gitignored and must stay that way — do not un-ignore them, and do not paste their contents
+gitignored and must stay that way. Do not un-ignore them, and do not paste their contents
 into code, tests, docs, or commit messages, or name hosts drawn from them. The one builtin
 rewrite rule is the deliberate, charter-gated exception: a rule cited in the findings doc, not
 a host lifted from a sample.
 
 **Sample by recency, never `visit_count`.** Frequency ranking surfaces search engines, webmail,
-and dashboards — the pages a reader never needs — while the articles under test are read once
+and dashboards (the pages a reader never needs), while the articles under test are read once
 and sit at `visit_count = 1`.
 
 **`Cargo.lock` is committed.** This crate ships binaries.
@@ -191,13 +191,13 @@ and sit at `visit_count = 1`.
 Measured already. Do not re-propose without new measurement.
 
 **Per-site extraction hints (`Hints`, `extract_with`, `force_thread`) were built and removed.**
-Forcing the thread path on a comment page looks obviously right — a comment page *is* a
-discussion — and it measured 2,254 chars against 8,331 unhinted on identical bytes. The thread
+Forcing the thread path on a comment page looks obviously right (a comment page *is* a
+discussion), and it measured 2,254 chars against 8,331 unhinted on identical bytes. The thread
 detector finds 13 of 61 comments, because replies nest in child containers rather than sitting
 as siblings; the article path picks up the whole comment tree, and the unhinted merge then
 appends the detected thread to it. Forcing the thread throws the larger result away, and the
 failure is invisible from outside: the page still renders as a clean, correctly attributed
-discussion, just a much shorter one. The machinery was deleted rather than switched off —
+discussion, just a much shorter one. The machinery was deleted rather than switched off:
 mechanism with no caller. The per-site layer rewrites URLs and does nothing else.
 `docs/phase0-findings.md`, Phase 2.
 
@@ -205,39 +205,39 @@ mechanism with no caller. The per-site layer rewrites URLs and does nothing else
 rewrite: a rewrite gets the bytes, extraction still loses the tree.
 
 **No config file, and no fallback when a rewrite fails.** A request that does not end on the
-host it was rewritten to is reported as a dead rule on stderr — the early warning that stands
+host it was rewritten to is reported as a dead rule on stderr: the early warning that stands
 in for a retry until one is measured to be needed.
 
 ## Testing
 
 Regression cover is synthetic `#[cfg(test)]` fixtures inside each module (`src/html.rs`,
-`src/fetch.rs`, `src/rewrite.rs`, and every module under `src/reader/` that is not `ui/`) — no
+`src/fetch.rs`, `src/rewrite.rs`, and every module under `src/reader/` that is not `ui/`): no
 network and no corpus, so CI can run them. The reader's split exists for this: everything
 decidable without an `egui::Context` is tested, and only chrome, widget dispatch, and texture
 upload are merely compiled. Tests worth keeping named:
 
-- `ir_carries_no_styling` — the executable form of the no-styling invariant. A change that
+- `ir_carries_no_styling`: the executable form of the no-styling invariant. A change that
   makes this test awkward is a signal, not a test to relax.
-- `comment_class_is_not_treated_as_chrome` — comment bodies stripped as chrome.
-- `lookalike_host_does_not_match`, `rule_host_as_a_prefix_does_not_match` — the label-boundary
+- `comment_class_is_not_treated_as_chrome`: comment bodies stripped as chrome.
+- `lookalike_host_does_not_match`, `rule_host_as_a_prefix_does_not_match`: the label-boundary
   safety property, which is the whole safety story of the rewrite layer.
-- `builtin_table_is_sound` — guards the shipped rule table against silent rot: normalized
-  hosts, no scheme downgrade, idempotence, no unreachable rules.
-- `flatten_reproduces_the_old_markdown_exactly` (`src/render.rs`) — holds a verbatim copy of
+- `builtin_table_is_sound` guards the shipped rule table against silent rot: normalized
+  hosts, no scheme downgrade, idempotence, and no unreachable rules.
+- `flatten_reproduces_the_old_markdown_exactly` (`src/render.rs`) holds a verbatim copy of
   the recursive `inline_text` that `reader::inline::flatten` replaced, and runs both over every
   inline shape the extractor produces. It is the entire safety net for building the text
   renderer on top of the GUI's flatten, and `the_only_divergences_are_the_documented_ones`
   pins the two normalizations that are deliberate.
-- `referer_is_origin_only_and_never_carries_a_path` (`src/fetch.rs`) — the executable form of
+- `referer_is_origin_only_and_never_carries_a_path` (`src/fetch.rs`): the executable form of
   the Referer amendment. If it fails, the client is telling a CDN which article is being read.
 - `a_jpeg_truncated_at_half_still_renders_and_says_so` and
-  `truncated_png_gif_and_webp_refuse_rather_than_half_decode` (`src/reader/image_decode.rs`) —
+  `truncated_png_gif_and_webp_refuse_rather_than_half_decode` (`src/reader/image_decode.rs`):
   the partial-render matrix as a test rather than a paragraph.
-- `whitespace_between_inline_elements_is_a_word_boundary` (`src/html.rs`) — markup indentation
+- `whitespace_between_inline_elements_is_a_word_boundary` (`src/html.rs`): markup indentation
   puts a whitespace-only text node between adjacent inline elements constantly, and dropping it
   welded two words into one.
 - `a_pathologically_deep_thread_builds_and_traverses_completely`
-  (`src/reader/thread_tree.rs`) — a hostile thread is untrusted input, so the traversal is
+  (`src/reader/thread_tree.rs`): a hostile thread is untrusted input, so the traversal is
   iterative.
 
 `rewrite`'s mechanism tests run against a `FIXTURE` table rather than the shipped `RULES`, so
@@ -248,7 +248,7 @@ deliberately absent from this repo. It is not a test and CI does not run it.
 
 ## Portability
 
-Linux, macOS, and Windows from one source tree — but **only Linux is verified**, and the gap
+Linux, macOS, and Windows from one source tree, but **only Linux is verified**, and the gap
 between "portable by construction" and a claim worth making is recorded here so it stays a
 deferral rather than becoming an assumption.
 
@@ -265,7 +265,7 @@ rather than to an error.
 `macos-latest`/`windows-latest` matrix running clippy with no test step. Deferred: it costs CI
 minutes on every push to guard platforms nobody is running yet, and the honest sequence is to
 make the Linux build good first. The cost is that a portability break lands silently and is
-found late, by whoever first tries to build on a Mac — acceptable only while that person is
+found late, by whoever first tries to build on a Mac; acceptable only while that person is
 nobody. Revisit the moment anyone runs hww off Linux.
 
 **`Modifiers::COMMAND`, never a literal Ctrl.** It resolves to Cmd on macOS and Ctrl
@@ -278,13 +278,13 @@ everywhere else. Back and forward are the one place the platforms genuinely disa
 Real, and worth knowing before re-discovering them:
 
 - **egui's embedded fonts have no arrows.** `→` renders as tofu, though `←`, `↑`, and `↓` do
-  not — which is why the help table is asymmetric on purpose. Prime marks (`′ ″`) are missing
+  not, which is why the help table is asymmetric on purpose. Prime marks (`′ ″`) are missing
   too, so coordinates on some pages read as boxes. The fix is the same embedded-face work that
   `Strong` needs, and until then no chrome string may contain `→`.
 - **`Strong` is colour, not weight.** `default_fonts` ship no bold face and egui synthesizes
   none. `theme::Palette::strong` is the whole implementation, and it is the one line that
   changes when a real face is embedded.
-- **Nested replies in `thread.rs` are still under-counted** — see Closed decisions. The reader
+- **Nested replies in `thread.rs` are still under-counted** (see Closed decisions). The reader
   reconstructs whatever tree extraction hands it; it cannot recover replies extraction lost.
 - **No justification, and no `justify` setting.** One `Label` per segment cannot justify. The
   setting is deliberately absent rather than present and inert: if justification is ever wanted
@@ -293,5 +293,5 @@ Real, and worth knowing before re-discovering them:
 ## Style
 
 Edition 2024; let-chains (`if let ... && let ...`) are in use. Module-level `//!` doc comments
-carry the *why* and are the primary record — extend them rather than duplicating rationale
+carry the *why* and are the primary record; extend them rather than duplicating rationale
 here. Clippy runs with `-D warnings`, so land code clean.

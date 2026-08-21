@@ -11,7 +11,7 @@ use crate::ir;
 pub struct OutlineEntry {
     /// Index into `doc.blocks`, so jumping is a scroll and never a second traversal.
     pub block: usize,
-    /// 1-based, normalized and capped — see [`build`].
+    /// 1-based, normalized and capped (see [`build`]).
     pub level: u8,
     pub text: String,
     /// The heading text as an anchor slug, for `#fragment` matching.
@@ -50,7 +50,7 @@ pub fn build(blocks: &[ir::Block]) -> Vec<OutlineEntry> {
         .collect()
 }
 
-/// Lowercase, non-alphanumerics to hyphens, runs collapsed, ends trimmed.
+/// Lowercase, with non-alphanumerics turned to hyphens, runs collapsed, and ends trimmed.
 ///
 /// This is the shape nearly every CMS derives its anchor ids from, which is the entire reason
 /// fragment matching works at all.
@@ -75,7 +75,7 @@ pub fn slugify(s: &str) -> String {
 
 /// Which outline entry a `#fragment` refers to, if any.
 ///
-/// There are no block ids in the IR, so this cannot resolve exactly — and adding ids to
+/// There are no block ids in the IR, so this cannot resolve exactly, and adding ids to
 /// `ir::Block` to make a heuristic exact is contract creep in the direction the charter guards.
 /// A miss is reported in the status strip rather than silently doing nothing, which is the
 /// difference between a heuristic and a lie.
@@ -89,7 +89,7 @@ pub fn find_fragment<'a>(outline: &'a [OutlineEntry], fragment: &str) -> Option<
         .find(|e| e.slug == want)
         // Anchors are routinely the heading's slug with a numeric or hash suffix. A heading
         // with no alphanumerics at all ("***", "---") slugifies to the empty string, and an
-        // empty prefix matches *every* fragment — which turned "no section matching #x" into
+        // empty prefix matches *every* fragment, which turned "no section matching #x" into
         // a confident scroll to the wrong block. Prefix matching needs a prefix.
         .or_else(|| {
             outline
@@ -155,7 +155,7 @@ mod tests {
     }
 
     /// A heading with no alphanumerics ("***", "---", an em dash) slugifies to the empty
-    /// string, and `want.starts_with("")` is true for every fragment — so the reader scrolled
+    /// string, and `want.starts_with("")` is true for every fragment, so the reader scrolled
     /// confidently to the wrong block instead of reporting a miss. The module doc calls that
     /// difference the one between a heuristic and a lie.
     #[test]

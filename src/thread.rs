@@ -1,4 +1,4 @@
-//! Thread extraction — the second content algorithm.
+//! Thread extraction: the second content algorithm.
 //!
 //! Article extraction picks the single best subtree. A discussion has no single best
 //! subtree: the content is N sibling subtrees, and scoring will happily return one comment
@@ -83,7 +83,7 @@ fn best_group<'a>(html: &'a Html) -> Option<Vec<ElementRef<'a>>> {
             continue;
         };
         let sig = signature(&el);
-        // A bare tag with no classes is too weak a signal — every <li> on the page would match.
+        // A bare tag with no classes is too weak a signal; every <li> on the page would match.
         if sig.ends_with('.') {
             continue;
         }
@@ -206,7 +206,7 @@ fn collect(node: NodeRef<'_, Node>, out: &mut String) {
 
 /// Sum of text in a block list, for deciding thread-vs-article.
 ///
-/// One of the three shared text-length counters — see `AGENTS.md`. It used to build a
+/// One of the three shared text-length counters (see `AGENTS.md`). It used to build a
 /// throwaway `Document` per comment just to reach `text_len`, which cloned every block tree
 /// it measured.
 pub fn comments_text_len(cs: &[Comment]) -> usize {

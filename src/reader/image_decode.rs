@@ -3,7 +3,7 @@
 //! The placement is the point. Putting this under `ui/` would have made the highest-risk code
 //! the one code no test ever runs. Format sniffing, the alloc and dimension ceilings, the
 //! truncated-JPEG path, and downscaling are all decidable from a `&[u8]` and a target width,
-//! so they are testable headlessly — including the partial-render matrix below, which is a
+//! so they are testable headlessly, including the partial-render matrix below, which is a
 //! regression test rather than a footnote. `ui/images.rs` keeps only what genuinely needs an
 //! `egui::Context`: upload and the texture LRU.
 //!
@@ -19,7 +19,7 @@
 //!    `html::extract` renders what it has rather than refusing, so images behaving the same
 //!    way is consistency, not a special case.
 //! 3. Sniff the format from the bytes with `with_guessed_format`, **never** from
-//!    `Content-Type` — a header is a claim, and this is the one place a wrong claim is
+//!    `Content-Type`: a header is a claim, and this is the one place a wrong claim is
 //!    expensive.
 //! 4. [`DecodeLimits`], enforced through `image`'s own `Limits`: 8192 px per side and a
 //!    256 MiB allocation ceiling.
@@ -30,7 +30,7 @@
 //!
 //! At 64 MiB the pixel limit was dead code: 8192x8192 RGBA is 256 MiB, four times that
 //! ceiling, so allocation always bound first and 8192 px never fired. 64 MiB is exactly
-//! 4096x4096. Raising the allocation ceiling is what makes the pixel limit the real limit —
+//! 4096x4096. Raising the allocation ceiling is what makes the pixel limit the real limit,
 //! the one that reads as a deliberate choice.
 //!
 //! # Partial images
@@ -42,7 +42,7 @@
 //! | JPEG | decodes | rows up to the last complete MCU are real, the rest is neutral gray; dimensions intact |
 //! | PNG / GIF / WebP | `unexpected end of file` | chunk CRCs and container framing refuse |
 //!
-//! So the rule is *render what decodes*: JPEG — the dominant format for article photography —
+//! So the rule is *render what decodes*: JPEG, the dominant format for article photography,
 //! gets the half-loaded picture for free, and the other three fall back to a labelled failure.
 //! Recovering rows from a partial PNG means dropping to the `png` crate's streaming reader, a
 //! second decode path for the minority case. **Not worth it**, and recorded here so it is not
@@ -64,7 +64,7 @@ pub const MAX_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeLimits {
     /// The reading column, in physical pixels. Anything wider is downscaled *before* it
-    /// becomes a texture — without this, "load images" on a photo-heavy page is a GPU-memory
+    /// becomes a texture; without this, "load images" on a photo-heavy page is a GPU-memory
     /// denial of service driven by untrusted input.
     pub max_width: u32,
     pub max_dimension: u32,
@@ -156,7 +156,7 @@ pub fn decode(
     let format = reader.format().ok_or(DecodeError::UnknownFormat)?;
 
     // Reject on the header before committing to a full decode. `into_dimensions` consumes the
-    // reader, so the decode below builds a second one over the same in-memory bytes — cheap,
+    // reader, so the decode below builds a second one over the same in-memory bytes: cheap,
     // and the list above is a sequence of steps rather than of one object.
     let (w, h) = reader
         .into_dimensions()
@@ -189,7 +189,7 @@ pub fn decode(
 /// Formats this reader declines on purpose, recognised from their bytes so the failure names
 /// the format instead of calling a valid file unrecognisable.
 ///
-/// **SVG** would need a second layout engine — `resvg` is exactly that, and a client whose
+/// **SVG** would need a second layout engine. `resvg` is exactly that, and a client whose
 /// whole thesis is not running the page's layout should not acquire one to draw a logo.
 /// **AVIF** would need `dav1d`, a C decoder surface, on untrusted input; the only module in
 /// this crate that parses untrusted binary input is pure Rust and stays that way.
@@ -216,7 +216,7 @@ fn alloc_limits(limits: &DecodeLimits) -> image::Limits {
     l
 }
 
-/// Shrink to the reading column, preserving aspect. Never enlarges — a 200 px thumbnail blown
+/// Shrink to the reading column, preserving aspect. Never enlarges: a 200 px thumbnail blown
 /// up to the column width is worse than a 200 px thumbnail.
 fn downscale(img: image::DynamicImage, max_width: u32) -> image::DynamicImage {
     let max_width = max_width.max(1);
@@ -313,7 +313,7 @@ mod tests {
         }
     }
 
-    /// Declined on purpose, and named — "SVG not shown" is a different statement from "not a
+    /// Declined on purpose, and named: "SVG not shown" is a different statement from "not a
     /// recognised image format", and only one of them is true.
     #[test]
     fn svg_and_avif_are_declined_by_name() {

@@ -1,11 +1,11 @@
 //! Calibration harness: run the extractor over a local byte cache and compare against a
-//! baseline produced by another extractor. Offline — never refetches.
+//! baseline produced by another extractor. Offline: never refetches.
 //!
 //! The baseline JSON is **not** in this repo, and neither is the cache: both are derived from
 //! somebody's real browsing history. Regenerate them locally with `corpus`, a fetcher, and
 //! whatever reference extractor you want to measure against (Phase 0 used trafilatura 2.2.0).
 //!
-//! Day-to-day regression cover lives in `#[cfg(test)]` instead — synthetic fixtures that
+//! Day-to-day regression cover lives in `#[cfg(test)]` instead: synthetic fixtures that
 //! encode the structural patterns that actually broke, with no corpus and no network.
 //!
 //! usage: bench <signals.jsonl> <baseline.json> <cache-dir>

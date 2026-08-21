@@ -1,4 +1,4 @@
-//! Per-site rules — the only place in the crate where behaviour is keyed on a hostname.
+//! Per-site rules: the only place in the crate where behaviour is keyed on a hostname.
 //!
 //! Everything else in hww is structural: `html.rs` scores subtrees, `thread.rs` groups siblings
 //! by class signature, `bin/corpus.rs` classifies by URL shape. None of them know a domain name
@@ -6,19 +6,19 @@
 //!
 //! Phase 0 measured ~7 genuine JS-only reading losses out of 87 document-shaped pages. Two of
 //! them are pages of one JS-gated discussion site that serves a fully server-rendered alternate
-//! domain — its own no-JS UI, same operator, same content. Reaching it is a host swap, and that
-//! is all this module does. See `docs/phase0-findings.md`.
+//! domain with its own no-JS UI, the same operator, and the same content. Reaching it is a
+//! host swap, and that is all this module does. See `docs/phase0-findings.md`.
 //!
 //! # Charter for the builtin table
 //!
 //! A rule may ship compiled in only if all four hold:
 //!
 //! 1. **Same operator.** The target host is run by the same entity as the source. A third-party
-//!    frontend proxy relocates the reader onto an unrelated party — precisely the "no
+//!    frontend proxy relocates the reader onto an unrelated party, precisely the "no
 //!    third-party requests" line this client exists to hold. Never builtin.
 //! 2. **Cited.** The rule names a measured failure in `docs/phase0-findings.md`. No speculative
 //!    entries, no curated directory of the web.
-//! 3. **Offline.** The table is compiled in. Never fetched, never auto-updated — a remotely
+//! 3. **Offline.** The table is compiled in. Never fetched, never auto-updated: a remotely
 //!    updated rule list is a channel that reports what you read.
 //! 4. **Reported.** Every applied rule prints on stderr *before* the request goes out, so a
 //!    fetch that fails or hangs cannot swallow it. hww never silently contacts a host the user
@@ -32,12 +32,12 @@ use url::Url;
 
 struct Rule {
     /// Matched exactly, or as a suffix at a label boundary. Must already be in the normalized
-    /// form `Url` produces — lowercase, punycode. Enforced by `builtin_table_is_sound`.
+    /// form `Url` produces: lowercase, punycode. Enforced by `builtin_table_is_sound`.
     host: &'static str,
     /// Literal substring of the path, slashes included. The only path predicate there will
-    /// ever be — deliberately not a pattern language.
+    /// ever be, deliberately not a pattern language.
     path_contains: Option<&'static str>,
-    /// Fetch this host instead. Same operator only — see the charter.
+    /// Fetch this host instead. Same operator only (see the charter).
     to_host: &'static str,
 }
 
@@ -45,12 +45,12 @@ struct Rule {
 const RULES: &[Rule] = &[
     // The JS-gated discussion site of "The real JS-only losses" and "Where it still loses" in
     // docs/phase0-findings.md, and its own server-rendered alternate. Measured on one comment
-    // page: 0 chars before, 8,331 after — "Phase 2 — per-site rules". Sections, not line
+    // page: 0 chars before, 8,331 after; see "Phase 2: per-site rules". Sections, not line
     // numbers: that document grows.
     //
     // Gated to the site's subreddit paths, the shape that was measured. Without the gate the
     // rule also claims the auth, moderation, and API subdomains, whose paths the alternate
-    // does not serve — a login page or a 404 in place of the URL the user asked for, explained
+    // does not serve: a login page or a 404 in place of the URL the user asked for, explained
     // only by one line on stderr.
     Rule {
         host: "reddit.com",
@@ -61,10 +61,10 @@ const RULES: &[Rule] = &[
 
 /// Rewrite `url` if a rule matches.
 ///
-/// First match wins, and a rule is applied exactly once — never chained, so termination is
+/// First match wins, and a rule is applied exactly once, never chained, so termination is
 /// structural rather than bounded by a counter. Everything a rule does not name is preserved:
-/// scheme, port, path, query, fragment. Since `to_host` replaces the whole host, applying the
-/// result again is a no-op.
+/// scheme, port, path, query, and fragment. Since `to_host` replaces the whole host, applying
+/// the result again is a no-op.
 pub fn apply(url: &Url) -> Url {
     apply_in(RULES, url)
 }
@@ -299,7 +299,7 @@ mod tests {
             // `path_contains` is a substring of the path, so it must start at a slash. A
             // needle like "comments/" would build the probe `https://example.comcomments/`,
             // which parses fine, matches no rule, and makes every assertion below trivially
-            // true — the guard would stop guarding this rule without failing.
+            // true: the guard would stop guarding this rule without failing.
             if let Some(p) = r.path_contains {
                 assert!(
                     p.starts_with('/'),

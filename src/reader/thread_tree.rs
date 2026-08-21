@@ -30,14 +30,14 @@ pub struct TreeNode {
     pub subtree_len: usize,
     /// Comments in this subtree, including this one.
     pub subtree_count: usize,
-    /// Normalized nesting depth — the tree's own, which is not always the IR's.
+    /// Normalized nesting depth: the tree's own, which is not always the IR's.
     pub depth: u16,
     pub key: CommentKey,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ThreadTree {
-    /// Indexed by node id, which is also the comment index — `build` keeps them equal so
+    /// Indexed by node id, which is also the comment index; `build` keeps them equal so
     /// callers never need a second mapping.
     pub nodes: Vec<TreeNode>,
     pub roots: Vec<usize>,
@@ -256,7 +256,7 @@ mod tests {
     }
 
     /// A thread nested far past anything a human wrote still builds and traverses completely.
-    /// `dfs` is iterative for this input class — a hostile page is untrusted input, and a
+    /// `dfs` is iterative for this input class: a hostile page is untrusted input, and a
     /// recursive walk over it is a crash rather than a bad render.
     #[test]
     fn a_pathologically_deep_thread_builds_and_traverses_completely() {

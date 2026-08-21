@@ -1,4 +1,4 @@
-//! The semantic IR — the whole point of the project.
+//! The semantic IR: the whole point of the project.
 //!
 //! Every source format (HTML, gemtext, RSS, gopher, Markdown) maps *into* this, and every
 //! renderer consumes *only* this. That is what makes a multi-protocol reader one program
@@ -44,7 +44,7 @@ pub enum Block {
         image: Image,
         caption: Option<Vec<Inline>>,
     },
-    /// Simple grid only. No colspan/rowspan — a table that needs them is a layout table,
+    /// Simple grid only. No colspan/rowspan: a table that needs them is a layout table,
     /// and layout tables are exactly what this client is refusing to reproduce.
     Table {
         headers: Vec<Vec<Inline>>,
@@ -104,7 +104,7 @@ impl Document {
 }
 
 /// Visible text length of a block list. Text length is the shared scoring currency of this
-/// crate — reuse this rather than adding another counter.
+/// crate; reuse this rather than adding another counter.
 pub fn blocks_text_len(blocks: &[Block]) -> usize {
     blocks.iter().map(block_text_len).sum()
 }

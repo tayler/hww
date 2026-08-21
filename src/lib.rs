@@ -1,7 +1,7 @@
-//! hww — a quiet-web client.
+//! hww: a quiet-web client.
 //!
-//! A reading client for the non-app web: stripped HTML, feeds, gemini, gopher, local Markdown.
-//! No JavaScript, no CSS cascade, no ads, no third-party requests, no cookies.
+//! A reading client for the non-app web: stripped HTML, feeds, gemini, gopher, and local Markdown.
+//! JavaScript, the CSS cascade, ads, third-party requests, and cookies are all absent.
 //!
 //! Architecture: every source format maps into [`ir::Document`], and every renderer consumes
 //! only that. See `docs/phase0-findings.md` for the measurements this design rests on.

@@ -1,6 +1,6 @@
 //! HTML -> [`Document`]. Parse at full fidelity, then map down to the IR.
 //!
-//! The subset lives *here*, downstream of the parser — not in the parser. html5ever
+//! The subset lives *here*, downstream of the parser, not in the parser. html5ever
 //! (via `scraper`) handles the spec's error recovery, foster parenting, and adoption agency;
 //! this module then discards everything outside the IR's vocabulary.
 //!
@@ -38,7 +38,7 @@ const NOISE: &[&str] = &[
 /// Class/id substrings that mark chrome rather than content.
 ///
 /// Deliberately **not** included: `"comment"`. Readability strips it to clean up articles,
-/// but on a thread page `<div class="comment">` *is* the content — stripping it is why both
+/// but on a thread page `<div class="comment">` *is* the content; stripping it is why both
 /// trafilatura and the first cut of this extractor returned pure usernames and timestamps.
 /// Comment-stripping belongs to the article path only, never to the parser.
 const NOISE_HINT: &[&str] = &[
@@ -151,7 +151,7 @@ pub fn extract(source: &str, url: &Url) -> Document {
     doc
 }
 
-/// One of the three shared text-length counters — see `AGENTS.md`. This used to build a
+/// One of the three shared text-length counters (see `AGENTS.md`). This used to build a
 /// throwaway `Document` around a cloned block list, once per `content_root` candidate and
 /// again on the `<body>` fallback: up to six copies of a whole document per page.
 fn block_text(blocks: &[Block]) -> usize {
@@ -193,7 +193,7 @@ fn own_text_into(node: NodeRef<'_, Node>, out: &mut String, root: bool) {
 /// Semantic containers *compete with* density scoring rather than overriding it.
 ///
 /// Trusting `<article>` blindly picks the author-bio card on a blog whose real body sits in a
-/// `<section>` — and in one measured case that section additionally contained a complete nested
+/// `<section>`, and in one measured case that section additionally contained a complete nested
 /// `<!DOCTYPE html><html><body>`, which html5ever recovers from per spec. Whichever candidate
 /// carries more non-link text wins.
 fn content_root(html: &Html) -> Option<ElementRef<'_>> {
@@ -225,11 +225,11 @@ fn content_root(html: &Html) -> Option<ElementRef<'_>> {
         .map(|(el, _)| el)
 }
 
-/// Readability-style: score leaf text blocks, propagate to ancestors, discount link density.
+/// Readability-style: score leaf text blocks, propagate to ancestors, and discount link density.
 fn score_best(html: &Html) -> Option<ElementRef<'_>> {
     let mut scores: HashMap<ego_tree::NodeId, f64> = HashMap::new();
     // `div`/`section` are included because most modern pages never emit a `<p>`. A container
-    // only counts when the prose is its *own* — see `own_text`.
+    // only counts when the prose is its *own* (see `own_text`).
     let sel = Selector::parse("p, td, pre, blockquote, li, div, section, dd").ok()?;
 
     for el in html.select(&sel) {
@@ -238,7 +238,7 @@ fn score_best(html: &Html) -> Option<ElementRef<'_>> {
             continue;
         }
         let base = 1.0 + text.matches(',').count() as f64 + (text.len() as f64 / 100.0).min(3.0);
-        // Credit the parent fully and the grandparent at half — content lives in containers,
+        // Credit the parent fully and the grandparent at half: content lives in containers,
         // not in the paragraphs themselves.
         let mut node = el.parent();
         let mut decay = 1.0;
@@ -321,13 +321,13 @@ fn link_density(el: &ElementRef) -> f64 {
 ///
 /// Both build a *tree*, so neither flattens into an explicit stack the way [`collect_text`]
 /// does, and both cost a stack frame per DOM level. Untrusted input reaches them directly:
-/// roughly 2,000 nested `<div>`s — about 22 KB, three orders of magnitude under the 5 MB
-/// transfer cap — overflowed the 2 MiB stack of a `reader::ui::net` worker and aborted the
+/// roughly 2,000 nested `<div>`s (about 22 KB, three orders of magnitude under the 5 MB
+/// transfer cap) overflowed the 2 MiB stack of a `reader::ui::net` worker and aborted the
 /// process. An abort is not a panic, so `ReplyGuard` cannot turn it into a failed tab.
 ///
 /// 256 is far past any real document (deep-but-sane pages measure under 100) and leaves the
 /// worker stack an order of magnitude of headroom even when the two walkers interleave.
-/// Content below the limit is not dropped — it is flattened to text — so the cap degrades a
+/// Content below the limit is not dropped (it is flattened to text), so the cap degrades a
 /// pathological page rather than blanking it.
 const MAX_DEPTH: usize = 256;
 
@@ -499,7 +499,7 @@ fn inlines_from(node: NodeRef<'_, Node>, base: &Url, depth: usize) -> Vec<Inline
                 let s = squeeze(&t.replace(['\n', '\t'], " "));
                 if s.trim().is_empty() {
                     // A whitespace-only node *between* two inline elements is a word
-                    // boundary, and dropping it welds them together —
+                    // boundary, and dropping it welds them together:
                     // `<a>written language</a> <a>legible</a>` became "written
                     // languagelegible". Markup indentation produces these constantly.
                     if !s.is_empty() {
@@ -574,7 +574,7 @@ fn squeeze(s: &str) -> String {
     out
 }
 
-/// `<pre>` must keep its newlines — that is the entire point of `<pre>`.
+/// `<pre>` must keep its newlines: that is the entire point of `<pre>`.
 fn inner_text_raw(node: NodeRef<'_, Node>) -> String {
     let mut s = String::new();
     collect_text(node, &mut s);
@@ -881,7 +881,7 @@ mod tests {
     }
 
     /// Regression: sibling `<p>` tags in an article were mistaken for a thread and rendered as
-    /// posts by "anon". It *raised* the benchmark score while destroying the document — posts
+    /// posts by "anon". It *raised* the benchmark score while destroying the document: posts
     /// carry an author or timestamp, article paragraphs do not.
     #[test]
     fn repeated_paragraphs_are_not_a_thread() {
@@ -936,13 +936,13 @@ mod tests {
         assert!(!json.contains("font-size"), "style leaked into the IR");
     }
 
-    /// A stack overflow is an abort, not a panic, so no guard in the reader can contain it —
+    /// A stack overflow is an abort, not a panic, so no guard in the reader can contain it;
     /// one hostile page would take the whole GUI process with it. Roughly 2,000 nested divs
     /// (about 22 KB, three orders of magnitude under the transfer cap) used to be enough on a
     /// worker's 2 MiB stack, and this is comfortably past that.
     ///
     /// Kept at 5,000 rather than higher because `content_root`'s ancestor scoring is quadratic
-    /// in depth — 20,000 takes 15s where 5,000 takes one. That cost is a separate problem from
+    /// in depth: 20,000 takes 15s where 5,000 takes one. That cost is a separate problem from
     /// the abort, and it is bounded by this cap rather than fixed by it.
     #[test]
     fn a_pathologically_nested_page_extracts_instead_of_aborting() {
@@ -968,7 +968,7 @@ mod tests {
         assert!(out > 0, "the deep page extracted nothing at all");
     }
 
-    /// Row-header tables — infoboxes, spec sheets — put a `<th>` and a `<td>` in the same row.
+    /// Row-header tables (infoboxes, spec sheets) put a `<th>` and a `<td>` in the same row.
     /// Treating "has any `<th>`" as "is the header row" dropped a cell from every line.
     #[test]
     fn a_row_header_table_keeps_every_cell() {

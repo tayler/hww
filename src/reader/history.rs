@@ -1,7 +1,7 @@
 //! Back and forward, over a stack with a cursor.
 //!
 //! In memory only, and gone with the process. An on-disk history is the archive's problem and
-//! arrives with it — reading history at rest is a whole second doctrine, and none of the
+//! arrives with it; reading history at rest is a whole second doctrine, and none of the
 //! reading experience depends on it.
 
 use url::Url;
@@ -18,7 +18,7 @@ impl History {
         Self::default()
     }
 
-    /// Follow a link. Everything ahead of the cursor is discarded — the same rule every
+    /// Follow a link. Everything ahead of the cursor is discarded, the same rule every
     /// browser uses, and the reason forward is not a second stack.
     pub fn push(&mut self, url: Url) {
         // Re-navigating to where you already are is a reload, not a history entry; without

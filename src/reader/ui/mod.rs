@@ -28,7 +28,7 @@ pub enum Action {
     Copy(String),
     /// Load one image, named by its `src` as it appears in the IR.
     LoadImage(String),
-    /// Jump to a block index — outline entries and resolved fragments.
+    /// Jump to a block index: outline entries and resolved fragments.
     GoToBlock(usize),
     ToggleComment(CommentKey),
 }
@@ -47,7 +47,7 @@ pub struct RenderCtx<'a> {
     pub find: String,
     /// Which match `n`/`N` is on, page-wide.
     ///
-    /// Matches are counted in render order, so a collapsed subtree contributes none — find
+    /// Matches are counted in render order, so a collapsed subtree contributes none; find
     /// looks for what the reader is actually showing, which is also the only definition that
     /// can be scrolled to.
     pub find_current: usize,
@@ -64,7 +64,7 @@ pub struct RenderCtx<'a> {
     pub action: Option<Action>,
     pub hover_href: Option<String>,
     /// What Tab landed on this frame. Links and comment toggles are the only focusable things
-    /// on the page — if plain text were focusable, Tab would walk every label.
+    /// on the page; if plain text were focusable, Tab would walk every label.
     pub focus_href: Option<String>,
     pub focus_image: Option<String>,
     pub focus_comment: Option<CommentKey>,
@@ -109,8 +109,8 @@ impl RenderCtx<'_> {
 
     /// Find every match in one run list, before any of it is drawn.
     ///
-    /// Matching runs over the *flattened* text — which is correct, because that is the text the
-    /// reader shows — and the ranges are byte offsets into it. Highlighting then re-emits the
+    /// Matching runs over the *flattened* text, which is correct, because that is the text the
+    /// reader shows, and the ranges are byte offsets into it. Highlighting then re-emits the
     /// affected segments with a per-match background, so a match that straddles an emphasis
     /// boundary (`the <em>quick</em> brown`) is painted as two ranges of one logical hit rather
     /// than being missed for spanning two labels.
@@ -123,7 +123,7 @@ impl RenderCtx<'_> {
         let hay = plain.to_lowercase();
         // `to_lowercase` can change byte length, so a case-insensitive search over the folded
         // string cannot be trusted to give offsets into the original. When the fold is
-        // length-preserving — which it is for the overwhelming majority of prose — use it;
+        // length-preserving (which it is for the overwhelming majority of prose), use it;
         // otherwise fall back to an exact search, which is honest about what it can find.
         let (hay, needle) = if hay.len() == plain.len() {
             (hay, self.find.clone())

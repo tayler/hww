@@ -38,7 +38,7 @@ fn main() -> Result<()> {
     };
 
     let requested = url::Url::parse(&arg)?;
-    // The notice travels before the request does — see `session::Notice`.
+    // The notice travels before the request does (see `session::Notice`).
     let loaded = Session::new()?.load(&requested, &opts, &mut |n| eprintln!("{n}"))?;
 
     eprintln!("{}", loaded.prov);

@@ -1,10 +1,10 @@
-//! Settings on disk: one small JSON file, written atomically, never fatal.
+//! Settings on disk: one small JSON file, written atomically, and never fatal.
 //!
-//! eframe's `persistence` feature is off — it pulls `ron` in to remember a window size — so
+//! eframe's `persistence` feature is off (it pulls `ron` in to remember a window size), so
 //! this is hand-rolled over the `serde_json` already in the tree, and it also carries the
 //! zoom factor, which is egui's state rather than ours.
 //!
-//! Nothing here is page content. The archive — reading history at rest — is a whole second
+//! Nothing here is page content. The archive (reading history at rest) is a whole second
 //! doctrine and is deliberately not started; this file holds preferences and nothing else.
 
 use crate::reader::opts::ReadOpts;
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 #[serde(default)]
 pub struct Settings {
     pub read: ReadOpts,
-    /// egui's `zoom_factor` — full-page zoom, bound to `Ctrl`+`+`/`-`/`0`, `Ctrl`+wheel, and
+    /// egui's `zoom_factor`: full-page zoom, bound to `Ctrl`+`+`/`-`/`0`, `Ctrl`+wheel, and
     /// pinch by egui itself. The reader implements no zoom of its own; it only remembers this.
     pub zoom_factor: f32,
     /// Send an origin-only `Referer` with image subresource requests.
@@ -23,7 +23,7 @@ pub struct Settings {
     /// Lives here rather than in [`ReadOpts`], which is styling-only and stays that way. It is
     /// applied through `fetch::Limits`. Turning it off is a real choice with a real cost:
     /// hotlink protection then substitutes or refuses images, and the substitution case is
-    /// undetectable — see `fetch::Referer::PageOrigin`.
+    /// undetectable (see `fetch::Referer::PageOrigin`).
     pub send_image_referer: bool,
 }
 
@@ -86,7 +86,7 @@ pub fn load() -> (Settings, Option<String>) {
             Err(e) => (
                 Settings::default(),
                 Some(format!(
-                    "{} is not valid settings ({e}) — using defaults",
+                    "{} is not valid settings ({e}); using defaults",
                     path.display()
                 )),
             ),
@@ -129,7 +129,7 @@ fn write_then_rename(tmp: &Path, path: &Path, dir: &Path, json: &[u8]) -> std::i
 
 /// `sync_all` on the file durably lands its *bytes*; the rename that gives those bytes their
 /// name is a change to the *directory*, and is not durable until the directory is synced too.
-/// Crash in between and neither name need point at the new settings — the one outcome the
+/// Crash in between and neither name need point at the new settings: the one outcome the
 /// temp-and-rename dance exists to rule out.
 #[cfg(not(target_os = "windows"))]
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
