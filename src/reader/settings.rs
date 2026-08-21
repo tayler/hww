@@ -9,7 +9,7 @@
 
 use crate::reader::opts::ReadOpts;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -96,6 +96,9 @@ pub fn load() -> (Settings, Option<String>) {
 
 /// Write via a temporary file and a rename, so a crash mid-write costs the settings rather
 /// than the next launch.
+///
+/// Any failure takes the temporary with it. A stray `settings.json.tmp` next to a perfectly
+/// good `settings.json` is the sort of litter that gets read as corruption later.
 pub fn save(settings: &Settings) -> std::io::Result<()> {
     let Some(path) = settings_path() else {
         return Ok(());
@@ -107,14 +110,38 @@ pub fn save(settings: &Settings) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(settings)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    write_then_rename(&tmp, &path, dir, json.as_bytes()).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+fn write_then_rename(tmp: &Path, path: &Path, dir: &Path, json: &[u8]) -> std::io::Result<()> {
     {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(json.as_bytes())?;
+        let mut f = std::fs::File::create(tmp)?;
+        f.write_all(json)?;
         f.write_all(b"\n")?;
         // The rename is only atomic with respect to a crash if the bytes are actually down.
         f.sync_all()?;
     }
-    std::fs::rename(&tmp, &path)
+    std::fs::rename(tmp, path)?;
+    sync_dir(dir)
+}
+
+/// `sync_all` on the file durably lands its *bytes*; the rename that gives those bytes their
+/// name is a change to the *directory*, and is not durable until the directory is synced too.
+/// Crash in between and neither name need point at the new settings — the one outcome the
+/// temp-and-rename dance exists to rule out.
+#[cfg(not(target_os = "windows"))]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// Windows exposes no directory handle that can be opened and fsynced this way, and there is
+/// no portable stand-in. The temp-and-rename is still worth having there for the torn-write
+/// case; only the ordering guarantee is weaker.
+#[cfg(target_os = "windows")]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -150,6 +177,14 @@ mod tests {
         let (got, err) = load();
         assert_eq!(got, Settings::default());
         assert!(err.unwrap().contains("using defaults"));
+
+        // A save that cannot land must not leave its temporary behind. A directory where the
+        // settings file belongs fails the rename *after* the temporary has been written, which
+        // is the only interesting half of the error path.
+        std::fs::remove_file(dir.join("settings.json")).unwrap();
+        std::fs::create_dir(dir.join("settings.json")).unwrap();
+        assert!(save(&want).is_err());
+        assert!(!dir.join("settings.json.tmp").exists());
 
         unsafe { std::env::remove_var("HWW_CONFIG_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
