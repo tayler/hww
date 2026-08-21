@@ -23,18 +23,39 @@ pub struct Document {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Block {
-    Heading { level: u8, inlines: Vec<Inline> },
+    Heading {
+        level: u8,
+        inlines: Vec<Inline>,
+    },
     Paragraph(Vec<Inline>),
-    List { ordered: bool, items: Vec<Vec<Block>> },
-    Quote { blocks: Vec<Block>, cite: Option<String> },
-    Code { lang: Option<String>, text: String },
-    Figure { image: Image, caption: Option<Vec<Inline>> },
+    List {
+        ordered: bool,
+        items: Vec<Vec<Block>>,
+    },
+    Quote {
+        blocks: Vec<Block>,
+        cite: Option<String>,
+    },
+    Code {
+        lang: Option<String>,
+        text: String,
+    },
+    Figure {
+        image: Image,
+        caption: Option<Vec<Inline>>,
+    },
     /// Simple grid only. No colspan/rowspan — a table that needs them is a layout table,
     /// and layout tables are exactly what this client is refusing to reproduce.
-    Table { headers: Vec<Vec<Inline>>, rows: Vec<Vec<Vec<Inline>>> },
+    Table {
+        headers: Vec<Vec<Inline>>,
+        rows: Vec<Vec<Vec<Inline>>>,
+    },
     Rule,
     /// Never auto-loaded. A placeholder the reader may choose to act on.
-    Embed { kind: EmbedKind, url: String },
+    Embed {
+        kind: EmbedKind,
+        url: String,
+    },
     /// Threaded discussion. Added after Phase 0 measurement: forum pages were 8/8 broken
     /// under article extraction (5.6% of content recovered), and a flat `Vec<Block>` cannot
     /// represent reply structure. See docs/phase0-findings.md.
@@ -52,7 +73,11 @@ pub struct Comment {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EmbedKind { Video, Audio, Iframe }
+pub enum EmbedKind {
+    Video,
+    Audio,
+    Iframe,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Inline {
@@ -91,7 +116,11 @@ fn block_text_len(b: &Block) -> usize {
         Block::Figure { caption, .. } => caption.as_deref().map_or(0, inlines_text_len),
         Block::Table { headers, rows } => {
             headers.iter().map(|c| inlines_text_len(c)).sum::<usize>()
-                + rows.iter().flatten().map(|c| inlines_text_len(c)).sum::<usize>()
+                + rows
+                    .iter()
+                    .flatten()
+                    .map(|c| inlines_text_len(c))
+                    .sum::<usize>()
         }
         Block::Rule | Block::Embed { .. } => 0,
         Block::Thread(cs) => cs.iter().map(|c| blocks_text_len(&c.blocks)).sum(),
@@ -99,10 +128,13 @@ fn block_text_len(b: &Block) -> usize {
 }
 
 fn inlines_text_len(inlines: &[Inline]) -> usize {
-    inlines.iter().map(|i| match i {
-        Inline::Text(s) | Inline::Code(s) => s.len(),
-        Inline::Emph(v) | Inline::Strong(v) => inlines_text_len(v),
-        Inline::Link { inlines, .. } => inlines_text_len(inlines),
-        Inline::Image(_) | Inline::Break => 0,
-    }).sum()
+    inlines
+        .iter()
+        .map(|i| match i {
+            Inline::Text(s) | Inline::Code(s) => s.len(),
+            Inline::Emph(v) | Inline::Strong(v) => inlines_text_len(v),
+            Inline::Link { inlines, .. } => inlines_text_len(inlines),
+            Inline::Image(_) | Inline::Break => 0,
+        })
+        .sum()
 }

@@ -12,7 +12,10 @@ pub struct TextOpts {
 
 impl Default for TextOpts {
     fn default() -> Self {
-        Self { width: 78, show_links: false }
+        Self {
+            width: 78,
+            show_links: false,
+        }
     }
 }
 
@@ -53,7 +56,11 @@ fn render_block(b: &Block, o: &TextOpts, indent: usize, out: &mut String) {
         }
         Block::List { ordered, items } => {
             for (i, item) in items.iter().enumerate() {
-                let marker = if *ordered { format!("{}. ", i + 1) } else { "- ".to_string() };
+                let marker = if *ordered {
+                    format!("{}. ", i + 1)
+                } else {
+                    "- ".to_string()
+                };
                 let mut buf = String::new();
                 render_blocks(item, o, 0, &mut buf);
                 let body = buf.trim();
@@ -83,8 +90,18 @@ fn render_block(b: &Block, o: &TextOpts, indent: usize, out: &mut String) {
         }
         Block::Figure { image, caption } => {
             let alt = image.alt.as_deref().unwrap_or("image");
-            let cap = caption.as_ref().map(|c| inline_text(c, o)).unwrap_or_default();
-            out.push_str(&format!("{pad}[{alt}]{}\n\n", if cap.is_empty() { String::new() } else { format!(" — {cap}") }));
+            let cap = caption
+                .as_ref()
+                .map(|c| inline_text(c, o))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "{pad}[{alt}]{}\n\n",
+                if cap.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {cap}")
+                }
+            ));
         }
         Block::Table { headers, rows } => {
             if !headers.is_empty() {
@@ -103,7 +120,10 @@ fn render_block(b: &Block, o: &TextOpts, indent: usize, out: &mut String) {
             for c in comments {
                 let who = c.author.as_deref().unwrap_or("anon");
                 let when = c.timestamp.as_deref().unwrap_or("");
-                out.push_str(&format!("{}{who} {when}\n", " ".repeat(indent + c.depth as usize * 2)));
+                out.push_str(&format!(
+                    "{}{who} {when}\n",
+                    " ".repeat(indent + c.depth as usize * 2)
+                ));
                 render_blocks(&c.blocks, o, indent + c.depth as usize * 2, out);
             }
         }
@@ -115,14 +135,20 @@ fn inline_text(inlines: &[Inline], o: &TextOpts) -> String {
     for i in inlines {
         match i {
             Inline::Text(t) => s.push_str(t),
-            Inline::Code(t) => s.push_str(&format!("`{t}`"),),
+            Inline::Code(t) => s.push_str(&format!("`{t}`")),
             Inline::Emph(v) => s.push_str(&format!("_{}_", inline_text(v, o))),
             Inline::Strong(v) => s.push_str(&format!("*{}*", inline_text(v, o))),
             Inline::Link { href, inlines } => {
                 let t = inline_text(inlines, o);
-                if o.show_links { s.push_str(&format!("{t} <{href}>")) } else { s.push_str(&t) }
+                if o.show_links {
+                    s.push_str(&format!("{t} <{href}>"))
+                } else {
+                    s.push_str(&t)
+                }
             }
-            Inline::Image(img) => s.push_str(&format!("[{}]", img.alt.as_deref().unwrap_or("image"))),
+            Inline::Image(img) => {
+                s.push_str(&format!("[{}]", img.alt.as_deref().unwrap_or("image")))
+            }
             Inline::Break => s.push('\n'),
         }
     }

@@ -19,9 +19,24 @@ const MIN_SIBLINGS: usize = 3;
 /// Minimum median text per post, to reject navigation and tag-cloud repetition.
 const MIN_MEDIAN_TEXT: usize = 40;
 
-const AUTHOR_HINT: &[&str] = &["hnuser", "author", "username", "user-name", "byline", "poster"];
+const AUTHOR_HINT: &[&str] = &[
+    "hnuser",
+    "author",
+    "username",
+    "user-name",
+    "byline",
+    "poster",
+];
 const TIME_HINT: &[&str] = &["age", "date", "time", "timestamp", "created"];
-const BODY_HINT: &[&str] = &["commtext", "comment-body", "usertext-body", "post-body", "md", "entry-content", "message"];
+const BODY_HINT: &[&str] = &[
+    "commtext",
+    "comment-body",
+    "usertext-body",
+    "post-body",
+    "md",
+    "entry-content",
+    "message",
+];
 
 pub fn extract_thread(html: &Html, base: &Url) -> Option<Vec<Comment>> {
     let group = best_group(html)?;
@@ -50,11 +65,7 @@ fn signature(el: &ElementRef) -> String {
         .attr("class")
         .unwrap_or("")
         .split_whitespace()
-        .filter(|c| {
-            c.len() > 1
-                && !c.chars().any(|ch| ch.is_ascii_digit())
-                && c.len() < 30
-        })
+        .filter(|c| c.len() > 1 && !c.chars().any(|ch| ch.is_ascii_digit()) && c.len() < 30)
         .collect();
     classes.sort_unstable();
     classes.dedup();
@@ -65,8 +76,12 @@ fn signature(el: &ElementRef) -> String {
 fn best_group<'a>(html: &'a Html) -> Option<Vec<ElementRef<'a>>> {
     let mut groups: HashMap<(ego_tree::NodeId, String), Vec<ElementRef<'a>>> = HashMap::new();
     for node in html.tree.root().descendants() {
-        let Some(el) = ElementRef::wrap(node) else { continue };
-        let Some(parent) = node.parent() else { continue };
+        let Some(el) = ElementRef::wrap(node) else {
+            continue;
+        };
+        let Some(parent) = node.parent() else {
+            continue;
+        };
         let sig = signature(&el);
         // A bare tag with no classes is too weak a signal — every <li> on the page would match.
         if sig.ends_with('.') {
@@ -90,7 +105,9 @@ fn best_group<'a>(html: &'a Html) -> Option<Vec<ElementRef<'a>>> {
             // and the article is rendered as a list of comments by "anon".
             let attributed = g
                 .iter()
-                .filter(|e| find_hint(e, AUTHOR_HINT).is_some() || find_hint(e, TIME_HINT).is_some())
+                .filter(|e| {
+                    find_hint(e, AUTHOR_HINT).is_some() || find_hint(e, TIME_HINT).is_some()
+                })
                 .count();
             if attributed * 2 < g.len() {
                 return None;
@@ -106,10 +123,10 @@ fn best_group<'a>(html: &'a Html) -> Option<Vec<ElementRef<'a>>> {
 /// (Discourse, Reddit) encodes it by containment. Support both.
 fn depth_of(el: &ElementRef, group: &[ElementRef]) -> u16 {
     for node in el.descendants() {
-        if let Some(e) = ElementRef::wrap(node) {
-            if let Some(v) = e.value().attr("indent").and_then(|v| v.parse::<u16>().ok()) {
-                return v;
-            }
+        if let Some(e) = ElementRef::wrap(node)
+            && let Some(v) = e.value().attr("indent").and_then(|v| v.parse::<u16>().ok())
+        {
+            return v;
         }
     }
     let ids: Vec<_> = group.iter().map(|g| g.id()).collect();
@@ -126,7 +143,9 @@ fn depth_of(el: &ElementRef, group: &[ElementRef]) -> u16 {
 
 fn find_hint(el: &ElementRef, hints: &[&str]) -> Option<String> {
     for node in el.descendants() {
-        let Some(e) = ElementRef::wrap(node) else { continue };
+        let Some(e) = ElementRef::wrap(node) else {
+            continue;
+        };
         let attrs = format!(
             "{} {} {}",
             e.value().attr("class").unwrap_or(""),
@@ -147,9 +166,14 @@ fn find_hint(el: &ElementRef, hints: &[&str]) -> Option<String> {
 /// The post body: a hinted container if present, else the largest text-bearing descendant.
 fn body_of(el: &ElementRef, base: &Url) -> Vec<Block> {
     for node in el.descendants() {
-        let Some(e) = ElementRef::wrap(node) else { continue };
+        let Some(e) = ElementRef::wrap(node) else {
+            continue;
+        };
         let class = e.value().attr("class").unwrap_or("").to_lowercase();
-        if BODY_HINT.iter().any(|h| class.split_whitespace().any(|c| c == *h)) {
+        if BODY_HINT
+            .iter()
+            .any(|h| class.split_whitespace().any(|c| c == *h))
+        {
             return crate::html::blocks_from_public(e, base);
         }
     }
@@ -180,8 +204,13 @@ pub fn comments_text_len(cs: &[Comment]) -> usize {
     cs.iter()
         .map(|c| {
             crate::ir::Document {
-                url: String::new(), title: None, byline: None, published: None,
-                site_name: None, lang: None, blocks: c.blocks.clone(),
+                url: String::new(),
+                title: None,
+                byline: None,
+                published: None,
+                site_name: None,
+                lang: None,
+                blocks: c.blocks.clone(),
             }
             .text_len()
         })

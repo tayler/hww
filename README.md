@@ -1,5 +1,7 @@
 # hww — a quiet-web client
 
+[![CI](https://github.com/tayler/hww/actions/workflows/ci.yml/badge.svg)](https://github.com/tayler/hww/actions/workflows/ci.yml)
+
 A reading client for the non-app web: stripped HTML, feeds, gemini, gopher, local Markdown.
 A browser without JavaScript, CSS, ads, third-party requests, or cookies.
 
@@ -8,11 +10,7 @@ expected for now.
 
 ## Why
 
-The client's **internal representation** (IR) supports a small subset of HTML and CSS. Real HTML parses at full
-fidelity via html5ever, then maps down to [`ir::Document`](src/ir.rs). Everything downstream
-knows only the IR.
-
-**Author CSS is not approximated. It is discarded.** Presentation belongs to the reader.
+A quiet reading experience.
 
 ## Status
 

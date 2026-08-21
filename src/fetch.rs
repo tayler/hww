@@ -65,7 +65,10 @@ impl Fetcher {
             let resp = match self
                 .client
                 .get(current.clone())
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .header(
+                    "Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                )
                 .header("Accept-Language", "en-US,en;q=0.9")
                 .send()
             {
@@ -80,7 +83,9 @@ impl Fetcher {
             }
 
             if status.is_redirection() {
-                let Some(loc) = resp.headers().get(reqwest::header::LOCATION) else { break };
+                let Some(loc) = resp.headers().get(reqwest::header::LOCATION) else {
+                    break;
+                };
                 let next = current.join(loc.to_str()?)?;
                 if current.scheme() == "https" && next.scheme() == "http" {
                     bail!(FetchError::SchemeDowngrade(next));
@@ -125,7 +130,10 @@ fn read_capped(resp: reqwest::blocking::Response) -> Result<Vec<u8>> {
 /// Phase 0 measured 100% UTF-8 across the sample and zero legacy encodings, so this is
 /// correctness insurance rather than a hot path. It matters for the older web the client
 /// is aimed at, which that sample happened not to reach.
-pub fn decode(bytes: &[u8], content_type: Option<&str>) -> (String, &'static encoding_rs::Encoding) {
+pub fn decode(
+    bytes: &[u8],
+    content_type: Option<&str>,
+) -> (String, &'static encoding_rs::Encoding) {
     let enc = content_type
         .and_then(charset_from_content_type)
         .or_else(|| meta_charset_prescan(bytes))

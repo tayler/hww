@@ -27,16 +27,23 @@ struct Sample {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str, default: usize| -> usize {
-        args.iter().position(|a| a == name)
+        args.iter()
+            .position(|a| a == name)
             .and_then(|i| args.get(i + 1))
             .and_then(|v| v.parse().ok())
             .unwrap_or(default)
     };
     let per_host = flag("--per-host", 3);
     let limit = flag("--limit", 150);
-    let out = args.iter().position(|a| a == "--out").and_then(|i| args.get(i + 1).cloned())
+    let out = args
+        .iter()
+        .position(|a| a == "--out")
+        .and_then(|i| args.get(i + 1).cloned())
         .unwrap_or_else(|| "corpus.jsonl".into());
-    let explicit = args.first().filter(|a| !a.starts_with("--")).map(PathBuf::from);
+    let explicit = args
+        .first()
+        .filter(|a| !a.starts_with("--"))
+        .map(PathBuf::from);
 
     let profile = match explicit {
         Some(p) => p,
@@ -63,7 +70,11 @@ fn main() -> Result<()> {
          GROUP BY p.url ORDER BY d DESC",
     )?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
     })?;
 
     let mut counts: HashMap<&'static str, usize> = HashMap::new();
@@ -74,19 +85,28 @@ fn main() -> Result<()> {
     for row in rows {
         let (url, title, date) = row?;
         total += 1;
-        let Ok(parsed) = url::Url::parse(&url) else { continue };
+        let Ok(parsed) = url::Url::parse(&url) else {
+            continue;
+        };
         let class = classify(&parsed);
         *counts.entry(class).or_default() += 1;
         if class != "CANDIDATE" || picked.len() >= limit {
             continue;
         }
-        let Some(host) = parsed.host_str().map(str::to_owned) else { continue };
+        let Some(host) = parsed.host_str().map(str::to_owned) else {
+            continue;
+        };
         let n = per.entry(host.clone()).or_default();
         if *n >= per_host {
             continue;
         }
         *n += 1;
-        picked.push(Sample { url, title, host, last_visit: date });
+        picked.push(Sample {
+            url,
+            title,
+            host,
+            last_visit: date,
+        });
     }
 
     if picked.is_empty() {
@@ -100,11 +120,15 @@ fn main() -> Result<()> {
         eprintln!("   {k:10} {n:6}  {:5.1}%", 100.0 * *n as f64 / total as f64);
     }
 
-    let body: Vec<String> = picked.iter().map(|s| serde_json::to_string(s).unwrap()).collect();
+    let body: Vec<String> = picked
+        .iter()
+        .map(|s| serde_json::to_string(s).unwrap())
+        .collect();
     std::fs::write(&out, body.join("\n") + "\n")?;
     eprintln!(
         "\nsampled {} URLs across {} hosts (max {per_host}/host) -> {out}",
-        picked.len(), per.len()
+        picked.len(),
+        per.len()
     );
     std::fs::remove_dir_all(&tmp).ok();
     Ok(())
@@ -117,14 +141,19 @@ fn classify(u: &url::Url) -> &'static str {
     }
     // Query check comes first: many search engines put the query on the site root
     // (`example.com/?q=...`), which the path check below would misfile as ROOT.
-    if u.query_pairs().any(|(k, _)| matches!(&*k, "q" | "query" | "search" | "keyword")) {
+    if u.query_pairs()
+        .any(|(k, _)| matches!(&*k, "q" | "query" | "search" | "keyword"))
+    {
         return "SEARCH";
     }
     let segs: Vec<&str> = u.path().split('/').filter(|s| !s.is_empty()).collect();
     let Some(first) = segs.first() else {
         return "ROOT"; // a bare homepage is a destination, not a document
     };
-    if matches!(first.to_ascii_lowercase().as_str(), "search" | "s" | "find" | "results" | "suche") {
+    if matches!(
+        first.to_ascii_lowercase().as_str(),
+        "search" | "s" | "find" | "results" | "suche"
+    ) {
         return "SEARCH";
     }
     "CANDIDATE"
@@ -138,14 +167,20 @@ fn find_profile() -> Option<PathBuf> {
         format!("{home}/snap/firefox/common/.mozilla/firefox"),
         format!("{home}/.var/app/org.mozilla.firefox/.mozilla/firefox"),
     ];
-    roots.iter().filter_map(|r| largest_places(Path::new(r))).max_by_key(|(size, _)| *size)
+    roots
+        .iter()
+        .filter_map(|r| largest_places(Path::new(r)))
+        .max_by_key(|(size, _)| *size)
         .map(|(_, p)| p)
 }
 
 fn largest_places(root: &Path) -> Option<(u64, PathBuf)> {
-    std::fs::read_dir(root).ok()?.filter_map(|e| {
-        let p = e.ok()?.path().join("places.sqlite");
-        let size = std::fs::metadata(&p).ok()?.len();
-        Some((size, p))
-    }).max_by_key(|(size, _)| *size)
+    std::fs::read_dir(root)
+        .ok()?
+        .filter_map(|e| {
+            let p = e.ok()?.path().join("places.sqlite");
+            let size = std::fs::metadata(&p).ok()?.len();
+            Some((size, p))
+        })
+        .max_by_key(|(size, _)| *size)
 }
