@@ -336,14 +336,19 @@ impl ReaderApp {
         }
         // Naming the distinct hosts is the point: "load all" must not be the one place the
         // reader stops saying who it is about to contact.
-        self.say(format!(
-            "loading {} image(s) from {}",
-            srcs.len(),
-            hosts.join(", ")
-        ));
+        let count = srcs.len();
         for src in srcs {
             self.load_image(ctx, &src);
         }
+        // Last, not first: `load_image` ends with its own "loading one image from …", so
+        // saying this up front meant the strip only ever showed the final host and "load all"
+        // became the one place the reader does not say who it is about to contact. Nothing has
+        // been drawn yet — these are queued jobs, not completed ones — so the disclosure still
+        // precedes any pixels.
+        self.say(format!(
+            "loading {count} image(s) from {}",
+            hosts.join(", ")
+        ));
     }
 
     // ---------------------------------------------------------------- messages
@@ -681,7 +686,13 @@ fn collect_image_srcs(doc: &ir::Document) -> Vec<String> {
     }
     let mut out = Vec::new();
     walk_blocks(&doc.blocks, &mut out);
-    out.dedup();
+    // `Vec::dedup` only drops *adjacent* duplicates, and a page that reuses one `src` in two
+    // places (a logo in header and footer, a repeated sprite) does not put them side by side.
+    // The count feeds the "loading N image(s) from …" disclosure, so an inflated N is a
+    // misstatement of what is about to be fetched. Sort by src to make the pairs adjacent, but
+    // hand back document order — the reading column loads top to bottom.
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|s| seen.insert(s.clone()));
     out
 }
 
@@ -718,9 +729,22 @@ impl eframe::App for ReaderApp {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
+
+    /// The debounce in [`ReaderApp::persist`] exists so holding `[` does not write the file
+    /// once per frame. It must not be the reason a change is *lost*: `last_saved` starts at
+    /// construction, so changing the measure and pressing `q` inside the window discarded it
+    /// silently. Quitting is exactly when a pending write has to land.
+    fn on_exit(&mut self) {
+        if self.settings_dirty {
+            self.save_settings();
+        }
+    }
 }
 
 impl ReaderApp {
+    /// How long `[`/`]` can be held down before a write lands.
+    const SAVE_DEBOUNCE: Duration = Duration::from_millis(1500);
+
     /// Persist settings, but not on every keystroke of `[`/`]`.
     fn persist(&mut self, ctx: &egui::Context) {
         let zoom = ctx.zoom_factor();
@@ -728,12 +752,25 @@ impl ReaderApp {
             self.settings.zoom_factor = zoom;
             self.settings_dirty = true;
         }
-        if self.settings_dirty && self.last_saved.elapsed() > Duration::from_millis(1500) {
-            self.settings_dirty = false;
-            self.last_saved = Instant::now();
-            if let Err(e) = settings::save(&self.settings) {
-                self.say(format!("could not save settings: {e}"));
-            }
+        if !self.settings_dirty {
+            return;
+        }
+        let waited = self.last_saved.elapsed();
+        if waited > Self::SAVE_DEBOUNCE {
+            self.save_settings();
+        } else {
+            // egui only runs a frame when something asks it to. Without this the debounce
+            // never expires on its own: change the measure, touch nothing else, and the write
+            // waits for the next unrelated input instead of for 1.5s.
+            ctx.request_repaint_after(Self::SAVE_DEBOUNCE - waited);
+        }
+    }
+
+    fn save_settings(&mut self) {
+        self.settings_dirty = false;
+        self.last_saved = Instant::now();
+        if let Err(e) = settings::save(&self.settings) {
+            self.say(format!("could not save settings: {e}"));
         }
     }
 
@@ -1247,6 +1284,14 @@ impl ReaderApp {
                     .to_owned(),
                 &[Button::Retry, Button::RetryNoRewrite, Button::CopyUrl],
             ),
+            LoadError::Fetch(crate::fetch::FetchError::RedirectWithoutLocation(status)) => (
+                "The server sent a broken redirect.",
+                format!(
+                    "It answered {status}, which means \"go somewhere else\", but did not say \
+                     where. There is nothing to follow."
+                ),
+                &[Button::Retry, Button::CopyUrl],
+            ),
             LoadError::NotWebPage { content_type } => (
                 "Not a web page.",
                 format!("The server sent {content_type}, which hww has no reader for."),
@@ -1371,5 +1416,6 @@ fn truncation_note(t: crate::fetch::Truncation) -> Option<String> {
         Truncation::AtCap(n) => Some(format!("truncated at {} MB", n / 1_000_000)),
         Truncation::MaybeAtCap(n) => Some(format!("may be truncated at {} MB", n / 1_000_000)),
         Truncation::Timeout(d) => Some(format!("truncated: timed out after {}s", d.as_secs())),
+        Truncation::Incomplete(n) => Some(format!("truncated: connection dropped at {n} bytes")),
     }
 }

@@ -78,6 +78,7 @@ impl ImageStore {
     pub fn begin(&mut self, src: &str) {
         self.entries.insert(src.to_owned(), State::Loading);
         self.touch(src);
+        self.evict();
     }
 
     pub fn is_pending(&self, src: &str) -> bool {
@@ -134,9 +135,23 @@ impl ImageStore {
         self.order.push(src.to_owned());
     }
 
+    /// Never evicts an in-flight request.
+    ///
+    /// `begin` pushes into `order` without evicting, so `I` on a page with more than
+    /// `LRU_CAPACITY` images left the queue over capacity while requests were outstanding;
+    /// the next `insert` then dropped the oldest, which was still `Loading`. That made
+    /// `is_pending` false, so the placeholder offered itself again and a second click issued a
+    /// duplicate third-party request — counted twice in `hosts`, `loaded`, and
+    /// `referer_requests`, which are the reader's account of what it disclosed. Skipping
+    /// pending entries can leave `order` briefly over capacity; it drains as they resolve.
     fn evict(&mut self) {
-        while self.order.len() > LRU_CAPACITY {
-            let oldest = self.order.remove(0);
+        let mut i = 0;
+        while self.order.len() > LRU_CAPACITY && i < self.order.len() {
+            if self.is_pending(&self.order[i]) {
+                i += 1;
+                continue;
+            }
+            let oldest = self.order.remove(i);
             self.entries.remove(&oldest);
         }
     }

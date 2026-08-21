@@ -22,9 +22,12 @@
 //! mechanism here: each worker holds a *cloned* `Sender`, so an unwinding thread closes nothing
 //! and the UI would wait forever on a reply that never comes. Every job therefore runs under a
 //! [`ReplyGuard`] that emits a failure on unwind — which also covers a panic outside the decode
-//! call, unlike wrapping the decode in `catch_unwind`. This depends on `panic = "unwind"`; a
-//! future `panic = "abort"` in `[profile.release]` silently disarms it, and this paragraph is
-//! what such a change has to answer.
+//! call, unlike wrapping the decode in `catch_unwind`. The unwind still ends the thread, so
+//! [`RespawnOnPanic`] refills the pool slot; containing the reply and containing the pool are
+//! two jobs. Both depend on `panic = "unwind"`; a future `panic = "abort"` in
+//! `[profile.release]` silently disarms them, and this paragraph is what such a change has to
+//! answer. Note that a *stack overflow* aborts rather than unwinding, which is why the
+//! extractor caps its own recursion (`html::MAX_DEPTH`) instead of relying on this.
 
 use crate::fetch::FetchError;
 use crate::reader::image_decode::{self, DecodeLimits, Decoded};
@@ -152,6 +155,91 @@ impl Drop for ReplyGuard {
     }
 }
 
+/// One pool worker, which replaces itself if it dies.
+///
+/// [`ReplyGuard`] turns a panic into a failed tab, but the unwind continues out of the
+/// closure and takes the thread with it — and the receive loop lives *inside* that closure.
+/// Nothing used to respawn, so each panic permanently cost a worker; after [`WORKERS`] of
+/// them the pool was empty, the last `Arc` on the job receiver dropped, and every subsequent
+/// `submit` failed silently and left the tab on `Page::Loading` forever. Containing the reply
+/// is not the same as containing the pool.
+///
+/// The replacement is spawned from the dying thread's own guard, so it costs nothing on the
+/// normal path and does not need the pool to be watched from outside.
+fn spawn_worker(
+    i: usize,
+    job_rx: Arc<Mutex<mpsc::Receiver<Job>>>,
+    msg_tx: mpsc::Sender<Msg>,
+    session: Arc<Session>,
+    ctx: egui::Context,
+) -> Result<(), LoadError> {
+    let respawn = RespawnOnPanic {
+        i,
+        job_rx: Arc::clone(&job_rx),
+        msg_tx: msg_tx.clone(),
+        session: Arc::clone(&session),
+        ctx: ctx.clone(),
+        armed: true,
+    };
+    std::thread::Builder::new()
+        .name(format!("hww-net-{i}"))
+        .spawn(move || {
+            let mut respawn = respawn;
+            loop {
+                // Held only across `recv`, never across the request, or the pool would
+                // be a single worker wearing four hats.
+                let job = {
+                    let rx = respawn.job_rx.lock().unwrap_or_else(|e| e.into_inner());
+                    rx.recv()
+                };
+                let Ok(job) = job else {
+                    // The sender is gone: the reader is shutting down, not failing.
+                    respawn.armed = false;
+                    return;
+                };
+                let mut guard = ReplyGuard {
+                    req: job.req(),
+                    page: job.page(),
+                    tx: respawn.msg_tx.clone(),
+                    ctx: respawn.ctx.clone(),
+                    armed: true,
+                };
+                run_job(&respawn.session, job, &respawn.msg_tx, &respawn.ctx);
+                guard.armed = false;
+            }
+        })
+        .map_err(|e| LoadError::Fetch(FetchError::Io(e)))?;
+    Ok(())
+}
+
+/// Refills the pool slot when its worker unwinds out of the receive loop.
+struct RespawnOnPanic {
+    i: usize,
+    job_rx: Arc<Mutex<mpsc::Receiver<Job>>>,
+    msg_tx: mpsc::Sender<Msg>,
+    session: Arc<Session>,
+    ctx: egui::Context,
+    armed: bool,
+}
+
+impl Drop for RespawnOnPanic {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // A failed spawn here is the one case with nowhere to report: the pool is down a
+        // worker and the reader keeps running on the rest. Dropping is better than a panic
+        // inside a panic, which aborts.
+        let _ = spawn_worker(
+            self.i,
+            Arc::clone(&self.job_rx),
+            self.msg_tx.clone(),
+            Arc::clone(&self.session),
+            self.ctx.clone(),
+        );
+    }
+}
+
 pub struct Net {
     jobs: mpsc::Sender<Job>,
     msgs: mpsc::Receiver<Msg>,
@@ -166,33 +254,13 @@ impl Net {
         let job_rx = Arc::new(Mutex::new(job_rx));
 
         for i in 0..WORKERS {
-            let job_rx = Arc::clone(&job_rx);
-            let msg_tx = msg_tx.clone();
-            let session = Arc::clone(&session);
-            let ctx = ctx.clone();
-            std::thread::Builder::new()
-                .name(format!("hww-net-{i}"))
-                .spawn(move || {
-                    loop {
-                        // Held only across `recv`, never across the request, or the pool would
-                        // be a single worker wearing four hats.
-                        let job = {
-                            let rx = job_rx.lock().unwrap_or_else(|e| e.into_inner());
-                            rx.recv()
-                        };
-                        let Ok(job) = job else { return };
-                        let mut guard = ReplyGuard {
-                            req: job.req(),
-                            page: job.page(),
-                            tx: msg_tx.clone(),
-                            ctx: ctx.clone(),
-                            armed: true,
-                        };
-                        run_job(&session, job, &msg_tx, &ctx);
-                        guard.armed = false;
-                    }
-                })
-                .map_err(|e| LoadError::Fetch(FetchError::Io(e)))?;
+            spawn_worker(
+                i,
+                Arc::clone(&job_rx),
+                msg_tx.clone(),
+                Arc::clone(&session),
+                ctx.clone(),
+            )?;
         }
         Ok(Self {
             jobs,
@@ -207,8 +275,10 @@ impl Net {
     }
 
     pub fn submit(&self, job: Job) {
-        // A closed channel means every worker died, which cannot happen while `self` holds the
-        // sender. Dropping the job is still better than a panic in a reader.
+        // A closed channel means every worker died — the *receiver* lives in the pool, not
+        // here, so holding the sender does not keep it open. `spawn_worker` refills the pool
+        // on panic, so this should now be unreachable; dropping the job is still better than
+        // a panic in a reader.
         let _ = self.jobs.send(job);
     }
 

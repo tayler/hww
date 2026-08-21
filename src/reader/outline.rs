@@ -87,10 +87,14 @@ pub fn find_fragment<'a>(outline: &'a [OutlineEntry], fragment: &str) -> Option<
     outline
         .iter()
         .find(|e| e.slug == want)
-        // Anchors are routinely the heading's slug with a numeric or hash suffix.
+        // Anchors are routinely the heading's slug with a numeric or hash suffix. A heading
+        // with no alphanumerics at all ("***", "---") slugifies to the empty string, and an
+        // empty prefix matches *every* fragment — which turned "no section matching #x" into
+        // a confident scroll to the wrong block. Prefix matching needs a prefix.
         .or_else(|| {
             outline
                 .iter()
+                .filter(|e| !e.slug.is_empty())
                 .find(|e| want.starts_with(&e.slug) || e.slug.starts_with(&want))
         })
 }
@@ -148,5 +152,23 @@ mod tests {
         assert_eq!(find_fragment(&o, "getting-started-2").unwrap().block, 0);
         assert!(find_fragment(&o, "nothing-like-this").is_none());
         assert!(find_fragment(&o, "").is_none());
+    }
+
+    /// A heading with no alphanumerics ("***", "---", an em dash) slugifies to the empty
+    /// string, and `want.starts_with("")` is true for every fragment — so the reader scrolled
+    /// confidently to the wrong block instead of reporting a miss. The module doc calls that
+    /// difference the one between a heuristic and a lie.
+    #[test]
+    fn a_heading_with_no_slug_does_not_match_every_fragment() {
+        let blocks = vec![heading(1, "***"), heading(1, "Real Section")];
+        let o = build(&blocks);
+        assert_eq!(o[0].slug, "", "fixture no longer exercises the empty slug");
+        assert!(find_fragment(&o, "totally-unrelated").is_none());
+        // The real heading still matches, exactly and by prefix.
+        assert_eq!(find_fragment(&o, "real-section").map(|e| e.block), Some(1));
+        assert_eq!(
+            find_fragment(&o, "real-section-2").map(|e| e.block),
+            Some(1)
+        );
     }
 }

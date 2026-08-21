@@ -14,6 +14,15 @@ use crate::reader::inline::{Run, Style, flatten};
 pub struct TextOpts {
     pub width: usize,
     pub show_links: bool,
+    /// Levels of reply indent before nesting stops accumulating.
+    ///
+    /// `Comment::depth` is page-controlled — `thread::depth_of` parses an `indent` attribute
+    /// as a `u16` and does not clamp it — and the pad is emitted once per *word*, because a
+    /// pad wider than `width` drives the wrap width to zero. Uncapped, one comment carrying
+    /// `indent="60000"` and a 240-character body renders 5.9 MB of spaces. The GUI has always
+    /// capped this via [`crate::reader::opts::ReadOpts::max_thread_indent`]; this is the same
+    /// bound for the same reason.
+    pub max_thread_indent: u16,
 }
 
 impl Default for TextOpts {
@@ -21,7 +30,15 @@ impl Default for TextOpts {
         Self {
             width: 78,
             show_links: false,
+            max_thread_indent: 8,
         }
+    }
+}
+
+impl TextOpts {
+    /// Columns of indent for a reply at `depth`.
+    fn indent_for(&self, depth: u16) -> usize {
+        usize::from(depth.min(self.max_thread_indent)) * 2
     }
 }
 
@@ -126,11 +143,9 @@ fn render_block(b: &Block, o: &TextOpts, indent: usize, out: &mut String) {
             for c in comments {
                 let who = c.author.as_deref().unwrap_or("anon");
                 let when = c.timestamp.as_deref().unwrap_or("");
-                out.push_str(&format!(
-                    "{}{who} {when}\n",
-                    " ".repeat(indent + c.depth as usize * 2)
-                ));
-                render_blocks(&c.blocks, o, indent + c.depth as usize * 2, out);
+                let depth = indent + o.indent_for(c.depth);
+                out.push_str(&format!("{}{who} {when}\n", " ".repeat(depth)));
+                render_blocks(&c.blocks, o, depth, out);
             }
         }
     }
@@ -176,7 +191,16 @@ fn marked(text: &str, style: Style) -> String {
     t
 }
 
+/// Wrap to `width`, never narrower than this.
+///
+/// A wrap width of zero puts every word on its own line, each carrying the full pad — so a
+/// wide indent does not merely look bad, it multiplies the output by the word count. The
+/// indent cap in [`TextOpts::indent_for`] is the primary bound; this is the floor that holds
+/// when indents nest or `width` is set very small.
+const MIN_WRAP: usize = 20;
+
 fn wrap(text: &str, width: usize, pad: &str) -> String {
+    let width = width.max(MIN_WRAP);
     let mut out = String::new();
     for para in text.split('\n') {
         let mut line = String::new();
@@ -289,8 +313,8 @@ mod tests {
         ];
         for show_links in [false, true] {
             let o = TextOpts {
-                width: 78,
                 show_links,
+                ..TextOpts::default()
             };
             for case in &cases {
                 assert_eq!(
@@ -352,5 +376,37 @@ mod tests {
         assert!(out.contains("## A heading"));
         assert!(out.contains("Prose with *weight* and a link."));
         assert!(out.contains("- one"));
+    }
+
+    /// `Comment::depth` comes from a page-controlled `indent` attribute with no clamp, and the
+    /// pad is emitted once per *word* once it exceeds the wrap width. Uncapped, this one
+    /// comment rendered 5.9 MB of spaces.
+    #[test]
+    fn a_hostile_reply_depth_cannot_inflate_the_output() {
+        let body = "word ".repeat(48).trim_end().to_owned();
+        let doc = Document {
+            url: String::new(),
+            title: None,
+            byline: None,
+            published: None,
+            site_name: None,
+            lang: None,
+            blocks: vec![Block::Thread(vec![crate::ir::Comment {
+                author: Some("a".into()),
+                timestamp: None,
+                depth: u16::MAX,
+                id: None,
+                blocks: vec![Block::Paragraph(vec![t(&body)])],
+            }])],
+        };
+        let out = to_text(&doc, &TextOpts::default());
+        assert!(
+            out.len() < 2_000,
+            "one comment rendered {} bytes",
+            out.len()
+        );
+        // Capped, not dropped: the reply is still indented as deeply as the cap allows.
+        let o = TextOpts::default();
+        assert!(out.contains(&" ".repeat(o.indent_for(o.max_thread_indent))));
     }
 }

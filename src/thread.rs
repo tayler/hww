@@ -8,7 +8,7 @@
 //! The approach here is structural rather than heuristic: find the largest set of sibling
 //! elements sharing a class signature, and treat each as a post.
 
-use crate::ir::{Block, Comment, Inline};
+use crate::ir::{self, Block, Comment};
 use ego_tree::NodeRef;
 use scraper::{ElementRef, Html, Node};
 use std::collections::HashMap;
@@ -191,31 +191,24 @@ fn text_len(node: NodeRef<'_, Node>) -> usize {
     text_of(node).len()
 }
 
+/// Iterative: a comment page is untrusted input, and one stack frame per DOM level is an
+/// abort waiting for a deep enough page. Same reasoning as `html::collect_text`.
 fn collect(node: NodeRef<'_, Node>, out: &mut String) {
-    match node.value() {
-        Node::Text(t) => out.push_str(t),
-        Node::Element(e) if matches!(e.name.local.as_ref(), "script" | "style" | "svg") => {}
-        _ => node.children().for_each(|c| collect(c, out)),
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        match n.value() {
+            Node::Text(t) => out.push_str(t),
+            Node::Element(e) if matches!(e.name.local.as_ref(), "script" | "style" | "svg") => {}
+            _ => stack.extend(n.children().rev()),
+        }
     }
 }
 
 /// Sum of text in a block list, for deciding thread-vs-article.
+///
+/// One of the three shared text-length counters — see `AGENTS.md`. It used to build a
+/// throwaway `Document` per comment just to reach `text_len`, which cloned every block tree
+/// it measured.
 pub fn comments_text_len(cs: &[Comment]) -> usize {
-    cs.iter()
-        .map(|c| {
-            crate::ir::Document {
-                url: String::new(),
-                title: None,
-                byline: None,
-                published: None,
-                site_name: None,
-                lang: None,
-                blocks: c.blocks.clone(),
-            }
-            .text_len()
-        })
-        .sum()
+    cs.iter().map(|c| ir::blocks_text_len(&c.blocks)).sum()
 }
-
-#[allow(dead_code)]
-fn unused(_: Inline) {}

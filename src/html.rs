@@ -151,17 +151,11 @@ pub fn extract(source: &str, url: &Url) -> Document {
     doc
 }
 
+/// One of the three shared text-length counters — see `AGENTS.md`. This used to build a
+/// throwaway `Document` around a cloned block list, once per `content_root` candidate and
+/// again on the `<body>` fallback: up to six copies of a whole document per page.
 fn block_text(blocks: &[Block]) -> usize {
-    Document {
-        url: String::new(),
-        title: None,
-        byline: None,
-        published: None,
-        site_name: None,
-        lang: None,
-        blocks: blocks.to_vec(),
-    }
-    .text_len()
+    crate::ir::blocks_text_len(blocks)
 }
 
 /// Text belonging to this element directly, stopping at nested block containers.
@@ -173,22 +167,24 @@ fn own_text(node: NodeRef<'_, Node>) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Iterative for the same reason as [`collect_text`]. The `root` flag rides on the stack.
 fn own_text_into(node: NodeRef<'_, Node>, out: &mut String, root: bool) {
-    match node.value() {
-        Node::Text(t) => out.push_str(t),
-        Node::Element(e) => {
-            let name = e.name.local.as_ref();
-            if NOISE.contains(&name) {
-                return;
+    let mut stack = vec![(node, root)];
+    while let Some((n, is_root)) = stack.pop() {
+        match n.value() {
+            Node::Text(t) => out.push_str(t),
+            Node::Element(e) => {
+                let name = e.name.local.as_ref();
+                if NOISE.contains(&name) {
+                    continue;
+                }
+                if !is_root && BLOCK_LEVEL.contains(&name) {
+                    continue; // a nested block owns its own text
+                }
+                stack.extend(n.children().rev().map(|c| (c, false)));
             }
-            if !root && BLOCK_LEVEL.contains(&name) {
-                return; // a nested block owns its own text
-            }
-            for c in node.children() {
-                own_text_into(c, out, false);
-            }
+            _ => {}
         }
-        _ => {}
     }
 }
 
@@ -287,14 +283,17 @@ fn inner_text(node: NodeRef<'_, Node>) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Iterative, like [`crate::reader::thread_tree`]'s traversal and for the same reason: the
+/// input is untrusted, a recursive walk costs a stack frame per DOM level, and a stack
+/// overflow is an abort that no guard in the reader can contain. See [`MAX_DEPTH`] for the
+/// walkers that cannot be flattened this cheaply.
 fn collect_text(node: NodeRef<'_, Node>, out: &mut String) {
-    match node.value() {
-        Node::Text(t) => out.push_str(t),
-        Node::Element(e) if NOISE.contains(&e.name.local.as_ref()) => {}
-        _ => {
-            for c in node.children() {
-                collect_text(c, out);
-            }
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        match n.value() {
+            Node::Text(t) => out.push_str(t),
+            Node::Element(e) if NOISE.contains(&e.name.local.as_ref()) => {}
+            _ => stack.extend(n.children().rev()),
         }
     }
 }
@@ -318,6 +317,20 @@ fn link_density(el: &ElementRef) -> f64 {
 
 // ---------- IR construction ----------
 
+/// How far [`walk_blocks`] and [`inlines_from`] will descend.
+///
+/// Both build a *tree*, so neither flattens into an explicit stack the way [`collect_text`]
+/// does, and both cost a stack frame per DOM level. Untrusted input reaches them directly:
+/// roughly 2,000 nested `<div>`s — about 22 KB, three orders of magnitude under the 5 MB
+/// transfer cap — overflowed the 2 MiB stack of a `reader::ui::net` worker and aborted the
+/// process. An abort is not a panic, so `ReplyGuard` cannot turn it into a failed tab.
+///
+/// 256 is far past any real document (deep-but-sane pages measure under 100) and leaves the
+/// worker stack an order of magnitude of headroom even when the two walkers interleave.
+/// Content below the limit is not dropped — it is flattened to text — so the cap degrades a
+/// pathological page rather than blanking it.
+const MAX_DEPTH: usize = 256;
+
 /// Public entry point for the thread extractor, which builds blocks for one post.
 pub fn blocks_from_public(root: ElementRef<'_>, base: &Url) -> Vec<Block> {
     blocks_from(root, base)
@@ -325,11 +338,19 @@ pub fn blocks_from_public(root: ElementRef<'_>, base: &Url) -> Vec<Block> {
 
 fn blocks_from(root: ElementRef<'_>, base: &Url) -> Vec<Block> {
     let mut out = Vec::new();
-    walk_blocks(*root, base, &mut out);
+    walk_blocks(*root, base, &mut out, 0);
     out
 }
 
-fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>) {
+fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth: usize) {
+    if depth >= MAX_DEPTH {
+        // Keep the text rather than the structure; see `MAX_DEPTH`.
+        let text = inner_text(node);
+        if text.len() > 40 {
+            out.push(Block::Paragraph(vec![Inline::Text(text)]));
+        }
+        return;
+    }
     for child in node.children() {
         let Some(el) = ElementRef::wrap(child) else {
             // Bare text directly under a container still counts as a paragraph.
@@ -347,7 +368,7 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>) {
         match el.value().name() {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 let level = el.value().name().as_bytes()[1] - b'0';
-                let inl = inlines_from(child, base);
+                let inl = inlines_from(child, base, depth + 1);
                 if !inl.is_empty() {
                     out.push(Block::Heading {
                         level,
@@ -356,7 +377,7 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>) {
                 }
             }
             "p" => {
-                let inl = inlines_from(child, base);
+                let inl = inlines_from(child, base, depth + 1);
                 if !inl.is_empty() {
                     out.push(Block::Paragraph(inl));
                 }
@@ -369,9 +390,9 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>) {
                     .filter(|l| l.parent().map(|p| p.id()) == Some(child.id()))
                     .map(|l| {
                         let mut b = Vec::new();
-                        walk_blocks(*l, base, &mut b);
+                        walk_blocks(*l, base, &mut b, depth + 2);
                         if b.is_empty() {
-                            let inl = inlines_from(*l, base);
+                            let inl = inlines_from(*l, base, depth + 2);
                             if !inl.is_empty() {
                                 b.push(Block::Paragraph(inl));
                             }
@@ -386,7 +407,7 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>) {
             }
             "blockquote" => {
                 let mut b = Vec::new();
-                walk_blocks(child, base, &mut b);
+                walk_blocks(child, base, &mut b, depth + 1);
                 if !b.is_empty() {
                     out.push(Block::Quote {
                         blocks: b,
@@ -423,7 +444,7 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>) {
                     let caption = el
                         .select(&cap_sel)
                         .next()
-                        .map(|c| inlines_from(*c, base))
+                        .map(|c| inlines_from(*c, base, depth + 2))
                         .filter(|c| !c.is_empty());
                     out.push(Block::Figure {
                         image: img,
@@ -432,16 +453,16 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>) {
                 }
             }
             "table" => {
-                if let Some(t) = table_from(&el, base) {
+                if let Some(t) = table_from(&el, base, depth) {
                     out.push(t);
                 }
             }
             // Containers: recurse. Inline-level leftovers get gathered as a paragraph.
             _ => {
                 let before = out.len();
-                walk_blocks(child, base, out);
+                walk_blocks(child, base, out, depth + 1);
                 if out.len() == before {
-                    let inl = inlines_from(child, base);
+                    let inl = inlines_from(child, base, depth + 1);
                     if inlines_len(&inl) > 40 {
                         out.push(Block::Paragraph(inl));
                     }
@@ -462,8 +483,16 @@ fn inlines_len(v: &[Inline]) -> usize {
         .sum()
 }
 
-fn inlines_from(node: NodeRef<'_, Node>, base: &Url) -> Vec<Inline> {
+fn inlines_from(node: NodeRef<'_, Node>, base: &Url, depth: usize) -> Vec<Inline> {
     let mut out = Vec::new();
+    if depth >= MAX_DEPTH {
+        // Keep the text rather than the styling; see `MAX_DEPTH`.
+        let text = inner_text(node);
+        if !text.is_empty() {
+            out.push(Inline::Text(text));
+        }
+        return out;
+    }
     for child in node.children() {
         match child.value() {
             Node::Text(t) => {
@@ -488,8 +517,10 @@ fn inlines_from(node: NodeRef<'_, Node>, base: &Url) -> Vec<Inline> {
                     continue;
                 }
                 match e.name.local.as_ref() {
-                    "em" | "i" => out.push(Inline::Emph(inlines_from(child, base))),
-                    "strong" | "b" => out.push(Inline::Strong(inlines_from(child, base))),
+                    "em" | "i" => out.push(Inline::Emph(inlines_from(child, base, depth + 1))),
+                    "strong" | "b" => {
+                        out.push(Inline::Strong(inlines_from(child, base, depth + 1)))
+                    }
                     "code" | "kbd" | "samp" => out.push(Inline::Code(inner_text(child))),
                     "br" => out.push(Inline::Break),
                     "img" => {
@@ -498,7 +529,7 @@ fn inlines_from(node: NodeRef<'_, Node>, base: &Url) -> Vec<Inline> {
                         }
                     }
                     "a" => {
-                        let inl = inlines_from(child, base);
+                        let inl = inlines_from(child, base, depth + 1);
                         match el.value().attr("href").and_then(|h| base.join(h).ok()) {
                             Some(href) if !inl.is_empty() => out.push(Inline::Link {
                                 href: href.to_string(),
@@ -507,7 +538,7 @@ fn inlines_from(node: NodeRef<'_, Node>, base: &Url) -> Vec<Inline> {
                             _ => out.extend(inl),
                         }
                     }
-                    _ => out.extend(inlines_from(child, base)),
+                    _ => out.extend(inlines_from(child, base, depth + 1)),
                 }
             }
             _ => {}
@@ -582,35 +613,39 @@ fn image_from(el: &ElementRef, base: &Url) -> Option<Image> {
     })
 }
 
-fn table_from(el: &ElementRef, base: &Url) -> Option<Block> {
+/// A row is a *header* row only when every cell it owns is a `<th>`.
+///
+/// Splitting on "does this row contain any `<th>`" instead loses data both ways on the
+/// row-header tables that infoboxes and spec sheets are built from: the first
+/// `<tr><th>Name</th><td>Alice</td></tr>` contributed `Name` as the only header and dropped
+/// `Alice`, and every row after it contributed its `<td>`s and dropped its `<th>`. Cells are
+/// collected in document order with one selector so a mixed row keeps its shape.
+fn table_from(el: &ElementRef, base: &Url, depth: usize) -> Option<Block> {
     let tr = Selector::parse("tr").ok()?;
-    let th = Selector::parse("th").ok()?;
-    let td = Selector::parse("td").ok()?;
-    let mut headers = Vec::new();
-    let mut rows = Vec::new();
+    let cell = Selector::parse("th, td").ok()?;
+    let mut headers: Vec<Vec<Inline>> = Vec::new();
+    let mut rows: Vec<Vec<Vec<Inline>>> = Vec::new();
     // Descendant selectors reach *through* nested tables, so every cell of an inner table
     // would be emitted once for each enclosing table. Keep only cells this table owns.
     for row in el
         .select(&tr)
         .filter(|r| owning_table(**r) == Some(el.id()))
     {
-        let hs: Vec<Vec<Inline>> = row
-            .select(&th)
+        let cells: Vec<(bool, Vec<Inline>)> = row
+            .select(&cell)
             .filter(|c| owning_row(**c) == Some(row.id()))
-            .map(|c| inlines_from(*c, base))
+            .map(|c| (c.value().name() == "th", inlines_from(*c, base, depth + 1)))
             .collect();
-        if !hs.is_empty() && headers.is_empty() {
-            headers = hs;
+        if cells.is_empty() {
             continue;
         }
-        let cells: Vec<Vec<Inline>> = row
-            .select(&td)
-            .filter(|c| owning_row(**c) == Some(row.id()))
-            .map(|c| inlines_from(*c, base))
-            .collect();
-        if !cells.is_empty() {
-            rows.push(cells);
+        // Headers come first or not at all: an all-`<th>` row further down is a repeated
+        // header or a footer, and keeping it as data is what stops it disappearing.
+        if headers.is_empty() && rows.is_empty() && cells.iter().all(|(is_th, _)| *is_th) {
+            headers = cells.into_iter().map(|(_, c)| c).collect();
+            continue;
         }
+        rows.push(cells.into_iter().map(|(_, c)| c).collect());
     }
     (!rows.is_empty()).then_some(Block::Table { headers, rows })
 }
@@ -899,5 +934,98 @@ mod tests {
         let json = serde_json::to_string(&d).unwrap();
         assert!(!json.contains("color"), "style leaked into the IR");
         assert!(!json.contains("font-size"), "style leaked into the IR");
+    }
+
+    /// A stack overflow is an abort, not a panic, so no guard in the reader can contain it —
+    /// one hostile page would take the whole GUI process with it. Roughly 2,000 nested divs
+    /// (about 22 KB, three orders of magnitude under the transfer cap) used to be enough on a
+    /// worker's 2 MiB stack, and this is comfortably past that.
+    ///
+    /// Kept at 5,000 rather than higher because `content_root`'s ancestor scoring is quadratic
+    /// in depth — 20,000 takes 15s where 5,000 takes one. That cost is a separate problem from
+    /// the abort, and it is bounded by this cap rather than fixed by it.
+    #[test]
+    fn a_pathologically_nested_page_extracts_instead_of_aborting() {
+        const DEPTH: usize = 5_000;
+        let mut src = String::from("<html><body><article>");
+        src.push_str(&"<div>".repeat(DEPTH));
+        src.push_str("the sentence at the bottom of five thousand divs, long enough to keep");
+        src.push_str(&"</div>".repeat(DEPTH));
+        src.push_str("</article></body></html>");
+
+        // 2 MiB is what `std::thread` gives a `reader::ui::net` worker, which is where
+        // extraction actually runs in the GUI.
+        let out = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let doc = extract(&src, &Url::parse("https://example.com/a").unwrap());
+                doc.text_len()
+            })
+            .unwrap()
+            .join()
+            .expect("extraction unwound");
+        // Capped, not dropped: the text below the limit is flattened, not discarded.
+        assert!(out > 0, "the deep page extracted nothing at all");
+    }
+
+    /// Row-header tables — infoboxes, spec sheets — put a `<th>` and a `<td>` in the same row.
+    /// Treating "has any `<th>`" as "is the header row" dropped a cell from every line.
+    #[test]
+    fn a_row_header_table_keeps_every_cell() {
+        let src = "<html><body><article>\
+            <p>A lead paragraph carrying enough prose that this subtree wins content selection \
+               against the bare body fallback, which it must for the table to be reached.</p>\
+            <table>\
+              <tr><th>Name</th><td>Alice</td></tr>\
+              <tr><th>Role</th><td>Engineer</td></tr>\
+            </table></article></body></html>";
+        let doc = extract(src, &Url::parse("https://example.com/a").unwrap());
+        let table = doc
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Table { headers, rows } => Some((headers, rows)),
+                _ => None,
+            })
+            .expect("no table extracted");
+        let (headers, rows) = table;
+        let cells: Vec<String> = headers
+            .iter()
+            .chain(rows.iter().flatten())
+            .map(|c| crate::ir::plain_text(c))
+            .collect();
+        for want in ["Name", "Alice", "Role", "Engineer"] {
+            assert!(
+                cells.iter().any(|c| c == want),
+                "table lost {want:?}: {cells:?}"
+            );
+        }
+        // A mixed row is data, not a header row, so nothing is promoted out of the grid.
+        assert!(headers.is_empty(), "mixed rows should not yield headers");
+        assert_eq!(rows.len(), 2);
+    }
+
+    /// The all-`<th>` case still works, which is the reason the split existed.
+    #[test]
+    fn an_all_header_first_row_is_still_the_header_row() {
+        let src = "<html><body><article>\
+            <p>A lead paragraph carrying enough prose that this subtree wins content selection \
+               against the bare body fallback, which it must for the table to be reached.</p>\
+            <table>\
+              <tr><th>Name</th><th>Role</th></tr>\
+              <tr><td>Alice</td><td>Engineer</td></tr>\
+            </table></article></body></html>";
+        let doc = extract(src, &Url::parse("https://example.com/a").unwrap());
+        let (headers, rows) = doc
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Table { headers, rows } => Some((headers, rows)),
+                _ => None,
+            })
+            .expect("no table extracted");
+        assert_eq!(headers.len(), 2);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 2);
     }
 }

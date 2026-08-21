@@ -36,6 +36,9 @@ struct Traf {
 
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().collect();
+    if a.len() < 4 {
+        anyhow::bail!("usage: bench <signals.jsonl> <baseline.json> <cache-dir>");
+    }
     let rows: Vec<Row> = std::fs::read_to_string(&a[1])?
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -106,7 +109,8 @@ fn main() -> Result<()> {
     for (ratio, host, vis, theirs, ours, url) in rows_out.iter().take(12) {
         println!(
             "  {ratio:5.2}  vis={vis:7} traf={theirs:6} hww={ours:6}  {host:24} {}",
-            &url[..url.len().min(52)]
+            // By characters, not bytes: byte slicing panics mid-character.
+            url.chars().take(52).collect::<String>()
         );
     }
     println!("\nbest 6:");

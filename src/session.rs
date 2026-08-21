@@ -92,6 +92,7 @@ impl std::fmt::Display for Provenance {
             Truncation::AtCap(n) => format!(" | truncated at {} MB", n / 1_000_000),
             Truncation::MaybeAtCap(n) => format!(" | may be truncated at {} MB", n / 1_000_000),
             Truncation::Timeout(d) => format!(" | truncated: timed out after {}s", d.as_secs()),
+            Truncation::Incomplete(n) => format!(" | truncated: connection dropped at {n} bytes"),
         };
         write!(
             f,

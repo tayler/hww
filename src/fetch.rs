@@ -11,7 +11,7 @@
 //! by an `anyhow::bail!`. That is what lets a reader show the right diagnosis instead of a
 //! generic network error.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use url::Url;
 
 pub const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
@@ -107,6 +107,10 @@ pub enum Truncation {
     MaybeAtCap(usize),
     /// Ran out of time mid-body. Whatever arrived is kept.
     Timeout(Duration),
+    /// The connection died mid-body, well short of the cap. Carries what did arrive, because
+    /// naming a limit that was never approached ("may be truncated at 5 MB" after 3 KB) both
+    /// misstates the size and hides the real cause.
+    Incomplete(usize),
 }
 
 impl Truncation {
@@ -156,6 +160,12 @@ pub enum FetchError {
     /// useful message, not a transport failure.
     #[error("unusable redirect target: {0}")]
     BadLocation(String),
+    /// A 3xx with no `Location` at all. Its own arm because falling out of the redirect loop
+    /// reported it as [`FetchError::TooManyRedirects`] with an *empty* hop list — telling the
+    /// reader a single 304 was a consent wall, which is the confidently-wrong diagnosis
+    /// `LoadError::NotWebPage` exists to avoid.
+    #[error("{0} redirect with no Location header")]
+    RedirectWithoutLocation(u16),
     #[error(transparent)]
     Transport(#[from] reqwest::Error),
     /// The connection died partway through the body. Distinct from `Transport` because it is
@@ -205,14 +215,24 @@ impl Fetcher {
         let mut hops = Vec::new();
         let mut cookie_attempts = 0usize;
 
+        // One budget for the whole fetch. Applying `limits.timeout` per hop instead let a
+        // 5-redirect chain run six times the timeout that is documented, surfaced on the
+        // failure screen, and used to decide `LikelyBlocked` — the reader sat on "Loading"
+        // for 90s with nothing to distinguish it from a hang.
+        let deadline = Instant::now() + limits.timeout;
+
         for _ in 0..=MAX_REDIRECTS {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(timeout_error(limits));
+            }
             let mut req = self
                 .client
                 .get(current.clone())
                 .header("Accept", limits.accept)
                 .header("Accept-Language", "en-US,en;q=0.9")
                 // Overrides the client default; no second `Client`, so nothing else changes.
-                .timeout(limits.timeout);
+                .timeout(remaining);
             // Same value across every hop — CDNs that bounce to a signed URL break otherwise.
             if let Some(v) = &referer_value {
                 req = req.header(reqwest::header::REFERER, v);
@@ -231,7 +251,7 @@ impl Fetcher {
 
             if status.is_redirection() {
                 let Some(loc) = resp.headers().get(reqwest::header::LOCATION) else {
-                    break;
+                    return Err(FetchError::RedirectWithoutLocation(status.as_u16()));
                 };
                 let loc = loc.to_str().map_err(|_| {
                     FetchError::BadLocation(String::from_utf8_lossy(loc.as_bytes()).into_owned())
@@ -320,8 +340,10 @@ fn classify(
         }
         return Ok(if timed_out {
             Truncation::Timeout(limits.timeout)
-        } else {
+        } else if body.len() >= limits.max_bytes {
             Truncation::MaybeAtCap(limits.max_bytes)
+        } else {
+            Truncation::Incomplete(body.len())
         });
     }
     if body.len() < limits.max_bytes {
@@ -514,5 +536,99 @@ mod tests {
         html.extend_from_slice(b"<meta charset=\"windows-1251\">");
         let (_, enc) = decode(&html, None);
         assert_eq!(enc.name(), "UTF-8");
+    }
+
+    /// A one-shot loopback server, so the redirect and body-truncation paths are exercised
+    /// rather than reasoned about. No outbound network: CI stays offline.
+    fn serve(replies: impl Fn(usize, &mut std::net::TcpStream) + Send + 'static) -> u16 {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for (i, stream) in listener.incoming().enumerate().take(MAX_REDIRECTS + 2) {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.read(&mut [0u8; 2048]);
+                replies(i, &mut stream);
+            }
+        });
+        port
+    }
+
+    fn local(port: u16, path: &str) -> Url {
+        Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap()
+    }
+
+    /// A 3xx with no `Location` used to fall out of the redirect loop into
+    /// `TooManyRedirects` — with an *empty* hop list — so the reader told the user a single
+    /// 304 was "usually a consent wall".
+    #[test]
+    fn a_redirect_without_a_location_is_not_a_redirect_loop() {
+        use std::io::Write;
+        let port = serve(|_, s| {
+            let _ = s.write_all(b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n");
+        });
+        let err = Fetcher::new()
+            .unwrap()
+            .get_with(&local(port, "/noloc"), None, &Limits::HTML)
+            .unwrap_err();
+        assert!(
+            matches!(err, FetchError::RedirectWithoutLocation(302)),
+            "got {err:?}"
+        );
+    }
+
+    /// `MaybeAtCap` names a limit. Naming one that was never approached — "may be truncated at
+    /// 5 MB" after 3 KB arrived — both misstates the size and hides the dropped connection.
+    #[test]
+    fn a_dropped_connection_is_not_reported_as_hitting_the_cap() {
+        use std::io::Write;
+        let port = serve(|_, s| {
+            let _ = s.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 100000\r\n\r\n",
+            );
+            let _ = s.write_all(&[b'a'; 3000]);
+            // ...and hang up, well short of the promised body.
+        });
+        let resp = Fetcher::new()
+            .unwrap()
+            .get_with(&local(port, "/short"), None, &Limits::HTML)
+            .expect("a partial body still renders");
+        assert_eq!(resp.truncation, Truncation::Incomplete(3000));
+        assert!(resp.truncated());
+    }
+
+    /// `TIMEOUT` is documented as *the* timeout, shown on the failure screen, and used to
+    /// decide `LikelyBlocked`. Applied per hop instead, a redirect chain ran to six times it.
+    #[test]
+    fn the_timeout_bounds_the_whole_fetch_not_each_hop() {
+        use std::io::Write;
+        let budget = Duration::from_millis(900);
+        let port = serve(move |i, s| {
+            // Comfortably inside the budget on its own; six of them are not.
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = s.write_all(
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: /hop{}\r\nContent-Length: 0\r\n\r\n",
+                    i + 1
+                )
+                .as_bytes(),
+            );
+        });
+        let limits = Limits {
+            timeout: budget,
+            ..Limits::HTML
+        };
+        let start = Instant::now();
+        let err = Fetcher::new()
+            .unwrap()
+            .get_with(&local(port, "/hop0"), None, &limits)
+            .unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < budget * 2,
+            "the chain ran {elapsed:?} against a {budget:?} budget"
+        );
+        // Out of time, not out of redirects.
+        assert!(matches!(err, FetchError::LikelyBlocked), "got {err:?}");
     }
 }

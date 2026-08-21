@@ -1,8 +1,25 @@
 //! Debug one cached page: what did content selection pick, and what came out?
 //! usage: dbg <signals.jsonl> <cache-dir> <url-substring> [--text]
-use anyhow::Result;
+use anyhow::{Result, bail};
 use hww::{html, render};
 use serde::Deserialize;
+
+const USAGE: &str = "usage: dbg <signals.jsonl> <cache-dir> <url-substring> [--text]";
+
+/// Truncate to at most `max` *bytes*, on a character boundary.
+///
+/// `&s[..max]` panics when the boundary lands inside a multi-byte character, which for a
+/// three-byte character is most of the time — so this tool used to die on any CJK page.
+fn head(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 #[derive(Deserialize)]
 struct Sig {
@@ -19,6 +36,9 @@ struct Row {
 
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().collect();
+    if a.len() < 4 {
+        bail!("{USAGE}");
+    }
     let rows: Vec<Row> = std::fs::read_to_string(&a[1])?
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -45,7 +65,7 @@ fn main() -> Result<()> {
         );
         if a.len() > 4 {
             let t = render::to_text(&doc, &render::TextOpts::default());
-            println!("{}", &t[..t.len().min(1400)]);
+            println!("{}", head(&t, 1400));
         }
         break;
     }

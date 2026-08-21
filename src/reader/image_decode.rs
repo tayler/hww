@@ -129,6 +129,8 @@ pub fn partial_label(t: Truncation) -> Option<String> {
             n / 1_000_000
         )),
         Truncation::Timeout(d) => Some(format!("partial: timed out after {}s", d.as_secs())),
+        // Naming the cap here would be a lie: the transfer died nowhere near it.
+        Truncation::Incomplete(n) => Some(format!("partial: connection dropped at {n} bytes")),
     }
 }
 
