@@ -194,3 +194,70 @@ page at 20 chars vs 1,191 is a genuine article failure and remains unexplained.
 One deal-aggregator forum is still not detected; its sibling group fails the attribution test.
 One discussion site remains JS-gated and needs the per-site rewrite layer to reach its
 server-rendered alternate domain.
+
+---
+
+# Phase 2 — per-site rules
+
+The layer Phase 0 called for: a host swap that reaches a JS-gated site's own server-rendered
+alternate domain. Measured on one comment page of that site:
+
+| | requested host | alternate host |
+|---|---:|---:|
+| bytes | 8,434 | 246,619 |
+| extracted | **0** | **8,331** |
+
+That is the whole feature. It converts on the order of two pages of 87 — small, and the only
+mechanism that can reach them at all.
+
+## The hint that measured worse than no hint
+
+The plan had a second half: per-site extraction hints, starting with `force_thread` on
+comment pages. A comment page *is* a discussion, so forcing the thread path looked obviously
+right, and it was justified as belt-and-braces — the merge in `html::extract` would pick the
+thread anyway; the hint only removes the dependence on a length comparison.
+
+Measured on the same page, on identical bytes:
+
+| | extracted |
+|---|---:|
+| `force_thread` on | 2,254 |
+| `force_thread` off | **8,331** |
+
+The thread detector finds 13 of the page's 61 comments, because replies nest in child
+containers rather than sitting as siblings. The article path picks up the whole comment tree,
+and the unhinted merge then *appends* the detected thread to it. Forcing the thread throws the
+larger result away.
+
+**A hint that looked principled destroyed 73% of the content.** This is the same
+"plausible-looking failure" recorded at the top of this document, one layer up: the failure was
+invisible from the outside, because the page still rendered as a clean, correctly attributed
+discussion — just a much shorter one.
+
+Two consequences:
+
+1. **The hint machinery was removed, not just switched off.** With its one candidate rule
+   measured worse and nothing else in the corpus asking for one, keeping the plumbing would
+   have been mechanism with no caller — the same standard that had already cut two other hints
+   during planning. This layer rewrites URLs and does nothing else. `html.rs` and `thread.rs`
+   are untouched by it.
+2. **The forum problem is not solved by a rewrite.** Reaching a server-rendered domain gets the
+   bytes; the 13-of-61 figure says thread extraction still loses nested replies. That is a
+   `thread.rs` problem and it remains open.
+
+## What shipped
+
+Host matching at a label boundary — `evil-example.com` is not `example.com` — with rewriting
+confined to the entry URL, never to redirect hops. Non-web schemes pass through untouched
+because gemini and gopher are next. A URL carrying credentials is never rewritten: moving
+userinfo to another host would leak it.
+
+There is no config file, and no fallback when a rewrite fails. Instead, a request that does not
+end on the host it was rewritten to is reported as a dead rule on stderr — the early warning
+that stands in for a retry until one is measured to be needed. The test is leaving the
+alternate, not returning to the exact host typed: the realistic bounce is to a sibling of it.
+The swap itself is reported before the request goes out, so a fetch that fails or hangs cannot
+swallow it.
+
+`src/rewrite.rs` is the only file in the crate that contains a hostname. The module graph keeps
+it that way: `rewrite` imports no extractor, and nothing imports `rewrite` except `main.rs`.

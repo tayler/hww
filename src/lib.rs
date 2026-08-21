@@ -10,6 +10,7 @@ pub mod fetch;
 pub mod html;
 pub mod ir;
 pub mod render;
+pub mod rewrite;
 pub mod thread;
 
 /// Length of the text carried by a list of inlines. Shared by the extractors.

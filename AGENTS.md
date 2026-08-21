@@ -93,8 +93,9 @@ shape — none of them know a domain name. Nothing imports `rewrite` except `mai
    entries, no curated directory of the web.
 3. **Offline.** Compiled in, never fetched, never auto-updated — a remotely updated rule list
    is a channel that reports what you read.
-4. **Reported.** Every applied rule prints on stderr. hww never silently contacts a host the
-   user did not name.
+4. **Reported.** Every applied rule prints on stderr *before* the request goes out, so a fetch
+   that fails or hangs cannot swallow it. hww never silently contacts a host the user did not
+   name.
 
 Mechanically: host matching at a label boundary (`evil-example.com` is not `example.com`),
 the entry URL only and never redirect hops, non-web schemes and credential-carrying URLs
@@ -131,9 +132,9 @@ mechanism with no caller. The per-site layer rewrites URLs and does nothing else
 **Nested replies in `thread.rs` are an open problem.** That 13-of-61 is not fixed by a URL
 rewrite: a rewrite gets the bytes, extraction still loses the tree.
 
-**No config file, and no fallback when a rewrite fails.** A rewritten host that redirects back
-to where it started is reported as a dead rule on stderr — the early warning that stands in
-for a retry until one is measured to be needed.
+**No config file, and no fallback when a rewrite fails.** A request that does not end on the
+host it was rewritten to is reported as a dead rule on stderr — the early warning that stands
+in for a retry until one is measured to be needed.
 
 ## Testing
 
