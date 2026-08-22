@@ -48,11 +48,28 @@ Local-only tools. These need gitignored inputs and are **not** run by CI:
 
 `hww-shot` needs no gitignored input, only a display. It opens the reader in a named state,
 photographs it, and prints one line per scene (`--list` for the catalog, `src/bin/shot.rs` for
-why it is built the way it is):
+why it is built the way it is). **Name the scenes you are working on.** Checking one change
+costs one scene, and that is the whole of what an ordinary task needs:
 
-    cargo run --features gui --bin hww-shot -- --all      # every state, into ./shots
-    cargo run --features gui --bin hww-shot -- --check    # the same, compared, exit 1 on a change
     cargo run --features gui --bin hww-shot -- help find  # two of them
+    cargo run --features gui --bin hww-shot -- --url URL  # one page, fetched for real
+
+Send an ad-hoc look somewhere else with `--out`. A run that is not `--check` writes what it
+photographed into the baseline, and a scene's hash depends on `--settle`: `article` is
+`b2e77a10` at `--settle 1200` and `b4cf1344` at the default 600, same pixels' worth of page and
+a different picture. So one scene shot with a flag tuned for looking at it will report the
+whole catalog's next `--check` as changed. Write into `./shots` only when re-baselining is what
+you mean.
+
+The full catalog is the regression suite, and it is a different job: it owns the display until
+it finishes, and the window has to stay **visible** the whole time, because a compositor stops
+sending frame callbacks to a surface it considers hidden and the run stalls where it stands.
+That makes it something to ask for rather than to run on the way past, so a bare invocation
+refuses rather than photographing everything. Run it deliberately, when the reader's chrome has
+actually moved:
+
+    cargo run --features gui --bin hww-shot -- --all           # every state, into ./shots
+    cargo run --features gui --bin hww-shot -- --all --check   # the same, compared, exit 1 on a change
 
 ## Architecture
 

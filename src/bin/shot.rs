@@ -1243,6 +1243,7 @@ fn main() -> ExitCode {
         timeout_s: 60,
     };
     let mut wanted: Vec<String> = Vec::new();
+    let mut all = false;
     let mut theme = Theme::Light;
     let mut measure: Option<f32> = None;
     let mut check = false;
@@ -1265,7 +1266,10 @@ fn main() -> ExitCode {
         match a {
             "--list" => list = true,
             "--child" => child = true,
-            "--all" => wanted.clear(),
+            "--all" => {
+                all = true;
+                wanted.clear();
+            }
             "--check" => check = true,
             "--ascii" => cfg.ascii = true,
             "--json" => cfg.json = true,
@@ -1325,6 +1329,19 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     if !child {
+        // A bare invocation used to mean every scene, which is how a run nobody asked for
+        // takes the display for minutes: `--all` cannot share a screen, because a window the
+        // compositor stops sending frame callbacks to stops the run. The scene set is
+        // therefore always explicit, and the expensive one has to be named.
+        if wanted.is_empty() && !all && ad_hoc.is_none() {
+            eprintln!(
+                "name the scenes to photograph, or ask for --all.\n\
+                 --all owns the display until it finishes and the window has to stay visible \
+                 the whole time, so it is never what you get by default.\n\
+                 {USAGE}"
+            );
+            return ExitCode::from(2);
+        }
         let names: Vec<String> = if ad_hoc.is_some() {
             vec!["url".to_owned()]
         } else {
@@ -1565,7 +1582,7 @@ hww-shot: open the reader in a named state and photograph it.
     hww-shot [options] [scene ...]
 
     --list             the scene catalog, one line each
-    --all              every scene (the default)
+    --all              every scene: minutes, and the window must stay visible throughout
     --url URL          one ad-hoc scene: fetch URL for real
     --keys \"t wait:5 / 'quiet\"  extra steps, appended to every scene
     --theme light|dark|sepia|system|contrast-light|contrast-dark
