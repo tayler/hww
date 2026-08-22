@@ -731,6 +731,16 @@ fn trace(msg: &str) {
 
 /// A key press and its release, as a real keyboard sends them. `consume_key` reads the press;
 /// the release keeps `keys_down` honest for anything watching it.
+///
+/// Tab needs a second half, and it is the one key that does. Everything the reader binds it
+/// reads for itself out of the frame's `InputState`, which is what a pushed event lands in.
+/// Focus is not the reader's: egui derives the move from the *raw* input in
+/// `Memory::begin_pass`, which has run before any step gets to push, and which resets the
+/// direction on every pass. So an injected Tab was read by nobody, and `focus-link`
+/// photographed a plain article for as long as the scene existed, matching `article` hash for
+/// hash in the baseline that was supposed to catch exactly this. `drive` runs before
+/// `app.ui`, so a direction set here is consumed by the widgets drawn after it, in this pass.
+/// The match mirrors egui's own: bare Tab forward, Shift+Tab back, anything else not a move.
 fn press(ctx: &egui::Context, modifiers: Modifiers, key: Key) {
     ctx.input_mut(|i| {
         for pressed in [true, false] {
@@ -743,6 +753,14 @@ fn press(ctx: &egui::Context, modifiers: Modifiers, key: Key) {
             });
         }
     });
+    let direction = match key {
+        Key::Tab if !modifiers.any() => Some(egui::FocusDirection::Next),
+        Key::Tab if modifiers.shift_only() => Some(egui::FocusDirection::Previous),
+        _ => None,
+    };
+    if let Some(direction) = direction {
+        ctx.memory_mut(|m| m.move_focus(direction));
+    }
 }
 
 /// Fixture markup through the real extractor, with the provenance the scene needs.
