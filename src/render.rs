@@ -163,7 +163,10 @@ fn runs_text(runs: &[Run], o: &TextOpts) -> String {
             Run::Link { href, runs } => {
                 let t = runs_text(runs, o);
                 if o.show_links {
-                    s.push_str(&format!("{t} <{href}>"))
+                    // The href goes where the anchor's own trailing space was, so that space
+                    // has to come back out the other side: without it `closure </a>Updated`
+                    // renders as `closure <https://...>Updated`.
+                    s.push_str(&link_text(&t, href));
                 } else {
                     s.push_str(&t)
                 }
@@ -198,6 +201,16 @@ fn marked(text: &str, style: Style) -> String {
 /// indent cap in [`TextOpts::indent_for`] is the primary bound; this is the floor that holds
 /// when indents nest or `width` is set very small.
 const MIN_WRAP: usize = 20;
+
+/// `anchor <href>`, keeping whatever word boundary the anchor's own text carried.
+fn link_text(t: &str, href: &str) -> String {
+    let tail = if t.ends_with(char::is_whitespace) {
+        " "
+    } else {
+        ""
+    };
+    format!("{} <{href}>{tail}", t.trim_end())
+}
 
 fn wrap(text: &str, width: usize, pad: &str) -> String {
     let width = width.max(MIN_WRAP);
@@ -246,7 +259,7 @@ mod tests {
                 Inline::Link { href, inlines } => {
                     let t = old_inline_text(inlines, o);
                     if o.show_links {
-                        s.push_str(&format!("{t} <{href}>"))
+                        s.push_str(&link_text(&t, href));
                     } else {
                         s.push_str(&t)
                     }
@@ -309,6 +322,11 @@ mod tests {
                 Inline::Code("c".into()),
                 link("https://example.com/", vec![t("d")]),
                 Inline::Break,
+            ],
+            // The boundary a page puts *inside* the anchor: `<a>headline </a>Updated`.
+            vec![
+                link("https://example.com/a", vec![t("headline ")]),
+                t("Updated"),
             ],
         ];
         for show_links in [false, true] {

@@ -7,6 +7,7 @@ use hww::{
 fn main() -> Result<()> {
     let mut target = None;
     let mut opts = LoadOptions::default();
+    let mut text = render::TextOpts::default();
     let mut end_of_flags = false;
     for a in std::env::args().skip(1) {
         match a.as_str() {
@@ -14,6 +15,10 @@ fn main() -> Result<()> {
             // starts with a dash.
             "--" if !end_of_flags => end_of_flags = true,
             "--no-rewrite" if !end_of_flags => opts.rewrite = false,
+            // `show_links` had no caller until this flag: the GUI marks a link by drawing
+            // it, and a text renderer that never prints an href leaves the CLI unable to
+            // show, or check, what the extractor recovered.
+            "--links" if !end_of_flags => text.show_links = true,
             "--show-rewrites" if !end_of_flags => {
                 print!("{}", rewrite::describe());
                 return Ok(());
@@ -33,7 +38,7 @@ fn main() -> Result<()> {
         }
     }
     let Some(arg) = target else {
-        eprintln!("usage: hww [--no-rewrite] [--show-rewrites] <url>");
+        eprintln!("usage: hww [--links] [--no-rewrite] [--show-rewrites] <url>");
         std::process::exit(2);
     };
 
@@ -42,9 +47,6 @@ fn main() -> Result<()> {
     let loaded = Session::new()?.load(&requested, &opts, &mut |n| eprintln!("{n}"))?;
 
     eprintln!("{}", loaded.prov);
-    print!(
-        "{}",
-        render::to_text(&loaded.doc, &render::TextOpts::default())
-    );
+    print!("{}", render::to_text(&loaded.doc, &text));
     Ok(())
 }

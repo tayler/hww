@@ -6,6 +6,16 @@
 //!
 //! Scoring is Readability-shaped, with trafilatura's bias toward recall. Phase 0 measured
 //! trafilatura beating readability-lxml on 21 of 49 contested pages, so it is the reference.
+//!
+//! **A block walk has to gather inline children, not dispatch on them one at a time.** The
+//! IR has blocks and it has inlines, and HTML hands you both as siblings under one container.
+//! Emitting a block per inline child splits a sentence around its own link; dropping the ones
+//! that produced no block loses the link entirely. [`walk_blocks`] therefore accumulates
+//! inline children and flushes them as one paragraph when a block child interrupts them, and
+//! [`holds_blocks`] decides which a child is by what it contains rather than by its tag name,
+//! because `<a>` and `<span>` are each used both ways. That is what makes a front page
+//! readable: every headline on one is an anchor, either wrapped around the card's blocks or
+//! standing as a run of inline text, and both shapes used to arrive with the href discarded.
 
 use crate::ir::{Block, Document, Image, Inline};
 use scraper::{ElementRef, Html, Node, Selector};
@@ -342,48 +352,77 @@ fn blocks_from(root: ElementRef<'_>, base: &Url) -> Vec<Block> {
     out
 }
 
+/// The floor a gathered inline run has to clear to become a paragraph of its own.
+///
+/// Inherited from the bare-text branch this gathering replaced. It keeps a stray label, a
+/// lone bullet glyph, or a "1 of 12" counter from each becoming a paragraph, at the cost of
+/// dropping a genuinely short line that no block element claimed. A run carrying a link is
+/// exempt: see [`flush_pending`].
+const MIN_LOOSE_TEXT: usize = 40;
+
+/// Does this element hold block structure, or is it inline content?
+///
+/// The tag name cannot answer it for the case that matters. A news front page builds one
+/// card as `<a href><div><h2>..</h2></div></a>` and the next as `<li><a>headline</a></li>`;
+/// the first has to be descended into so the href can be carried down to the heading, the
+/// second is a run of inline content that belongs in its parent's paragraph. So the content
+/// decides. `<span>` wrappers, which pages use interchangeably with `<div>`, resolve the
+/// same way.
+///
+/// `any` stops at the first block-level descendant, so the container case is cheap; the case
+/// that scans a whole subtree is the inline one, whose subtree is small by definition.
+fn holds_blocks(el: &ElementRef) -> bool {
+    el.descendants()
+        .skip(1)
+        .filter_map(ElementRef::wrap)
+        .any(|d| BLOCK_LEVEL.contains(&d.value().name()))
+}
+
 fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth: usize) {
     if depth >= MAX_DEPTH {
         // Keep the text rather than the structure; see `MAX_DEPTH`.
         let text = inner_text(node);
-        if text.len() > 40 {
+        if text.len() > MIN_LOOSE_TEXT {
             out.push(Block::Paragraph(vec![Inline::Text(text)]));
         }
         return;
     }
+    // Inline children gather here and flush as one paragraph when a block child interrupts
+    // them or the container ends. Deciding child by child instead dropped every inline
+    // sibling of a block: in `<div><p>..</p><a>more</a></div>` the anchor emitted no block,
+    // so it fell to a fallback that only ran when the *whole* container had emitted nothing.
+    let mut pending: Vec<Inline> = Vec::new();
     for child in node.children() {
         let Some(el) = ElementRef::wrap(child) else {
-            // Bare text directly under a container still counts as a paragraph.
-            if let Node::Text(t) = child.value() {
-                let s = t.trim();
-                if s.len() > 40 {
-                    out.push(Block::Paragraph(vec![Inline::Text(s.to_string())]));
-                }
+            if matches!(child.value(), Node::Text(_)) {
+                inline_child(child, base, depth + 1, &mut pending);
             }
             continue;
         };
         if is_noise(&el) {
             continue;
         }
-        match el.value().name() {
+        let name = el.value().name();
+        let mut made: Vec<Block> = Vec::new();
+        match name {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
-                let level = el.value().name().as_bytes()[1] - b'0';
-                let inl = inlines_from(child, base, depth + 1);
+                let level = name.as_bytes()[1] - b'0';
+                let inl = trim_inlines(inlines_from(child, base, depth + 1));
                 if !inl.is_empty() {
-                    out.push(Block::Heading {
+                    made.push(Block::Heading {
                         level,
                         inlines: inl,
                     });
                 }
             }
             "p" => {
-                let inl = inlines_from(child, base, depth + 1);
+                let inl = trim_inlines(inlines_from(child, base, depth + 1));
                 if !inl.is_empty() {
-                    out.push(Block::Paragraph(inl));
+                    made.push(Block::Paragraph(inl));
                 }
             }
             "ul" | "ol" => {
-                let ordered = el.value().name() == "ol";
+                let ordered = name == "ol";
                 let li = Selector::parse("li").unwrap();
                 let items: Vec<Vec<Block>> = el
                     .select(&li)
@@ -402,14 +441,14 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth:
                     .filter(|b| !b.is_empty())
                     .collect();
                 if !items.is_empty() {
-                    out.push(Block::List { ordered, items });
+                    made.push(Block::List { ordered, items });
                 }
             }
             "blockquote" => {
                 let mut b = Vec::new();
                 walk_blocks(child, base, &mut b, depth + 1);
                 if !b.is_empty() {
-                    out.push(Block::Quote {
+                    made.push(Block::Quote {
                         blocks: b,
                         cite: el.value().attr("cite").map(str::to_owned),
                     });
@@ -418,16 +457,16 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth:
             "pre" => {
                 let text = inner_text_raw(child);
                 if !text.trim().is_empty() {
-                    out.push(Block::Code {
+                    made.push(Block::Code {
                         lang: code_lang(&el),
                         text,
                     });
                 }
             }
-            "hr" => out.push(Block::Rule),
+            "hr" => made.push(Block::Rule),
             "img" => {
                 if let Some(img) = image_from(&el, base) {
-                    out.push(Block::Figure {
+                    made.push(Block::Figure {
                         image: img,
                         caption: None,
                     });
@@ -446,7 +485,7 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth:
                         .next()
                         .map(|c| inlines_from(*c, base, depth + 2))
                         .filter(|c| !c.is_empty());
-                    out.push(Block::Figure {
+                    made.push(Block::Figure {
                         image: img,
                         caption,
                     });
@@ -454,21 +493,140 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth:
             }
             "table" => {
                 if let Some(t) = table_from(&el, base, depth) {
-                    out.push(t);
+                    made.push(t);
                 }
             }
-            // Containers: recurse. Inline-level leftovers get gathered as a paragraph.
+            // Containers: recurse, but only into something that actually holds blocks.
+            // Inline content joins the paragraph its siblings are building rather than
+            // becoming one of its own, which is what keeps `<a>headline</a> (<a>host</a>)`
+            // one line instead of a linked headline and a discarded remainder.
+            _ if !BLOCK_LEVEL.contains(&name) && !holds_blocks(&el) => {
+                inline_child(child, base, depth + 1, &mut pending);
+            }
             _ => {
-                let before = out.len();
-                walk_blocks(child, base, out, depth + 1);
-                if out.len() == before {
-                    let inl = inlines_from(child, base, depth + 1);
-                    if inlines_len(&inl) > 40 {
-                        out.push(Block::Paragraph(inl));
+                walk_blocks(child, base, &mut made, depth + 1);
+                if made.is_empty() {
+                    inline_child(child, base, depth + 1, &mut pending);
+                } else if name == "a"
+                    && let Some(href) = el.value().attr("href").and_then(|h| base.join(h).ok())
+                {
+                    // A card on a news front page is `<a href><div><h2>..</h2></div></a>`,
+                    // and descending into it as a plain container left the headline as
+                    // unlinked prose. The href belongs on the text it wraps.
+                    let href = href.to_string();
+                    for b in &mut made {
+                        link_block(b, &href);
                     }
                 }
             }
         }
+        if !made.is_empty() {
+            flush_pending(&mut pending, out);
+            out.append(&mut made);
+        }
+    }
+    flush_pending(&mut pending, out);
+}
+
+/// Emit the gathered inline run as a paragraph.
+///
+/// A run with no link has to clear [`MIN_LOOSE_TEXT`]. A run carrying one is kept whatever
+/// its length: a headline is often shorter than the floor, and the floor was dropping the
+/// only route to the page behind it.
+fn flush_pending(pending: &mut Vec<Inline>, out: &mut Vec<Block>) {
+    let inl = trim_inlines(std::mem::take(pending));
+    if inl.iter().all(is_blank) {
+        return;
+    }
+    if inlines_len(&inl) > MIN_LOOSE_TEXT || inl.iter().any(has_link) {
+        out.push(Block::Paragraph(inl));
+    }
+}
+
+fn is_blank(i: &Inline) -> bool {
+    matches!(i, Inline::Text(t) if t.trim().is_empty())
+}
+
+/// Drop the indentation whitespace that sits at either end of a run. Interior spacing is
+/// left exactly as `push_space` built it: it is word spacing, not padding.
+fn trim_inlines(mut v: Vec<Inline>) -> Vec<Inline> {
+    while v.first().is_some_and(is_blank) {
+        v.remove(0);
+    }
+    while v.last().is_some_and(is_blank) {
+        v.pop();
+    }
+    if let Some(i) = v.first_mut() {
+        trim_edge(i, true);
+    }
+    if let Some(i) = v.last_mut() {
+        trim_edge(i, false);
+    }
+    v
+}
+
+/// Trim one outer edge, descending through the wrappers that can sit on a block boundary.
+/// A link that keeps the markup's padding draws its underline out past its own words, which
+/// is how a column of headlines gives itself away.
+fn trim_edge(i: &mut Inline, start: bool) {
+    match i {
+        Inline::Text(t) => {
+            let s = if start { t.trim_start() } else { t.trim_end() }.to_owned();
+            *t = s;
+        }
+        Inline::Emph(v) | Inline::Strong(v) | Inline::Link { inlines: v, .. } => {
+            if let Some(x) = if start { v.first_mut() } else { v.last_mut() } {
+                trim_edge(x, start);
+            }
+        }
+        Inline::Code(_) | Inline::Image(_) | Inline::Break => {}
+    }
+}
+
+/// Carry a block-level anchor's href down onto the text it wraps.
+///
+/// The IR has no linked block and must not grow one: a link is an inline, and what this
+/// recovers is a card whose heading and summary point at the same story. A block that
+/// already carries a link of its own is left alone, because that href is the more specific
+/// one and wrapping it would put it inside an outer link that no renderer can reach.
+fn link_block(b: &mut Block, href: &str) {
+    match b {
+        Block::Heading { inlines, .. } | Block::Paragraph(inlines) => link_inlines(inlines, href),
+        Block::List { items, .. } => items.iter_mut().flatten().for_each(|b| link_block(b, href)),
+        Block::Quote { blocks, .. } => blocks.iter_mut().for_each(|b| link_block(b, href)),
+        Block::Figure {
+            caption: Some(c), ..
+        } => link_inlines(c, href),
+        Block::Table { headers, rows } => {
+            headers.iter_mut().for_each(|c| link_inlines(c, href));
+            rows.iter_mut()
+                .flatten()
+                .for_each(|c| link_inlines(c, href));
+        }
+        Block::Figure { .. }
+        | Block::Code { .. }
+        | Block::Rule
+        | Block::Embed { .. }
+        | Block::Thread(_) => {}
+    }
+}
+
+fn link_inlines(v: &mut Vec<Inline>, href: &str) {
+    if v.iter().all(is_blank) || v.iter().any(has_link) {
+        return;
+    }
+    let inlines = std::mem::take(v);
+    v.push(Inline::Link {
+        href: href.to_owned(),
+        inlines,
+    });
+}
+
+fn has_link(i: &Inline) -> bool {
+    match i {
+        Inline::Link { .. } => true,
+        Inline::Emph(v) | Inline::Strong(v) => v.iter().any(has_link),
+        _ => false,
     }
 }
 
@@ -494,57 +652,63 @@ fn inlines_from(node: NodeRef<'_, Node>, base: &Url, depth: usize) -> Vec<Inline
         return out;
     }
     for child in node.children() {
-        match child.value() {
-            Node::Text(t) => {
-                let s = squeeze(&t.replace(['\n', '\t'], " "));
-                if s.trim().is_empty() {
-                    // A whitespace-only node *between* two inline elements is a word
-                    // boundary, and dropping it welds them together:
-                    // `<a>written language</a> <a>legible</a>` became "written
-                    // languagelegible". Markup indentation produces these constantly.
-                    if !s.is_empty() {
-                        push_space(&mut out);
-                    }
-                } else {
-                    out.push(Inline::Text(s));
-                }
-            }
-            Node::Element(e) => {
-                let Some(el) = ElementRef::wrap(child) else {
-                    continue;
-                };
-                if is_noise(&el) {
-                    continue;
-                }
-                match e.name.local.as_ref() {
-                    "em" | "i" => out.push(Inline::Emph(inlines_from(child, base, depth + 1))),
-                    "strong" | "b" => {
-                        out.push(Inline::Strong(inlines_from(child, base, depth + 1)))
-                    }
-                    "code" | "kbd" | "samp" => out.push(Inline::Code(inner_text(child))),
-                    "br" => out.push(Inline::Break),
-                    "img" => {
-                        if let Some(i) = image_from(&el, base) {
-                            out.push(Inline::Image(i));
-                        }
-                    }
-                    "a" => {
-                        let inl = inlines_from(child, base, depth + 1);
-                        match el.value().attr("href").and_then(|h| base.join(h).ok()) {
-                            Some(href) if !inl.is_empty() => out.push(Inline::Link {
-                                href: href.to_string(),
-                                inlines: inl,
-                            }),
-                            _ => out.extend(inl),
-                        }
-                    }
-                    _ => out.extend(inlines_from(child, base, depth + 1)),
-                }
-            }
-            _ => {}
-        }
+        inline_child(child, base, depth, &mut out);
     }
     out
+}
+
+/// One child node as inline content. Split out of [`inlines_from`] because [`walk_blocks`]
+/// needs the same mapping for a single child: an element that turned out to hold no blocks
+/// is inline, and reaching it through `inlines_from` on its *parent* would re-walk siblings
+/// that have already been emitted.
+fn inline_child(child: NodeRef<'_, Node>, base: &Url, depth: usize, out: &mut Vec<Inline>) {
+    match child.value() {
+        Node::Text(t) => {
+            let s = squeeze(&t.replace(['\n', '\t'], " "));
+            if s.trim().is_empty() {
+                // A whitespace-only node *between* two inline elements is a word
+                // boundary, and dropping it welds them together:
+                // `<a>written language</a> <a>legible</a>` became "written
+                // languagelegible". Markup indentation produces these constantly.
+                if !s.is_empty() {
+                    push_space(out);
+                }
+            } else {
+                out.push(Inline::Text(s));
+            }
+        }
+        Node::Element(e) => {
+            let Some(el) = ElementRef::wrap(child) else {
+                return;
+            };
+            if is_noise(&el) {
+                return;
+            }
+            match e.name.local.as_ref() {
+                "em" | "i" => out.push(Inline::Emph(inlines_from(child, base, depth + 1))),
+                "strong" | "b" => out.push(Inline::Strong(inlines_from(child, base, depth + 1))),
+                "code" | "kbd" | "samp" => out.push(Inline::Code(inner_text(child))),
+                "br" => out.push(Inline::Break),
+                "img" => {
+                    if let Some(i) = image_from(&el, base) {
+                        out.push(Inline::Image(i));
+                    }
+                }
+                "a" => {
+                    let inl = inlines_from(child, base, depth + 1);
+                    match el.value().attr("href").and_then(|h| base.join(h).ok()) {
+                        Some(href) if !inl.is_empty() => out.push(Inline::Link {
+                            href: href.to_string(),
+                            inlines: inl,
+                        }),
+                        _ => out.extend(inl),
+                    }
+                }
+                _ => out.extend(inlines_from(child, base, depth + 1)),
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Add a separating space, unless we are at the start or the previous inline already ends in
@@ -706,7 +870,7 @@ fn meta_attr(html: &Html, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::Block;
+    use crate::ir::{Block, Inline};
 
     fn doc(html: &str) -> Document {
         extract(html, &Url::parse("https://example.test/a/b").unwrap())
@@ -770,6 +934,151 @@ mod tests {
         assert!(text.contains("_readable_ *and* appealing"), "got: {text}");
         // And no doubled or leading spaces from the indentation itself.
         assert!(!text.contains("  "), "got: {text}");
+    }
+
+    /// Collect every href the document carries, in order.
+    fn hrefs(d: &Document) -> Vec<String> {
+        fn walk(b: &Block, out: &mut Vec<String>) {
+            match b {
+                Block::Heading { inlines, .. } | Block::Paragraph(inlines) => {
+                    push_hrefs(inlines, out)
+                }
+                Block::List { items, .. } => items.iter().flatten().for_each(|b| walk(b, out)),
+                Block::Quote { blocks, .. } => blocks.iter().for_each(|b| walk(b, out)),
+                Block::Figure { caption, .. } => {
+                    if let Some(c) = caption {
+                        push_hrefs(c, out)
+                    }
+                }
+                Block::Table { headers, rows } => {
+                    headers.iter().for_each(|c| push_hrefs(c, out));
+                    rows.iter().flatten().for_each(|c| push_hrefs(c, out));
+                }
+                Block::Thread(cs) => cs.iter().flat_map(|c| &c.blocks).for_each(|b| walk(b, out)),
+                Block::Code { .. } | Block::Rule | Block::Embed { .. } => {}
+            }
+        }
+        fn push_hrefs(v: &[Inline], out: &mut Vec<String>) {
+            for i in v {
+                match i {
+                    Inline::Link { href, inlines } => {
+                        out.push(href.clone());
+                        push_hrefs(inlines, out);
+                    }
+                    Inline::Emph(x) | Inline::Strong(x) => push_hrefs(x, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        d.blocks.iter().for_each(|b| walk(b, &mut out));
+        out
+    }
+
+    /// Every news front page builds a card as an anchor wrapped *around* block content, and
+    /// descending into it as a plain container dropped the href: the headline rendered as
+    /// unlinked prose with no route to the story. Measured on two front pages at once.
+    #[test]
+    fn a_block_level_anchor_keeps_its_href() {
+        let d = doc(
+            r#"<main><a href="/story/one"><picture><img src="/p.jpg" alt="pic"></picture>
+            <div><h2>A headline that leads to the story behind the card</h2></div></a>
+            <a href="/story/two"><div><p>A second headline, marked up as a paragraph</p></div></a>
+            </main>"#,
+        );
+        assert_eq!(
+            hrefs(&d),
+            [
+                "https://example.test/story/one",
+                "https://example.test/story/two"
+            ]
+        );
+        let heading = d
+            .blocks
+            .iter()
+            .find(|b| matches!(b, Block::Heading { .. }))
+            .expect("the heading inside the anchor should still be a heading");
+        assert!(
+            matches!(heading, Block::Heading { inlines, .. } if matches!(inlines.as_slice(), [Inline::Link { .. }])),
+            "got: {heading:?}"
+        );
+    }
+
+    /// The href does not displace one that is already there: an inner link is the more
+    /// specific of the two, and wrapping it would put it inside an outer link that
+    /// `reader::inline::flatten` deliberately flattens away.
+    #[test]
+    fn a_block_level_anchor_does_not_swallow_an_inner_link() {
+        let d = doc(
+            r#"<main><a href="/outer"><div><h2>A headline for the card</h2>
+            <p>Summary text long enough to survive, with <a href="/inner">its own link</a>.</p>
+            </div></a></main>"#,
+        );
+        let h = hrefs(&d);
+        assert!(
+            h.contains(&"https://example.test/outer".to_owned()),
+            "{h:?}"
+        );
+        assert!(
+            h.contains(&"https://example.test/inner".to_owned()),
+            "{h:?}"
+        );
+    }
+
+    /// The bug that made "some links show but not many": an anchor emitting no block fell to
+    /// a fallback that only ran when the *whole* container had emitted nothing, so whether a
+    /// link survived came down to whether its text cleared 40 characters. Hacker News shipped
+    /// both outcomes in identical markup on one page, decided by title length alone.
+    #[test]
+    fn an_inline_anchor_keeps_its_href_at_any_length() {
+        let short = doc(
+            r#"<main><div><span class="titleline"><a href="https://a.test/x">Short</a><span
+            class="sitebit"> (<a href="/from?site=a.test">a.test</a>)</span></span></div></main>"#,
+        );
+        let long = doc(
+            r#"<main><div><span class="titleline"><a href="https://a.test/x">A title comfortably
+            past forty characters long</a><span
+            class="sitebit"> (<a href="/from?site=a.test">a.test</a>)</span></span></div></main>"#,
+        );
+        for d in [&short, &long] {
+            assert_eq!(
+                hrefs(d),
+                ["https://a.test/x", "https://example.test/from?site=a.test"],
+                "got: {:?}",
+                d.blocks
+            );
+        }
+        // And both stay one line: the title must not be split from the host beside it.
+        for d in [&short, &long] {
+            assert_eq!(
+                d.blocks
+                    .iter()
+                    .filter(|b| matches!(b, Block::Paragraph(_)))
+                    .count(),
+                1,
+                "got: {:?}",
+                d.blocks
+            );
+        }
+    }
+
+    /// Inline content standing next to a block used to be dropped whole, which is how an
+    /// article lost the opening clause of a footnote and how a paragraph split mid-sentence
+    /// around a link.
+    #[test]
+    fn inline_siblings_of_a_block_are_not_dropped() {
+        let d = doc(
+            r#"<article><div><p>A first paragraph with plenty of text to clear the floor.</p>
+            though, as we discussed <a href="/there">in that post</a>, the rest of the sentence
+            carries on past the link and must not be thrown away with it.</div></article>"#,
+        );
+        let text = crate::ir::plain_text(&match &d.blocks[1] {
+            Block::Paragraph(v) => v.clone(),
+            b => panic!("expected a second paragraph, got {b:?}"),
+        });
+        assert!(text.starts_with("though, as we discussed"), "got: {text}");
+        assert!(text.ends_with("thrown away with it."), "got: {text}");
+        assert_eq!(hrefs(&d), ["https://example.test/there"]);
     }
 
     #[test]

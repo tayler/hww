@@ -267,6 +267,11 @@ upload are merely compiled. Tests worth keeping named:
 - `whitespace_between_inline_elements_is_a_word_boundary` (`src/html.rs`): markup indentation
   puts a whitespace-only text node between adjacent inline elements constantly, and dropping it
   welded two words into one.
+- `an_inline_anchor_keeps_its_href_at_any_length` and `a_block_level_anchor_keeps_its_href`
+  (`src/html.rs`): the two shapes a front-page headline arrives in, both of which used to lose
+  the href. The first is the sharper one, because the old behaviour was decided by *length*:
+  Hacker News shipped a linked title and an unlinked one in identical markup on one page, and
+  the only difference between them was that one cleared 40 characters and the other did not.
 - `no_notice_contains_an_arrow` (`src/reader/notice.rs`): the executable form of the
   embedded-font gap. The prose rule below existed the whole time and two strings shipped with
   `→` anyway, one of them a heading, tofu from the day it was written. Prose does not fail a
