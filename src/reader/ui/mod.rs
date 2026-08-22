@@ -79,11 +79,15 @@ pub struct RenderCtx<'a> {
     /// has been applied. The counterpart to [`RenderCtx::pending`], one navigation earlier.
     pub clicked_link: Option<egui::Id>,
     pub hover_href: Option<String>,
-    /// What Tab landed on this frame. Links and comment toggles are the only focusable things
-    /// on the page; if plain text were focusable, Tab would walk every label.
+    /// What Tab landed on this frame. Links, image placeholders, and comment toggles are the
+    /// focusable things on the page; if plain text were focusable, Tab would walk every label.
     pub focus_href: Option<String>,
     pub focus_image: Option<String>,
     pub focus_comment: Option<CommentKey>,
+    /// Focus is on a page widget that none of the three above describes (a button with no
+    /// keyboard action of its own). `app` reads it only to keep that widget drawn: a focused
+    /// widget that is not laid out loses its focus.
+    pub focus_other: bool,
 }
 
 impl RenderCtx<'_> {
@@ -115,6 +119,7 @@ impl RenderCtx<'_> {
             focus_href: None,
             focus_image: None,
             focus_comment: None,
+            focus_other: false,
         }
     }
 

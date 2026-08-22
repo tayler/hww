@@ -29,7 +29,8 @@ impl Face {
     /// inserts; `family_names_are_all_registered` over there is what keeps the two in step.
     ///
     /// Mono answers with the upright names when asked for an italic: the face does not exist,
-    /// so the name would resolve to nothing and the run would silently lose its weight too.
+    /// and an unbound family name is not a fallback in epaint but a panic on the first frame
+    /// that draws it.
     pub fn family_name(self) -> &'static str {
         match self.role {
             FontChoice::Sans => match (self.strong, self.emph) {
@@ -52,6 +53,17 @@ impl Face {
                 }
             }
         }
+    }
+
+    /// Every role crossed with every style: the twelve faces the reader can ask for.
+    pub fn all() -> impl Iterator<Item = Face> {
+        [FontChoice::Sans, FontChoice::Serif, FontChoice::Mono]
+            .into_iter()
+            .flat_map(|role| {
+                [(false, false), (true, false), (false, true), (true, true)]
+                    .into_iter()
+                    .map(move |(strong, emph)| Face::new(role, strong, emph))
+            })
     }
 
     /// Whether epaint must skew this face to stand in for an italic one.
@@ -81,20 +93,22 @@ pub const FAMILY_NAMES: [&str; 10] = [
 mod tests {
     use super::*;
 
-    /// A name that is never registered does not fail loudly: egui falls back to whatever face it
-    /// can find, so `Strong` would quietly stop being bold and nothing would say so.
+    /// A name that is never registered does not fail in this job: it is a panic in epaint's
+    /// `Fonts::font` on the first frame that draws the style, which only a running reader
+    /// reaches. Both directions, so a name in the list that no style resolves to is caught too.
     #[test]
     fn every_style_resolves_to_a_declared_family() {
-        for role in [FontChoice::Sans, FontChoice::Serif, FontChoice::Mono] {
-            for strong in [false, true] {
-                for emph in [false, true] {
-                    let name = Face::new(role, strong, emph).family_name();
-                    assert!(
-                        FAMILY_NAMES.contains(&name),
-                        "{role:?} strong={strong} emph={emph} -> {name}"
-                    );
-                }
-            }
+        let mut seen = Vec::new();
+        for face in Face::all() {
+            let name = face.family_name();
+            assert!(FAMILY_NAMES.contains(&name), "{face:?} -> {name}");
+            seen.push(name);
+        }
+        for name in FAMILY_NAMES {
+            assert!(
+                seen.contains(&name),
+                "{name} is declared but no style resolves to it"
+            );
         }
     }
 

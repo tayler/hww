@@ -305,8 +305,7 @@ pub fn failure(error: &LoadError, url: &Url) -> Notice {
 
     let mut detail = vec![url.to_string()];
     if let LoadError::Fetch(FetchError::TooManyRedirects(hops)) = error {
-        // A redirect loop is usually a consent wall, and the chain is what shows it. ASCII `->`
-        // by habit rather than by necessity now: the shipped faces carry `→`.
+        // A redirect loop is usually a consent wall, and the chain is what shows it.
         detail.extend(hops.iter().map(|h| format!("  -> {h}")));
     }
 

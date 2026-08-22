@@ -26,9 +26,9 @@
 //! is its own file. `wdth` is pinned at 100 explicitly rather than left to the face's default,
 //! so a future change to how skrifa resolves an unset axis cannot quietly narrow the page.
 
-use crate::reader::face::Face;
+use crate::reader::face::{FAMILY_NAMES, Face};
 use eframe::egui::{self, FontData, FontFamily, FontTweak, epaint::text::VariationCoords};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 const PLEX_SANS: &[u8] = include_bytes!("../../../fonts/IBMPlexSans-Variable.ttf");
 const PLEX_SANS_ITALIC: &[u8] = include_bytes!("../../../fonts/IBMPlexSans-Italic-Variable.ttf");
@@ -64,13 +64,22 @@ const FACES: [(&str, &[u8], f32); 10] = [
 
 /// The family to draw a face in.
 pub fn family(face: Face) -> FontFamily {
-    FontFamily::Name(face.family_name().into())
+    family_named(face.family_name())
 }
+
+/// One `FontFamily` per name, built once. `FontFamily::Name` holds an `Arc<str>`, and building
+/// it from a `&str` allocates; this is asked for once per run of text per frame, so the ten are
+/// made here and cloned, which is an atomic increment.
+static FAMILIES: LazyLock<[FontFamily; FAMILY_NAMES.len()]> =
+    LazyLock::new(|| FAMILY_NAMES.map(|name| FontFamily::Name(name.into())));
 
 /// The family a registered name refers to. Private: outside this module a face is asked for by
 /// [`Face`], never by spelling a name.
 fn family_named(name: &str) -> FontFamily {
-    FontFamily::Name(name.into())
+    match FAMILY_NAMES.iter().position(|n| *n == name) {
+        Some(i) => FAMILIES[i].clone(),
+        None => FontFamily::Name(name.into()),
+    }
 }
 
 /// Install the embedded faces. Once, at startup: this rebuilds the glyph atlas, so it does not
@@ -84,8 +93,11 @@ pub fn install(ctx: &egui::Context) {
     }
     defs.font_data
         .insert("tail".to_owned(), Arc::new(weighted(TAIL, REGULAR)));
+    // At 0.81, which is the tweak epaint applied to this same face when it embedded it: at
+    // 1.0 an emoji stands taller than the line box `format_for` pins, and overlaps the rows
+    // either side of it.
     defs.font_data
-        .insert("emoji".to_owned(), Arc::new(weighted(EMOJI, REGULAR)));
+        .insert("emoji".to_owned(), Arc::new(face(EMOJI, REGULAR, 0.81)));
 
     // Every chain ends the same way. A chain that forgets the tail renders tofu for exactly the
     // scripts the tail exists to cover, and only on a page nobody tests with.
@@ -103,7 +115,14 @@ pub fn install(ctx: &egui::Context) {
 }
 
 fn weighted(bytes: &'static [u8], weight: f32) -> FontData {
+    face(bytes, weight, 1.0)
+}
+
+/// One `FontTweak` per face. `FontData::tweak` replaces the tweak rather than merging it, so
+/// the scale and the axis coordinates have to be set in the same call.
+fn face(bytes: &'static [u8], weight: f32, scale: f32) -> FontData {
     FontData::from_static(bytes).tweak(FontTweak {
+        scale,
         coords: VariationCoords::new([(b"wght", weight), (b"wdth", 100.0)]),
         ..Default::default()
     })
@@ -115,8 +134,9 @@ mod tests {
     use crate::reader::face::FAMILY_NAMES;
 
     /// The two halves of the split: `face` decides names without egui, `fonts` registers them.
-    /// Nothing else connects them, and a name registered under one spelling and asked for under
-    /// another resolves to a fallback rather than to an error.
+    /// Nothing else connects them, and a name asked for under one spelling and registered under
+    /// another is a panic on the first frame that draws it: epaint's `Fonts::font` has no
+    /// fallback for an unbound `FontFamily::Name`.
     ///
     /// Admitted under `ui/` on the argument the directory doc makes, not on precedent: `FACES`
     /// is a const table and this test touches no `egui::Context`.
@@ -139,6 +159,9 @@ mod tests {
     /// A face that is bytes-identical to another is registered twice on purpose (the variable
     /// sans is its own bold), but two *names* sharing one weight would mean a style silently
     /// rendering at the wrong one.
+    ///
+    /// Under `ui/` on the same argument as the test above: `FACES` is a const table and nothing
+    /// here touches an `egui::Context`.
     #[test]
     fn the_bold_faces_are_the_ones_at_bold_weight() {
         for (name, _, weight) in FACES {

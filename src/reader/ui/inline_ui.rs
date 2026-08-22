@@ -196,10 +196,10 @@ fn append(
 }
 
 fn format_for(style: Style, set: &Setting, pal: &Palette, line_height: f32) -> TextFormat {
-    // Code is monospace whatever the page is set in, and 0.92x for the same reason
-    // `theme::mono_font` is.
+    // Code is monospace whatever the page is set in, and smaller for the reason on
+    // `theme::CODE_SCALE`.
     let (role, size) = if style.code {
-        (FontChoice::Mono, set.font.size * 0.92)
+        (FontChoice::Mono, set.font.size * theme::CODE_SCALE)
     } else {
         (set.role, set.font.size)
     };

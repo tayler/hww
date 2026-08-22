@@ -227,7 +227,11 @@ fn embed_ui(ui: &mut Ui, kind: ir::EmbedKind, url: &str, ctx: &mut RenderCtx<'_>
                 ui.label(RichText::new(format!("[{kind:?}]")).color(pal.dim));
                 ui.label(RichText::new(label).color(pal.fg));
                 ui.label(RichText::new("(not loaded)").color(pal.dim).small());
-                if ui.small_button("copy URL").clicked() {
+                let resp = ui.small_button("copy URL");
+                if resp.has_focus() {
+                    ctx.focus_other = true;
+                }
+                if resp.clicked() {
                     ctx.act(Action::Copy(url.to_owned()));
                 }
             });

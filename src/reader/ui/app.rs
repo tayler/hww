@@ -221,6 +221,9 @@ pub struct ReaderApp {
     heights: Heights,
     /// Toggles against the auto-collapse default (see `thread_ui::is_collapsed`).
     collapsed: HashSet<CommentKey>,
+    /// Bumped on every change to `collapsed`, for `measure::Layout`: a thread is one block and
+    /// one remembered height, and `Shift+Z` changes it without laying the thread out.
+    collapsed_changes: u64,
     find_current: usize,
     find_total: usize,
     /// One-shot: bring the current match into view on the next frame.
@@ -260,7 +263,9 @@ pub struct ReaderApp {
     focused_href: Option<String>,
     focused_image: Option<String>,
     focused_comment: Option<CommentKey>,
-    /// Whether the *previous* frame's render found focus on the page, taken before the three
+    /// Focus on a page widget none of the three above describes; see `RenderCtx::focus_other`.
+    focused_other: bool,
+    /// Whether the *previous* frame's render found focus on the page, taken before the four
     /// above are cleared for the frame in flight.
     ///
     /// `lays_out_whole_page` runs inside that render, downstream of the clear and upstream of
@@ -347,6 +352,7 @@ impl ReaderApp {
             images: ImageStore::default(),
             heights: Heights::default(),
             collapsed: HashSet::new(),
+            collapsed_changes: 0,
             find_current: 0,
             find_total: 0,
             find_scroll: false,
@@ -361,6 +367,7 @@ impl ReaderApp {
             focused_href: None,
             focused_image: None,
             focused_comment: None,
+            focused_other: false,
             focus_was_on_page: false,
             tab_frames: 0,
             pending_link: None,
@@ -962,8 +969,15 @@ impl ReaderApp {
 
     fn collapse_focused(&mut self) {
         match self.focused_comment.clone() {
-            Some(key) => toggle(&mut self.collapsed, key),
+            Some(key) => self.toggle_collapsed(key),
             None => self.flash("no comment focused".to_owned()),
+        }
+    }
+
+    fn toggle_collapsed(&mut self, key: CommentKey) {
+        self.collapsed_changes += 1;
+        if !self.collapsed.remove(&key) {
+            self.collapsed.insert(key);
         }
     }
 
@@ -986,15 +1000,10 @@ impl ReaderApp {
             self.flash("nothing to collapse".to_owned());
             return;
         }
+        self.collapsed_changes += 1;
         for k in keys {
             self.collapsed.insert(k);
         }
-    }
-}
-
-fn toggle(set: &mut HashSet<CommentKey>, key: CommentKey) {
-    if !set.remove(&key) {
-        set.insert(key);
     }
 }
 
@@ -1055,10 +1064,12 @@ impl eframe::App for ReaderApp {
         // over hww's own words for as long as the fetch takes.
         self.focus_was_on_page = self.focused_href.is_some()
             || self.focused_image.is_some()
-            || self.focused_comment.is_some();
+            || self.focused_comment.is_some()
+            || self.focused_other;
         self.focused_href = None;
         self.focused_image = None;
         self.focused_comment = None;
+        self.focused_other = false;
         self.hover_href = None;
 
         // Read here rather than where it is used, so it can be held for the frame after as
@@ -1175,11 +1186,14 @@ impl ReaderApp {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                     // Pointer-reachable back/forward: a mouse-only reader must be able to
-                    // return, and `Esc` may have hidden everything else.
+                    // return, and `Esc` may have hidden everything else. Arrows and not
+                    // triangles: `◀`/`▶` are in none of the text faces `ui::fonts` embeds and
+                    // would be drawn from the emoji face, in a different design from every
+                    // label beside them; the arrows are in all of them.
                     if ui
                         .add_enabled(
                             self.history.can_go_back(),
-                            egui::Button::new("◀").frame(false),
+                            egui::Button::new("←").frame(false),
                         )
                         .on_hover_text("Back (Alt+Left)")
                         .clicked()
@@ -1189,7 +1203,7 @@ impl ReaderApp {
                     if ui
                         .add_enabled(
                             self.history.can_go_forward(),
-                            egui::Button::new("▶").frame(false),
+                            egui::Button::new("→").frame(false),
                         )
                         .on_hover_text("Forward (Alt+Right)")
                         .clicked()
@@ -1685,33 +1699,36 @@ impl ReaderApp {
         }
     }
 
-    /// Draw the page the reading column is showing, which during a navigation is the outgoing
-    /// one rather than the one being fetched.
+    /// A find query is being drawn: the bar is open and the query is not empty.
+    fn find_open(&self) -> bool {
+        self.chrome.find.as_deref().is_some_and(|q| !q.is_empty())
+    }
+
     /// Whether this frame has to lay the page out whole, skipping nothing.
     ///
     /// Skipping a block off the window is invisible to the eye and is not invisible to
     /// everything that walks the page by *widget*. Each of these is a case where a block
     /// nowhere near the window still has to be one of this frame's widgets:
     ///
-    /// - **Find.** `find_total` counts matches across the whole document, and `n` scrolls to
-    ///   one that is by definition somewhere the reader is not looking.
-    /// - **Tab.** egui moves focus among the widgets of the frame the key arrived in, so the
-    ///   link Tab is reaching for has to be drawn on it, and on the frame after as well; see
+    /// - Find: `find_total` counts matches across the whole document, and `n` scrolls to one
+    ///   that is by definition somewhere the reader is not looking.
+    /// - Tab: egui moves focus among the widgets of the frame the key arrived in, so the link
+    ///   Tab is reaching for has to be drawn on it, and on the frame after as well; see
     ///   `tab_frames`.
-    /// - **Focus already on the page.** A focused widget that stops being drawn loses focus,
-    ///   and `Enter`, `Y`, `i`, and `z` all read what Tab last landed on. `focus_was_on_page`
-    ///   and not the three fields, which this is downstream of the clearing of.
-    /// - **A selection.** egui builds the copy buffer out of the labels drawn this frame, so
-    ///   a selection running off the window would put only the visible part on the clipboard.
-    /// - **A screen reader.** egui builds the AccessKit tree out of the widgets drawn this
-    ///   frame too, and a block replaced by empty space contributes no text to it. The eye
-    ///   loses nothing to skipping and an assistive technology would lose the page, so the
-    ///   whole optimization turns off for as long as one is attached.
-    ///
-    /// A jump (`scroll_to_block`) is the sixth and is tested at the call site: it scrolls to a
-    /// `Response`, which a block replaced by empty space does not have.
+    /// - Focus already on the page: a focused widget that stops being drawn loses focus, and
+    ///   `Enter`, `Y`, `i`, and `z` all read what Tab last landed on. `focus_was_on_page` and
+    ///   not the four fields, which this is downstream of the clearing of.
+    /// - A selection: egui builds the copy buffer out of the labels drawn this frame, so a
+    ///   selection running off the window would put only the visible part on the clipboard.
+    /// - A jump (`scroll_to_block`): it scrolls to a `Response`, which a block replaced by
+    ///   empty space does not have.
+    /// - A screen reader: egui builds the AccessKit tree out of the widgets drawn this frame
+    ///   too, and a block replaced by empty space contributes no text to it. The eye loses
+    ///   nothing to skipping and an assistive technology would lose the page, so the whole
+    ///   optimization turns off for as long as one is attached.
     fn lays_out_whole_page(&self, ui: &Ui) -> bool {
-        self.chrome.find.as_deref().is_some_and(|q| !q.is_empty())
+        self.find_open()
+            || self.scroll_to_block.is_some()
             || self.focus_was_on_page
             || self.tab_frames > 0
             || ui
@@ -1721,6 +1738,8 @@ impl ReaderApp {
             || accesskit_is_building(ui.ctx())
     }
 
+    /// Draw the page the reading column is showing, which during a navigation is the outgoing
+    /// one rather than the one being fetched.
     fn ready_screen(&mut self, ui: &mut Ui) {
         // The page is behind `&mut self`, and rendering needs both it and the image store, so
         // take it for the duration and put it back. Cheaper than cloning a document.
@@ -1728,14 +1747,15 @@ impl ReaderApp {
             unreachable!("checked by the caller")
         };
         // Both before `RenderCtx`, which borrows `self.images` for the rest of the function.
-        let whole = self.scroll_to_block.is_some() || self.lays_out_whole_page(ui);
+        let whole = self.lays_out_whole_page(ui);
         self.heights.under(&measure::Layout {
             opts: self.settings.read.clone(),
             measure: ui.max_rect().width(),
             pixels_per_point: ui.ctx().pixels_per_point(),
             images: self.images.changes(),
-            find: self.chrome.find.clone(),
+            find: self.find_open(),
             pending_link: self.pending_link.map(|id| id.value()),
+            collapsed: self.collapsed_changes,
         });
         let base = ready.loaded.prov.final_url.clone();
         let mut ctx = RenderCtx::new(
@@ -1790,6 +1810,7 @@ impl ReaderApp {
         self.focused_href = ctx.focus_href.clone();
         self.focused_image = ctx.focus_image.clone();
         self.focused_comment = ctx.focus_comment.clone();
+        self.focused_other = ctx.focus_other;
         self.hover_href = ctx.hover_href.clone();
         let action = ctx.action.take();
         let clicked = ctx.clicked_link;
@@ -1820,7 +1841,7 @@ impl ReaderApp {
             }
             Action::LoadImage(src) => self.load_image(ctx, &src),
             Action::GoToBlock(b) => self.scroll_to_block = Some(b),
-            Action::ToggleComment(key) => toggle(&mut self.collapsed, key),
+            Action::ToggleComment(key) => self.toggle_collapsed(key),
         }
     }
 }

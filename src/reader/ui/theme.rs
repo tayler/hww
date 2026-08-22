@@ -200,8 +200,11 @@ pub fn heading_font(opts: &ReadOpts, level: u8) -> FontId {
 }
 
 /// Code is 0.92x because a monospace face at the body's optical size reads larger than it is.
+/// One number for a code block and for code inside a sentence, so the two cannot drift apart.
+pub const CODE_SCALE: f32 = 0.92;
+
 pub fn mono_font(opts: &ReadOpts) -> FontId {
-    FontId::new(opts.base_size_pt * 0.92, FontFamily::Monospace)
+    FontId::new(opts.base_size_pt * CODE_SCALE, FontFamily::Monospace)
 }
 
 /// Chrome: status strip, URL bar, outline, page info, and every word a band says. Fixed

@@ -183,8 +183,10 @@ the last time it was laid out, and `ready_screen` hands egui empty space of that
 block clear of the band, which is the window plus a window either way. Same page, 0.2 ms.
 
 A remembered height is a measurement, so `Heights::under` throws the table away when anything
-that would change one changes: the column width, the zoom, the reading settings, or the image
-store, because a placeholder that becomes a photograph is a different height. `allocate_space`
+that would change one changes: the column width, the zoom, the reading settings, the image
+store, because a placeholder that becomes a photograph is a different height, or the set of
+collapsed comments, because `Shift+Z` folds every thread on the page without laying one out.
+`allocate_space`
 and not `add_space`, so the item spacing either side of the gap is the spacing the block itself
 would have had; `hww-shot` at the foot of a long page is what says the two agree, because
 landing there is the sum of every height above it.
@@ -411,9 +413,10 @@ upload are merely compiled. Tests worth keeping named:
 - `every_style_resolves_to_a_declared_family` (`src/reader/face.rs`) and
   `every_name_the_reader_can_ask_for_is_registered` (`src/reader/ui/fonts.rs`): the two halves of
   the font split, checked against each other. A family name that is asked for but never
-  registered does not fail loudly, because egui falls back to whatever face it can find, so
-  `Strong` would quietly stop being bold and nothing would say so. `face` decides names without
-  an `egui::Context` and is therefore in the fast job; `fonts` owns the bytes.
+  registered does not fail in any test: epaint has no fallback for an unbound `FontFamily::Name`
+  and panics on the first frame that draws the style, which only a running reader reaches.
+  `face` decides names without an `egui::Context` and is therefore in the fast job; `fonts`
+  owns the bytes.
 
   These replaced `no_notice_contains_an_arrow`, which was the executable form of a gap that has
   since closed: every shipped face carries the arrows. It earned its keep first. The prose rule
@@ -568,6 +571,14 @@ Real, and worth knowing before re-discovering them:
   until Escape or a click off the text. Deliberate in that direction: the alternative reading is
   that egui silently deselects a passage the moment it leaves the band, and a `Ctrl+C` that copies
   half of what is highlighted is worse than a slow frame.
+
+- **Focus on the page keeps the page laid out whole, too.** Nothing in egui drops focus on a
+  scroll, and the reader's scroll keys leave it alone, so one Tab onto a link costs the whole-page
+  frame on every frame after it, through all of a long read, until Escape or a click. The
+  mechanism wants only the focused widget's block drawn, not the page: a `focus_block` index
+  recorded beside `focus_href` and exempted from `Band::skips` would keep egui's dead-man's
+  switch satisfied at the cost of one block. Not written; the same shape would serve
+  `scroll_to_block`.
 
 - **Nested replies in `thread.rs` are still under-counted** (see Closed decisions). The reader
   reconstructs whatever tree extraction hands it; it cannot recover replies extraction lost.

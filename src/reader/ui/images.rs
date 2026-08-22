@@ -86,10 +86,16 @@ impl ImageStore {
     }
 
     pub fn begin(&mut self, src: &str) {
-        self.changes += 1;
-        self.entries.insert(src.to_owned(), State::Loading);
+        self.set(src, State::Loading);
         self.touch(src);
         self.evict();
+    }
+
+    /// The only writer of `entries`, so the change counter cannot be forgotten at a new call
+    /// site: the field doc promises every change bumps it, and this is where that is kept.
+    fn set(&mut self, src: &str, state: State) {
+        self.changes += 1;
+        self.entries.insert(src.to_owned(), state);
     }
 
     pub fn is_pending(&self, src: &str) -> bool {
@@ -112,8 +118,8 @@ impl ImageStore {
         );
         self.dims
             .insert(src.to_owned(), (decoded.width, decoded.height));
-        self.entries.insert(
-            src.to_owned(),
+        self.set(
+            src,
             State::Ready(Ready {
                 texture,
                 width: decoded.width,
@@ -124,7 +130,6 @@ impl ImageStore {
             }),
         );
         self.loaded += 1;
-        self.changes += 1;
         self.touch(src);
         self.evict();
     }
@@ -146,8 +151,7 @@ impl ImageStore {
     }
 
     pub fn fail(&mut self, src: &str, why: String) {
-        self.changes += 1;
-        self.entries.insert(src.to_owned(), State::Failed(why));
+        self.set(src, State::Failed(why));
         self.touch(src);
     }
 
@@ -183,8 +187,8 @@ impl ImageStore {
                 continue;
             }
             let oldest = self.order.remove(i);
-            self.entries.remove(&oldest);
             self.changes += 1;
+            self.entries.remove(&oldest);
         }
     }
 }
@@ -235,10 +239,18 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
         }
         Snapshot::Failed(why) => {
             let mut retry = false;
+            let mut focused = false;
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(format!("[image] {why}: {host}")).color(pal.notice_fg));
-                retry = ui.small_button("retry").clicked();
+                let resp = ui.small_button("retry");
+                retry = resp.clicked();
+                focused = resp.has_focus();
             });
+            // Reported like the offer's button: `i` then retries, and the block stays laid
+            // out while Tab rests here.
+            if focused {
+                ctx.focus_image = Some(img.src.clone());
+            }
             if retry {
                 ctx.act(Action::LoadImage(img.src.clone()));
             }
@@ -309,8 +321,14 @@ fn show_ready(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
             })
             .small(),
     );
-    if partial.is_some() && ui.small_button("retry").clicked() {
-        ctx.act(Action::LoadImage(img.src.clone()));
+    if partial.is_some() {
+        let resp = ui.small_button("retry");
+        if resp.has_focus() {
+            ctx.focus_image = Some(img.src.clone());
+        }
+        if resp.clicked() {
+            ctx.act(Action::LoadImage(img.src.clone()));
+        }
     }
 }
 
@@ -329,6 +347,9 @@ pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>)
             let resp = ui.add(
                 egui::Button::new(RichText::new(format!("[{alt}]")).color(pal.dim)).frame(false),
             );
+            if resp.has_focus() {
+                ctx.focus_image = Some(img.src.clone());
+            }
             if resp.clicked() && ctx.opts.images != ImagePolicy::Never {
                 ctx.act(Action::LoadImage(img.src.clone()));
             }

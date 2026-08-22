@@ -21,23 +21,28 @@ use crate::reader::opts::ReadOpts;
 #[derive(Clone, PartialEq, Debug)]
 pub struct Layout {
     pub opts: ReadOpts,
-    /// Width of the reading column, in pixels.
+    /// Width of the reading column, in points.
     pub measure: f32,
     /// egui's zoom, which scales every height without changing the settings.
     pub pixels_per_point: f32,
-    /// [`crate::reader::ui::images::ImageStore::changes`]: a load or a failure re-sizes the
-    /// block it lands in, and `I` starts loads in blocks that are nowhere near the window.
+    /// `ui::images::ImageStore::changes`: a load or a failure re-sizes the block it lands in,
+    /// and `I` starts loads in blocks that are nowhere near the window.
     pub images: u64,
-    /// The find query, because a match is drawn at a tighter line height than the page reads
-    /// at: a galley row made entirely of matched text is *shorter* while the find bar is open.
-    /// Those heights are measured (a non-empty query lays the page out whole, so every block
-    /// records one), and nothing else in this key moves when the bar closes, so without this
-    /// the page would keep the compressed heights for every block off the window and shift
-    /// under the reader as they scroll back in.
-    pub find: Option<String>,
-    /// [`egui::Id::value`] of the link a click is pending on, which wears `notice::PENDING` and
+    /// Whether a find query is being drawn, because a match is drawn at a tighter line height
+    /// than the page reads at: a galley row made entirely of matched text is *shorter* while
+    /// the find bar is open. Those heights are measured (a non-empty query lays the page out
+    /// whole, so every block records one), and nothing else in this key moves when the bar
+    /// closes, so without this the page would keep the compressed heights for every block off
+    /// the window and shift under the reader as they scroll back in. Which query does not
+    /// matter: while one is drawn the table is never consulted.
+    pub find: bool,
+    /// `egui::Id::value` of the link a click is pending on, which wears `notice::PENDING` and
     /// is therefore a different height while the fetch is in flight.
     pub pending_link: Option<u64>,
+    /// How many times the set of collapsed comments has changed. A `Block::Thread` is one
+    /// block and one height, and `Shift+Z` collapses every thread on the page, including the
+    /// ones clear of the band that nothing will lay out this frame.
+    pub collapsed: u64,
 }
 
 /// Heights measured under one [`Layout`], indexed by block.
@@ -119,8 +124,9 @@ mod tests {
             measure,
             pixels_per_point: 1.0,
             images: 0,
-            find: None,
+            find: false,
             pending_link: None,
+            collapsed: 0,
         }
     }
 
@@ -172,10 +178,22 @@ mod tests {
     fn a_closed_find_bar_forgets_every_height() {
         let mut h = Heights::default();
         let mut l = layout(600.0);
-        l.find = Some("cabbage".to_owned());
+        l.find = true;
         h.under(&l);
         h.set(3, 42.0);
-        l.find = None;
+        l.find = false;
+        h.under(&l);
+        assert_eq!(h.get(3), None);
+    }
+
+    /// `Shift+Z` changes the height of every thread on the page without laying one out.
+    #[test]
+    fn a_collapsed_thread_forgets_every_height() {
+        let mut h = Heights::default();
+        let mut l = layout(600.0);
+        h.under(&l);
+        h.set(3, 42.0);
+        l.collapsed += 1;
         h.under(&l);
         assert_eq!(h.get(3), None);
     }
