@@ -113,6 +113,29 @@ pub fn block_ui(ui: &mut Ui, b: &ir::Block, ctx: &mut RenderCtx<'_>) {
         }
         ir::Block::Embed { kind, url } => embed_ui(ui, *kind, url, ctx),
         ir::Block::Thread(comments) => super::thread_ui::thread_ui(ui, comments, ctx),
+        ir::Block::Entries(entries) => entries_ui(ui, entries, ctx),
+    }
+}
+
+/// A run of story cards: each a linked headline in the smallest heading face, its dek in
+/// body, its time in the dim small face. The thumbnail is carried in the IR and not drawn:
+/// a column of one placeholder per card was the worst thing about these pages.
+fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
+    for e in entries {
+        ui.add_space(super::theme::snap(ctx.opts.base_size_pt * 0.55));
+        let title = match &e.href {
+            Some(href) => vec![ir::Inline::Link {
+                href: href.clone(),
+                inlines: e.title.clone(),
+            }],
+            None => e.title.clone(),
+        };
+        let set = Setting::heading(ctx.opts, &ctx.pal, 4);
+        runs(ui, &title, &set, ctx);
+        blocks_ui(ui, &e.summary, ctx, None);
+        if let Some(p) = &e.published {
+            ui.label(RichText::new(p).color(ctx.pal.dim).small());
+        }
     }
 }
 

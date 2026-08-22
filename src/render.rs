@@ -158,6 +158,24 @@ fn render_block(b: &Block, o: &TextOpts, indent: usize, out: &mut String) {
                 render_blocks(&c.blocks, o, depth, out);
             }
         }
+        Block::Entries(entries) => {
+            for e in entries {
+                let title = inline_text(&e.title, o);
+                match (&e.href, o.show_links) {
+                    (Some(h), true) => out.push_str(&format!("{pad}* {title} <{h}>\n")),
+                    _ => out.push_str(&format!("{pad}* {title}\n")),
+                }
+                let mut buf = String::new();
+                render_blocks(&e.summary, o, 0, &mut buf);
+                for l in buf.trim().lines() {
+                    out.push_str(&format!("{pad}  {l}\n"));
+                }
+                if let Some(p) = &e.published {
+                    out.push_str(&format!("{pad}  {p}\n"));
+                }
+                out.push('\n');
+            }
+        }
     }
 }
 
@@ -453,5 +471,37 @@ mod tests {
         assert_eq!(text.matches("The Headline").count(), 1, "{text}");
         assert_eq!(text.matches("Jane Writer").count(), 1, "{text}");
         assert!(text.contains("Body prose"));
+    }
+
+    #[test]
+    fn entries_render_as_a_headline_its_summary_and_its_time() {
+        let doc = Document {
+            url: "https://example.test/".into(),
+            title: None,
+            byline: None,
+            published: None,
+            site_name: None,
+            lang: None,
+            blocks: vec![Block::Entries(vec![crate::ir::Entry {
+                title: vec![Inline::Text("A headline of some length".into())],
+                href: Some("https://example.test/s".into()),
+                summary: vec![Block::Paragraph(vec![Inline::Text("The dek.".into())])],
+                published: Some("2 hours ago".into()),
+                image: None,
+            }])],
+        };
+        let plain = to_text(&doc, &TextOpts::default());
+        assert_eq!(
+            plain,
+            "* A headline of some length\n  The dek.\n  2 hours ago\n\n"
+        );
+        let linked = to_text(
+            &doc,
+            &TextOpts {
+                show_links: true,
+                ..TextOpts::default()
+            },
+        );
+        assert!(linked.starts_with("* A headline of some length <https://example.test/s>\n"));
     }
 }

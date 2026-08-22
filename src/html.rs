@@ -134,6 +134,8 @@ pub struct Explanation {
     /// Index into `candidates` of the one whose blocks became the document.
     pub winner: Option<usize>,
     pub thread: crate::thread::Verdict,
+    /// What the story-card detector saw. Reported, not yet acted on.
+    pub cards: crate::cards::Verdict,
     /// What the thread merge did: `"replaced the document"`, `"appended"`,
     /// `"dropped (thinner than the floor)"`, or `"no thread"`.
     pub thread_merge: &'static str,
@@ -188,6 +190,12 @@ impl std::fmt::Display for Explanation {
             } else {
                 ' '
             };
+            writeln!(f, "  {mark} {g}")?;
+        }
+        let accepted = self.cards.accepted().count();
+        writeln!(f, "cards: {accepted} group(s) look like story cards")?;
+        for g in &self.cards.groups {
+            let mark = if g.rejected.is_none() { '*' } else { ' ' };
             writeln!(f, "  {mark} {g}")?;
         }
         writeln!(f, "meta:")?;
@@ -262,11 +270,13 @@ fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
         lang: html.root_element().value().attr("lang").map(str::to_owned),
         blocks: Vec::new(),
     };
+    let (card_map, cards) = crate::cards::detect(&html);
     let mut why = Explanation {
         url: url.to_string(),
         candidates: Vec::new(),
         winner: None,
         thread: Default::default(),
+        cards,
         thread_merge: "no thread",
         meta: vec![
             ("title", title_src, doc.title.clone()),
@@ -279,7 +289,7 @@ fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
         blocks: 0,
         text_len: 0,
     };
-    let ranked = root_candidates(&html);
+    let ranked = root_candidates(&html, &card_map);
     why.winner = choose_root(&ranked);
     why.candidates = ranked.iter().map(|(_, c)| c.clone()).collect();
     if let Some(i) = why.winner {
@@ -288,11 +298,11 @@ fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
         } else {
             Walk::bare(url)
         };
-        doc.blocks = blocks_from(ranked[i].0, &walk);
+        doc.blocks = blocks_from(ranked[i].0, &walk.cards(&card_map));
     }
     // A discussion is not a subtree, so it gets its own algorithm. When the thread dominates
     // the page it *is* the document; when it merely accompanies an article, it is appended.
-    let (thread, verdict) = crate::thread::extract_thread_traced(&html, url);
+    let (thread, verdict) = crate::thread::extract_thread_traced(&html, url, &card_map);
     why.thread = verdict;
     if let Some(comments) = thread {
         let tlen = crate::thread::comments_text_len(&comments);
@@ -315,16 +325,23 @@ fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
     // scorer's best was a 240-char text box and a 471-char legal block, each clearing the
     // floor and each a fraction of the page. Until front pages have a shape of their own, the
     // body with its navigation beats a legal notice with nothing.
-    if doc.text_len() < SLIVER_TEXT
+    // And a root the page's own story cards dwarf: one portal keeps its sixty-card stream
+    // beside `<main>` rather than in it, and `<main>` was a 1,233-char root.
+    let cards_text: usize = why.cards.accepted().map(|g| g.total_text).sum();
+    let have = doc.text_len();
+    if (have < SLIVER_TEXT || cards_text > CARDS_RATIO * have)
         && let Ok(sel) = Selector::parse("body")
         && let Some(body) = html.select(&sel).next()
     {
-        let (fallback, hints_off) = blocks_guarded(body, url);
-        let have = doc.text_len();
+        let (fallback, hints_off) = blocks_guarded(body, url, &card_map);
         let got = block_text(&fallback);
         why.body_emitted = Some(got);
         why.body_hints_off = hints_off;
-        if got > have && (have < crate::ir::THIN_TEXT || got > SLIVER_RATIO * have) {
+        if got > have
+            && (have < crate::ir::THIN_TEXT
+                || got > SLIVER_RATIO * have
+                || cards_text > CARDS_RATIO * have)
+        {
             doc.blocks = fallback;
             why.body_fallback = true;
         }
@@ -364,6 +381,9 @@ fn visible_byline(html: &Html, sel: &str) -> Option<String> {
 /// whose bodies held five and eleven thousand.
 const SLIVER_TEXT: usize = 1000;
 const SLIVER_RATIO: usize = 5;
+/// Accepted story-card lists carrying this many times the chosen root's text mean the root
+/// is not the page. Measured: 14,891 against 1,233.
+const CARDS_RATIO: usize = 3;
 
 /// The first source that produced a value, and its name; `"none"` when nothing did.
 fn first_of<const N: usize>(
@@ -425,7 +445,10 @@ fn own_text_into(node: NodeRef<'_, Node>, out: &mut String, root: bool) {
 ///
 /// The content-root candidates, ranked by first-pass score with the floor applied, each
 /// carrying the emitted length that [`choose_root`] decides on.
-fn root_candidates(html: &Html) -> Vec<(ElementRef<'_>, Candidate)> {
+fn root_candidates<'h>(
+    html: &'h Html,
+    cards: &crate::cards::CardMap,
+) -> Vec<(ElementRef<'h>, Candidate)> {
     // Emitted length is measured against a dummy base: hrefs do not change how much text a
     // root yields, and the real base is not known here.
     let base = Url::parse("https://x.invalid/").unwrap();
@@ -469,7 +492,7 @@ fn root_candidates(html: &Html) -> Vec<(ElementRef<'_>, Candidate)> {
     // dense with text yet yield almost nothing once chrome and empty wrappers are dropped,
     // which is how a newsletter post lost 90% of its body to a higher-scoring ancestor.
     for (el, c) in &mut ranked {
-        let (blocks, hints_off) = blocks_guarded(*el, &base);
+        let (blocks, hints_off) = blocks_guarded(*el, &base, cards);
         c.emitted = block_text(&blocks);
         c.hints_off = hints_off;
     }
@@ -483,9 +506,13 @@ fn root_candidates(html: &Html) -> Vec<(ElementRef<'_>, Candidate)> {
 /// chars. Another wraps its whole main column in `region-content-sidebar-secondary`, and
 /// `sidebar` is a hint: its `<body>` emitted 283 chars. When the hinted subtrees are more than
 /// half the root's text, the root is walked without them, and the Explanation says so.
-fn blocks_guarded(root: ElementRef<'_>, base: &Url) -> (Vec<Block>, bool) {
-    let with = blocks_from(root, &Walk::bare(base));
-    let without = blocks_from(root, &Walk::without_hints(base));
+fn blocks_guarded(
+    root: ElementRef<'_>,
+    base: &Url,
+    cards: &crate::cards::CardMap,
+) -> (Vec<Block>, bool) {
+    let with = blocks_from(root, &Walk::bare(base).cards(cards));
+    let without = blocks_from(root, &Walk::without_hints(base).cards(cards));
     if block_text(&without) > 2 * block_text(&with) {
         (without, true)
     } else {
@@ -647,6 +674,9 @@ pub fn blocks_from_public(root: ElementRef<'_>, base: &Url) -> Vec<Block> {
 pub struct Walk<'a> {
     pub base: &'a Url,
     noise_hints: bool,
+    /// Which children of which containers are story cards, from `cards::detect`. `None` is
+    /// "no cards anywhere", which is what a thread body or a test fixture wants.
+    cards: Option<&'a crate::cards::CardMap>,
 }
 
 impl<'a> Walk<'a> {
@@ -654,12 +684,19 @@ impl<'a> Walk<'a> {
         Self {
             base,
             noise_hints: true,
+            cards: None,
         }
     }
     fn without_hints(base: &'a Url) -> Self {
         Self {
-            base,
             noise_hints: false,
+            ..Self::bare(base)
+        }
+    }
+    fn cards(self, cards: &'a crate::cards::CardMap) -> Self {
+        Self {
+            cards: Some(cards),
+            ..self
         }
     }
 }
@@ -710,6 +747,11 @@ fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, d
     // sibling of a block: in `<div><p>..</p><a>more</a></div>` the anchor emitted no block,
     // so it fell to a fallback that only ran when the *whole* container had emitted nothing.
     let mut pending: Vec<Inline> = Vec::new();
+    // Story cards among this container's children become one `Entries` run, in place, so a
+    // front page keeps its section headings between its card lists. Only the members the
+    // detector accepted; a stray child between two cards is walked as itself.
+    let members = walk.cards.and_then(|m| m.get(&node.id()));
+    let mut entries: Vec<crate::ir::Entry> = Vec::new();
     for child in node.children() {
         let Some(el) = ElementRef::wrap(child) else {
             if matches!(child.value(), Node::Text(_)) {
@@ -718,6 +760,13 @@ fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, d
             continue;
         };
         if is_noise(&el, walk) {
+            continue;
+        }
+        if members.is_some_and(|m| m.contains(&child.id()))
+            && let Some(e) = entry_from(&el, walk, depth + 1)
+        {
+            flush_pending(&mut pending, out);
+            entries.push(e);
             continue;
         }
         let name = el.value().name();
@@ -738,6 +787,11 @@ fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, d
                 if !inl.is_empty() {
                     made.push(Block::Paragraph(inl));
                 }
+            }
+            // A list whose items are story cards is a card list, not a list: walked as a
+            // container, so its members go through the entries path above.
+            "ul" | "ol" if walk.cards.is_some_and(|m| m.contains_key(&child.id())) => {
+                walk_blocks(child, walk, &mut made, depth + 1);
             }
             "ul" | "ol" => {
                 let ordered = name == "ol";
@@ -846,10 +900,185 @@ fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, d
         }
         if !made.is_empty() {
             flush_pending(&mut pending, out);
+            flush_entries(&mut entries, out);
             out.append(&mut made);
         }
     }
     flush_pending(&mut pending, out);
+    flush_entries(&mut entries, out);
+}
+
+fn flush_entries(entries: &mut Vec<crate::ir::Entry>, out: &mut Vec<Block>) {
+    if !entries.is_empty() {
+        out.push(Block::Entries(std::mem::take(entries)));
+    }
+}
+
+/// One story card as an `Entry`: the headline is the card's heading if it has one and its
+/// longest link otherwise; the href is the longest link's, or the card's own when the card is
+/// the anchor; the summary is the rest of the card, minus the headline, the thumbnail, and
+/// anything shorter than a headline (a kicker, a read time, a date, which `published` keeps).
+fn entry_from(card: &ElementRef, walk: &Walk<'_>, depth: usize) -> Option<crate::ir::Entry> {
+    let a = Selector::parse("a[href]").unwrap();
+    let h = Selector::parse("h1, h2, h3, h4, h5, h6").unwrap();
+    let img = Selector::parse("img").unwrap();
+    let longest = card
+        .select(&a)
+        .map(|l| (text_len(*l), l))
+        .max_by_key(|(n, _)| *n);
+    let own_href = (card.value().name() == "a")
+        .then(|| card.value().attr("href"))
+        .flatten();
+    let href = longest
+        .and_then(|(_, l)| l.value().attr("href"))
+        .or(own_href)
+        .and_then(|raw| walk.base.join(raw).ok())
+        .map(|u| u.to_string());
+    let heading = card
+        .select(&h)
+        .find(|e| text_len(**e) >= crate::cards::MIN_HEADLINE);
+    // A card that is itself the anchor, with no link inside it, titles itself.
+    let title_el = heading
+        .or(longest.map(|(_, l)| l))
+        .or(own_href.map(|_| *card))?;
+    let title = trim_inlines(unimage(unlink(inlines_from(*title_el, walk, depth + 1))));
+    let title_text = crate::ir::plain_text(&title);
+    if title_text.trim().len() < crate::cards::MIN_HEADLINE {
+        return None;
+    }
+    let published = crate::thread::find_hint(card, crate::thread::TIME_HINT);
+    let image = card.select(&img).find_map(|i| image_from(&i, walk.base));
+    let summary = summary_of(
+        blocks_from(*card, walk),
+        &title_text,
+        href.as_deref(),
+        published.as_deref(),
+    );
+    Some(crate::ir::Entry {
+        title,
+        href,
+        summary,
+        published,
+        image,
+    })
+}
+
+/// What a card said beyond its headline: its paragraphs and lists, minus the headline
+/// itself, the thumbnail and its alt, the time, and anything shorter than a headline (a
+/// kicker, a read time, a byline). Recursive through lists, because a lead package nests its
+/// secondary stories as one.
+fn summary_of(
+    blocks: Vec<Block>,
+    title_text: &str,
+    href: Option<&str>,
+    published: Option<&str>,
+) -> Vec<Block> {
+    let keep_text = |inlines: &[Inline]| {
+        let t = crate::ir::plain_text(inlines);
+        let t = t.trim();
+        let repeats = t.is_empty()
+            || title_text.contains(t)
+            || t.contains(title_text.trim())
+            || published.is_some_and(|p| p.contains(t));
+        !repeats && t.len() >= SUMMARY_TEXT
+    };
+    let mut after_image = false;
+    blocks
+        .into_iter()
+        .filter_map(|b| match b {
+            Block::Figure { .. } => {
+                after_image = true;
+                None
+            }
+            Block::Heading { inlines, .. } | Block::Paragraph(inlines) => {
+                // A short run carrying the thumbnail, or directly under it, is its credit
+                // line: the photographer and the agency, not the dek.
+                let had_image = has_image(&inlines);
+                let credit_slot = had_image || std::mem::take(&mut after_image);
+                let inlines = unimage(unlink_to(inlines, href));
+                let text_len = crate::ir::plain_text(&inlines).trim().len();
+                if credit_slot && text_len < CREDIT_TEXT {
+                    return None;
+                }
+                keep_text(&inlines).then_some(Block::Paragraph(inlines))
+            }
+            Block::List { ordered, items } => {
+                after_image = false;
+                let items: Vec<Vec<Block>> = items
+                    .into_iter()
+                    .map(|item| summary_of(item, title_text, href, published))
+                    .filter(|item| !item.is_empty())
+                    .collect();
+                (!items.is_empty()).then_some(Block::List { ordered, items })
+            }
+            other => Some(other),
+        })
+        .collect()
+}
+
+/// Text left beside a thumbnail under this length is a photo credit, not a dek.
+const CREDIT_TEXT: usize = 60;
+/// A summary line shorter than this is a kicker, a read time, or a comment count. A dek is a
+/// sentence.
+const SUMMARY_TEXT: usize = 25;
+
+/// Links to `href` replaced by their text, other links kept: a dek that links to its own
+/// story again is noise, a lead package's secondary stories are not.
+fn unlink_to(inlines: Vec<Inline>, href: Option<&str>) -> Vec<Inline> {
+    inlines
+        .into_iter()
+        .flat_map(|i| match i {
+            Inline::Link { href: h, inlines } if Some(h.as_str()) == href => {
+                unlink_to(inlines, href)
+            }
+            Inline::Link { href: h, inlines } => vec![Inline::Link {
+                href: h,
+                inlines: unlink_to(inlines, href),
+            }],
+            Inline::Emph(v) => vec![Inline::Emph(unlink_to(v, href))],
+            Inline::Strong(v) => vec![Inline::Strong(unlink_to(v, href))],
+            other => vec![other],
+        })
+        .collect()
+}
+
+fn has_image(inlines: &[Inline]) -> bool {
+    inlines.iter().any(|i| match i {
+        Inline::Image(_) => true,
+        Inline::Emph(v) | Inline::Strong(v) | Inline::Link { inlines: v, .. } => has_image(v),
+        _ => false,
+    })
+}
+
+/// Inline images dropped: a thumbnail's alt is a description of a picture that is not shown.
+fn unimage(inlines: Vec<Inline>) -> Vec<Inline> {
+    inlines
+        .into_iter()
+        .filter_map(|i| match i {
+            Inline::Image(_) => None,
+            Inline::Emph(v) => Some(Inline::Emph(unimage(v))),
+            Inline::Strong(v) => Some(Inline::Strong(unimage(v))),
+            Inline::Link { href, inlines } => Some(Inline::Link {
+                href,
+                inlines: unimage(inlines),
+            }),
+            other => Some(other),
+        })
+        .collect()
+}
+
+/// Links replaced by their text: an entry's title is one link already, and a dek that links
+/// to the same story three times is noise in a renderer that underlines.
+fn unlink(inlines: Vec<Inline>) -> Vec<Inline> {
+    inlines
+        .into_iter()
+        .flat_map(|i| match i {
+            Inline::Link { inlines, .. } => unlink(inlines),
+            Inline::Emph(v) => vec![Inline::Emph(unlink(v))],
+            Inline::Strong(v) => vec![Inline::Strong(unlink(v))],
+            other => vec![other],
+        })
+        .collect()
 }
 
 /// Emit the gathered inline run as a paragraph.
@@ -931,7 +1160,8 @@ fn link_block(b: &mut Block, href: &str) {
         | Block::Code { .. }
         | Block::Rule
         | Block::Embed { .. }
-        | Block::Thread(_) => {}
+        | Block::Thread(_)
+        | Block::Entries(_) => {}
     }
 }
 
@@ -1302,6 +1532,10 @@ mod tests {
                     headers.iter().for_each(|c| push_hrefs(c, out));
                     rows.iter().flatten().for_each(|c| push_hrefs(c, out));
                 }
+                Block::Entries(es) => es.iter().for_each(|e| {
+                    out.extend(e.href.clone());
+                    e.summary.iter().for_each(|b| walk(b, out));
+                }),
                 Block::Thread(cs) => cs.iter().flat_map(|c| &c.blocks).for_each(|b| walk(b, out)),
                 Block::Code { .. } | Block::Rule | Block::Embed { .. } => {}
             }
@@ -1967,5 +2201,100 @@ mod tests {
         assert!(text.contains("The Headline"), "{text}");
         assert!(text.contains("Filed under"), "{text}");
         assert!(!text.contains("Site Name"), "{text}");
+    }
+
+    /// The shape of a front page: cards under section headings become `Entries` runs in
+    /// place, with the headline as title, the story as href, the dek as summary, and the
+    /// thumbnail and time carried, while the headings between the runs stay where they were.
+    #[test]
+    fn a_front_page_of_cards_becomes_entries_in_place() {
+        let cards = |n: usize, tag: &str| {
+            (0..n)
+                .map(|i| {
+                    format!(
+                        "<div class=\"{tag}\"><a href=\"/{tag}-{i}\"><img src=\"/t{i}.jpg\" alt=\"Thumb {i}\"></a>\
+                         <h3><a href=\"/{tag}-{i}\">Headline {i} about a thing that happened today</a></h3>\
+                         <p class=\"dek\">A dek sentence for story {i}, with a little more.</p>\
+                         <span class=\"timestamp\">2 hours ago</span></div>"
+                    )
+                })
+                .collect::<String>()
+        };
+        // The second list is a `<ul>` of `<li>` cards: the list arm must not swallow them.
+        let more = cards(4, "more").replace("<div class=\"more\">", "<li class=\"more\">");
+        let more = more.replace("</span></div>", "</span></li>");
+        let src = format!(
+            "<html><body><main><h2>Top stories</h2>{}<h2>More news</h2><ul>{more}</ul></main></body></html>",
+            cards(5, "lead"),
+        );
+        let url = Url::parse("https://example.test/").unwrap();
+        let d = extract(&src, &url);
+        let shape: Vec<String> = d
+            .blocks
+            .iter()
+            .map(|b| match b {
+                Block::Heading { .. } => "h".to_owned(),
+                Block::Entries(es) => format!("e{}", es.len()),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(shape, ["h", "e5", "h", "e4"], "{:?}", d.blocks);
+        let Block::Entries(es) = &d.blocks[1] else {
+            unreachable!()
+        };
+        let e = &es[0];
+        assert_eq!(
+            crate::ir::plain_text(&e.title),
+            "Headline 0 about a thing that happened today"
+        );
+        assert_eq!(e.href.as_deref(), Some("https://example.test/lead-0"));
+        assert_eq!(e.published.as_deref(), Some("2 hours ago"));
+        assert_eq!(
+            e.image.as_ref().map(|i| i.src.as_str()),
+            Some("https://example.test/t0.jpg")
+        );
+        let summary: Vec<String> = e
+            .summary
+            .iter()
+            .map(|b| match b {
+                Block::Paragraph(i) => crate::ir::plain_text(i),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(summary, ["A dek sentence for story 0, with a little more."]);
+        // And `--why` says the same thing.
+        let why = explain(&src, &url);
+        assert_eq!(why.cards.accepted().count(), 2, "{why}");
+    }
+
+    /// Regression: a portal keeps its sixty-card stream beside `<main>`, and `<main>` won the
+    /// root ranking with 1,233 chars. The cards are the page.
+    #[test]
+    fn a_card_stream_outside_the_root_brings_the_body_in() {
+        let intro = "A short welcome paragraph in main, long enough to clear the two hundred \
+                     character floor and to be the best prose on the page by far, twice. "
+            .repeat(2);
+        let cards = (0..20)
+            .map(|i| {
+                format!(
+                    "<li class=\"story\"><h3><a href=\"/s{i}\">Headline {i} about a thing that \
+                     happened today</a></h3><p>A dek sentence for story {i}, with a little more \
+                     to say.</p></li>"
+                )
+            })
+            .collect::<String>();
+        let src = format!("<html><body><main><p>{intro}</p></main><ul>{cards}</ul></body></html>");
+        // Two routes to the same place: the card list wins the root ranking outright, or the
+        // body is brought in over a prose root the cards dwarf. What is pinned is the outcome.
+        let url = Url::parse("https://example.test/").unwrap();
+        let d = extract(&src, &url);
+        assert!(
+            d.blocks
+                .iter()
+                .any(|b| matches!(b, Block::Entries(es) if es.len() == 20)),
+            "{:?}\n{}",
+            d.blocks,
+            explain(&src, &url)
+        );
     }
 }

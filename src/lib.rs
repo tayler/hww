@@ -6,6 +6,7 @@
 //! Architecture: every source format maps into [`ir::Document`], and every renderer consumes
 //! only that. See `docs/phase0-findings.md` for the measurements this design rests on.
 
+pub mod cards;
 pub mod fetch;
 pub mod hint;
 pub mod html;

@@ -94,6 +94,7 @@ Everything funnels through the IR:
                               ┌────────────────────────────────────────┴─┐
                               │                                          │
                     html.rs (article path)              thread.rs (discussion path)
+                         │   cards.rs (story cards, in place)     │
                               └──────────────> ir::Document <────────────┘
                                                     │
                               ┌─────────────────────┴──────────────────┐
@@ -148,12 +149,20 @@ Four walkers disagreeing about where an emphasis boundary falls is a bug nobody 
 
 **Extraction order in `html::extract`.** Easy to break, and the merge is load-bearing:
 
-1. Score for a content root, map it to blocks.
+0. `cards::detect` finds every sibling group whose members read as story cards (a
+   headline-length link, few distinct hrefs, median text over 40). The walker turns those
+   members into one `Block::Entries` run *in place*, wherever it meets them, so a front page
+   keeps its section headings between its card lists. A group the card detector accepted is
+   not a thread, whatever its bylines say.
+1. Score for a content root, map it to blocks. A root whose class-name chrome hints eat more
+   than half its text is walked without them (`blocks_guarded`; one wire service names its
+   story cards `PagePromo`). `header`/`footer` inside an `article`/`section` are content.
 2. Run `thread::extract_thread`. The thread *replaces* the document if it is longer; it is
    *appended* if it exceeds 200 chars. The append branch is what recovers comment trees the
    thread detector under-counts (see Closed decisions).
-3. Fall back to `<body>` only if the result is still under 200 chars. This bleeds navigation,
-   but a thin page beats a blank one.
+3. Fall back to `<body>` if the result is still under 200 chars, or under 1,000 with the body
+   emitting five times as much (a legal notice that out-scored a front page). This bleeds
+   navigation, but a thin page beats a blank one.
 
 ## Invariants
 
@@ -591,6 +600,11 @@ Real, and worth knowing before re-discovering them:
   switch satisfied at the cost of one block. Not written; the same shape would serve
   `scroll_to_block`.
 
+- **Entry thumbnails are carried and not drawn.** `ir::Entry.image` is filled from the card
+  and `blocks::entries_ui` draws the headline, the dek, and the time without it, because a
+  column of one placeholder per card was the worst thing about these pages. A small per-entry
+  placeholder, or a loaded thumbnail beside the headline, is the obvious next step and has no
+  scene yet.
 - **Nested replies in `thread.rs` are still under-counted** (see Closed decisions). The reader
   reconstructs whatever tree extraction hands it; it cannot recover replies extraction lost.
 - **No justification, and no `justify` setting.** One `Label` per segment cannot justify. The

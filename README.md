@@ -27,9 +27,10 @@ cargo run --features gui --bin hww-gui -- [--no-rewrite] <url> # the reader
 | `rewrite` | Per-site rules; builtin table only, every rewrite reported on stderr |
 | `html` | Parse, article extraction, IR mapping |
 | `thread` | Forum/discussion extraction (structural, not heuristic) |
+| `cards` | Story-card detection: a front page or section page as a run of entries, in place |
 | `session` | The pipeline in one place; the rewrite notice reported before dispatch |
 | `render` | Plain text |
-| `ir` | Document / Block / Inline / Thread / Comment |
+| `ir` | Document / Block / Inline / Thread / Comment / Entries / Entry |
 | `reader` | Reading model: inline runs, outline, history, threads, image decoding, notices |
 | GUI | egui reader: links, back/forward, outline, find, threads, images. **Linux verified**; macOS and Windows are believed to build and are not tested |
 | feeds, gemini, gopher, markdown | not started |
@@ -122,6 +123,7 @@ one function that owns the pipeline and reports the rewrite before it dispatches
     src/session.rs the pipeline: rewrite -> fetch -> decode -> extract, plus provenance
     src/html.rs    HTML -> IR (article path)
     src/thread.rs  HTML -> IR (discussion path)
+    src/cards.rs   story-card detection; the walker emits `Entries` in place
     src/render.rs  IR -> text
     src/reader/    IR -> reading model (pure, tested) + reader/ui (egui, feature-gated)
     src/bin/hww-gui thin main: argv -> reader::ui::run

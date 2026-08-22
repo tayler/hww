@@ -60,6 +60,23 @@ pub enum Block {
     /// under article extraction (5.6% of content recovered), and a flat `Vec<Block>` cannot
     /// represent reply structure. See docs/phase0-findings.md.
     Thread(Vec<Comment>),
+    /// A run of story cards: the shape of a front page, a section page, or a feed. Added
+    /// after the Phase 3 triage: every front page in a top-ten news sample was either a legal
+    /// notice (article scoring) or a four-post discussion (thread detection), and a renderer
+    /// handed linked paragraphs cannot tell a headline from a dek. A feed maps onto the same
+    /// block. See docs/phase0-findings.md.
+    Entries(Vec<Entry>),
+}
+
+/// One card in an `Entries` run: a headline, where it leads, and what the card said about it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Entry {
+    pub title: Vec<Inline>,
+    pub href: Option<String>,
+    /// The dek and anything else the card carried, minus the headline and the thumbnail.
+    pub summary: Vec<Block>,
+    pub published: Option<String>,
+    pub image: Option<Image>,
 }
 
 /// One post in a `Thread`. `depth` is reply nesting, 0 for top level.
@@ -158,6 +175,10 @@ fn block_text_len(b: &Block) -> usize {
         }
         Block::Rule | Block::Embed { .. } => 0,
         Block::Thread(cs) => cs.iter().map(|c| blocks_text_len(&c.blocks)).sum(),
+        Block::Entries(es) => es
+            .iter()
+            .map(|e| inlines_text_len(&e.title) + blocks_text_len(&e.summary))
+            .sum(),
     }
 }
 

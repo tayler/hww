@@ -30,7 +30,7 @@ const AUTHOR_HINT: &[&str] = &[
     "byline",
     "poster",
 ];
-const TIME_HINT: &[&str] = &["age", "date", "time", "timestamp", "created"];
+pub(crate) const TIME_HINT: &[&str] = &["age", "date", "time", "timestamp", "created"];
 const BODY_HINT: &[&str] = &[
     "commtext",
     "comment-body",
@@ -42,13 +42,21 @@ const BODY_HINT: &[&str] = &[
 ];
 
 pub fn extract_thread(html: &Html, base: &Url) -> Option<Vec<Comment>> {
-    extract_thread_traced(html, base).0
+    extract_thread_traced(html, base, &crate::cards::CardMap::new()).0
 }
 
 /// [`extract_thread`], plus the account of every group it weighed. One function under both
 /// entry points, so `--why` reports the decision that was made rather than a re-enactment.
-pub fn extract_thread_traced(html: &Html, base: &Url) -> (Option<Vec<Comment>>, Verdict) {
-    let (group, mut verdict) = best_group(html);
+///
+/// `cards` is what the story-card detector accepted; a group it claimed is not a thread,
+/// whatever its bylines say. A news-feed card carries an author and a date exactly as a post
+/// does, and its dek can hold its link density under the floor.
+pub fn extract_thread_traced(
+    html: &Html,
+    base: &Url,
+    cards: &crate::cards::CardMap,
+) -> (Option<Vec<Comment>>, Verdict) {
+    let (group, mut verdict) = best_group(html, cards);
     let Some(group) = group else {
         return (None, verdict);
     };
@@ -121,7 +129,7 @@ impl std::fmt::Display for GroupReport {
 
 /// Normalise a class list into a stable signature, dropping per-item noise
 /// (`c00`, `depth-3`, hashed module names) that would otherwise split a group.
-fn signature(el: &ElementRef) -> String {
+pub(crate) fn signature(el: &ElementRef) -> String {
     let mut classes: Vec<&str> = el
         .value()
         .attr("class")
@@ -136,8 +144,13 @@ fn signature(el: &ElementRef) -> String {
 
 /// The largest set of same-signature siblings that looks like posts rather than chrome, and
 /// the account of every group that was weighed.
-fn best_group<'a>(html: &'a Html) -> (Option<Vec<ElementRef<'a>>>, Verdict) {
-    let mut groups: HashMap<(ego_tree::NodeId, String), Vec<ElementRef<'a>>> = HashMap::new();
+/// Every set of three or more same-signature siblings on the page, in document order of
+/// their first member. The raw material of both the thread detector and `cards`: a
+/// discussion is N sibling posts, a front page is N sibling story cards, and the two are
+/// told apart by what the members contain, not by how they were found.
+pub(crate) fn sibling_groups(html: &Html) -> Vec<Vec<ElementRef<'_>>> {
+    let mut groups: HashMap<(ego_tree::NodeId, String), Vec<ElementRef<'_>>> = HashMap::new();
+    let mut order: Vec<(ego_tree::NodeId, String)> = Vec::new();
     for node in html.tree.root().descendants() {
         let Some(el) = ElementRef::wrap(node) else {
             continue;
@@ -150,12 +163,27 @@ fn best_group<'a>(html: &'a Html) -> (Option<Vec<ElementRef<'a>>>, Verdict) {
         if sig.ends_with('.') {
             continue;
         }
-        groups.entry((parent.id(), sig)).or_default().push(el);
+        let key = (parent.id(), sig);
+        let entry = groups.entry(key.clone()).or_default();
+        if entry.is_empty() {
+            order.push(key);
+        }
+        entry.push(el);
     }
-
-    let mut weighed: Vec<(Vec<ElementRef<'a>>, GroupReport)> = groups
-        .into_values()
+    order
+        .into_iter()
+        .filter_map(|k| groups.remove(&k))
         .filter(|g| g.len() >= MIN_SIBLINGS)
+        .collect()
+}
+
+fn best_group<'a>(
+    html: &'a Html,
+    cards: &crate::cards::CardMap,
+) -> (Option<Vec<ElementRef<'a>>>, Verdict) {
+    use crate::cards::CardMapExt;
+    let mut weighed: Vec<(Vec<ElementRef<'a>>, GroupReport)> = sibling_groups(html)
+        .into_iter()
         .map(|g| {
             let mut lens: Vec<usize> = g.iter().map(|e| text_len(**e)).collect();
             lens.sort_unstable();
@@ -175,7 +203,9 @@ fn best_group<'a>(html: &'a Html) -> (Option<Vec<ElementRef<'a>>>, Verdict) {
             let mut densities: Vec<f64> = g.iter().map(link_density).collect();
             densities.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let median_links = densities[densities.len() / 2];
-            let rejected = if median < MIN_MEDIAN_TEXT {
+            let rejected = if cards.holds(&g[0]) {
+                Some("a list of story cards, not posts")
+            } else if median < MIN_MEDIAN_TEXT {
                 Some("median text too short")
             } else if attributed * 2 < g.len() {
                 Some("attribution under a majority")
@@ -245,7 +275,7 @@ fn depth_of(el: &ElementRef, group: &[ElementRef]) -> u16 {
     depth
 }
 
-fn find_hint(el: &ElementRef, hints: &[&str]) -> Option<String> {
+pub(crate) fn find_hint(el: &ElementRef, hints: &[&str]) -> Option<String> {
     for node in el.descendants() {
         let Some(e) = ElementRef::wrap(node) else {
             continue;
@@ -281,13 +311,13 @@ fn body_of(el: &ElementRef, base: &Url) -> Vec<Block> {
     crate::html::blocks_from_public(*el, base)
 }
 
-fn text_of(node: NodeRef<'_, Node>) -> String {
+pub(crate) fn text_of(node: NodeRef<'_, Node>) -> String {
     let mut s = String::new();
     collect(node, &mut s);
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn text_len(node: NodeRef<'_, Node>) -> usize {
+pub(crate) fn text_len(node: NodeRef<'_, Node>) -> usize {
     text_of(node).len()
 }
 
@@ -354,7 +384,8 @@ mod tests {
             })
             .collect::<String>();
         let html = parse(&format!("<article>{figs}</article>"));
-        let (thread, verdict) = extract_thread_traced(&html, &base());
+        let (thread, verdict) =
+            extract_thread_traced(&html, &base(), &crate::cards::CardMap::new());
         assert!(thread.is_none(), "captions became a thread: {verdict:?}");
         let g = verdict
             .groups
@@ -380,7 +411,8 @@ mod tests {
             })
             .collect::<String>();
         let html = parse(&format!("<main>{cards}</main>"));
-        let (thread, verdict) = extract_thread_traced(&html, &base());
+        let (thread, verdict) =
+            extract_thread_traced(&html, &base(), &crate::cards::CardMap::new());
         assert!(thread.is_none(), "cards became a thread: {verdict:?}");
         let g = &verdict.groups[0];
         assert_eq!(g.attributed, 6, "{g:?}");
@@ -403,7 +435,8 @@ mod tests {
             })
             .collect::<String>();
         let html = parse(&format!("<div class=\"comments\">{posts}</div>"));
-        let (thread, verdict) = extract_thread_traced(&html, &base());
+        let (thread, verdict) =
+            extract_thread_traced(&html, &base(), &crate::cards::CardMap::new());
         let thread = thread.unwrap_or_else(|| panic!("no thread: {verdict:?}"));
         assert_eq!(thread.len(), 4);
         assert_eq!(thread[0].author.as_deref(), Some("user0"));
