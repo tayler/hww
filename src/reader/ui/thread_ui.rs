@@ -27,23 +27,39 @@ pub fn thread_ui(ui: &mut Ui, comments: &[ir::Comment], ctx: &mut RenderCtx<'_>)
 
         ui.horizontal_top(|ui| {
             let indent = ctx.opts.indent_for(node.depth);
-            if indent > 0.0 {
+            // A hairline guide per level, so a reply four deep can be traced back to what it
+            // answers without counting pixels. Reserved and filled in after the reply is laid
+            // out, for the reason `blocks::Quote` gives: `available_height` is the rest of the
+            // viewport, not the height of the thing being marked.
+            let guide = (indent > 0.0).then(|| {
                 ui.add_space(indent);
-                // A hairline guide per level, so a reply four deep can be traced back to what
-                // it answers without counting pixels.
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(1.0, ui.available_height().max(ctx.opts.base_size_pt)),
-                    egui::Sense::hover(),
-                );
-                ui.painter().rect_filled(rect, 0.0, ctx.pal.rule);
+                let shape = ui.painter().add(egui::Shape::Noop);
+                let (slot, _) = ui.allocate_exact_size(egui::vec2(1.0, 0.0), egui::Sense::hover());
                 ui.add_space(super::theme::snap(ctx.opts.base_size_pt * 0.5));
-            }
-            ui.vertical(|ui| {
-                header(ui, comment, &tree, n, collapsed, ctx);
-                if !collapsed {
-                    blocks_ui(ui, &comment.blocks, ctx, None);
-                }
+                (shape, slot)
             });
+            let reply = ui
+                .vertical(|ui| {
+                    header(ui, comment, &tree, n, collapsed, ctx);
+                    if !collapsed {
+                        blocks_ui(ui, &comment.blocks, ctx, None);
+                    }
+                })
+                .response
+                .rect;
+            if let Some((shape, slot)) = guide {
+                ui.painter().set(
+                    shape,
+                    egui::Shape::rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(slot.left(), reply.top()),
+                            egui::pos2(slot.left() + 1.0, reply.bottom()),
+                        ),
+                        0.0,
+                        ctx.pal.guide,
+                    ),
+                );
+            }
         });
 
         if !collapsed {

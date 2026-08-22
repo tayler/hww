@@ -279,7 +279,7 @@ fn show_ready(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     ui.add(
         egui::Image::new(&ready.texture)
             .fit_to_exact_size(egui::vec2(max_w, height))
-            .corner_radius(2.0),
+            .corner_radius(0.0),
     );
     let mut note = format!("{} × {} · {host}", source.0, source.1);
     if let Some(p) = &partial {

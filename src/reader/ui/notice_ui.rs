@@ -13,7 +13,18 @@
 //! because every `ir::Block` is laid out inside a fixed measure. That is a property the page
 //! cannot forge at any colour, in any theme, in a screenshot, or to a reader who cannot
 //! distinguish the hues. `notice::MARK` is the second such signal. Colour is support, and
-//! `theme::notice_fill_clears_every_page_colour` is what keeps it honest.
+//! `theme::every_notice_ink_is_legible_on_its_own_ground` is what keeps it honest.
+//!
+//! Only `Caution` has a ground of its own, because it is the only severity with a page under it.
+//! The other two fill the viewport, and a notice that *is* the viewport needs no mark to be told
+//! apart from a page that is not there. See `theme::notice_ink`.
+//!
+//! # One band per severity, not per notice
+//!
+//! `notice::about_page` returns up to four cautions about the same page. Drawn as four bands they
+//! sit flush, with no edge between them, and merge into one block of ground: the reader sees one
+//! remark where there are four. So [`band`] takes a group that shares a severity and draws it as
+//! one surface with one line each, and the count stays legible because the lines are separate.
 //!
 //! It follows that a band borrows **no page idiom**: not `heading_font`, not `body_font`, not
 //! the painted left rule of a quote, not the rounded fill of a code block.
@@ -68,19 +79,30 @@ impl Column {
     }
 }
 
-/// Draw one notice. Returns the button pressed this frame, if any.
+/// Draw one group of same-severity notices as a single band. Returns the button pressed this
+/// frame, if any.
+///
+/// The group is the unit because a severity is what a band's whole dress is derived from, and
+/// because two adjacent bands of one severity are indistinguishable from one. Callers group;
+/// mixing severities in one call is a bug, and in debug builds it is an assertion.
 pub fn band(
     ui: &mut Ui,
     pal: &Palette,
     opts: &ReadOpts,
     column: Column,
-    notice: &Notice,
+    group: &[Notice],
 ) -> Option<Button> {
-    let dress = theme::notice_ink(pal, notice.severity);
+    let first = group.first()?;
+    debug_assert!(
+        group.iter().all(|n| n.severity == first.severity),
+        "a band is one severity: {:?}",
+        group.iter().map(|n| n.severity).collect::<Vec<_>>()
+    );
+    let dress = theme::notice_ink(pal, first.severity);
     // A blocking severity has no page under it, so it takes the rest of the viewport. Letting it
     // shrink to its content would leave a strip of hww floating on empty page ground, which
     // reads as a very short article: the exact confusion this module exists to remove.
-    let claim_height = notice.severity.fills_the_viewport();
+    let claim_height = first.severity.fills_the_viewport();
     // `Frame::end` grows the painted rect by the inner margin *after* the content `Ui` has been
     // sized, so a claim of the whole remaining height allocates that height plus both margins
     // and overflows the scroll viewport. The overflow is small (12-48 px) and entirely
@@ -93,9 +115,17 @@ pub fn band(
     egui::Frame::new()
         .fill(dress.fill)
         // No stroke. `Frame` strokes all four sides, so a full-bleed band would grow vertical
-        // hairlines at the viewport edges and read as a boxed page. The fill edge is the rule.
+        // hairlines at the viewport edges and read as a boxed page. The severities whose fill is
+        // the page's own ground carry no edge either; see `theme::notice_ink`.
         .inner_margin(egui::Margin::symmetric(0, theme::band_pad(opts)))
         .show(ui, |ui| {
+            // A band is entirely the reader's words, so the chrome family is set once here.
+            // The labels below that name a font still win, which is what keeps the heading at
+            // `notice_heading_font`; what this catches is the widgets that name none, which is
+            // every `ui.button()` in the actions row. `TextStyle::Button` is not enough on its
+            // own: a `Button`'s style is only a fallback, and it loses to nothing here because
+            // there is nothing else to lose to, which is exactly why it went unnoticed.
+            ui.style_mut().override_font_id = Some(theme::chrome_font(opts));
             // See the module doc: without this the fill is column-wide and the band is a box.
             ui.set_min_width(ui.available_width());
             if claim_height {
@@ -106,43 +136,62 @@ pub fn band(
                 ui.vertical(|ui| {
                     ui.set_max_width(column.measure);
                     ui.set_min_width(column.measure);
-                    if let Some(h) = notice.heading {
-                        ui.label(
-                            RichText::new(h)
-                                .font(theme::notice_heading_font(opts))
-                                .color(dress.heading),
-                        );
-                        ui.add_space(theme::snap(opts.base_size_pt * 0.5));
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = theme::snap(opts.base_size_pt * 0.35);
-                        // The mark, so the band survives a screenshot and a monochrome eye.
-                        ui.label(
-                            RichText::new(notice::MARK)
-                                .color(pal.dim)
-                                .font(theme::chrome_font(opts)),
-                        );
-                        ui.label(
-                            RichText::new(notice.body.as_str())
-                                .color(dress.body)
-                                .font(theme::chrome_font(opts)),
-                        );
-                    });
-                    for d in &notice.detail {
-                        ui.label(RichText::new(d.as_str()).color(pal.dim).small());
-                    }
-                    if !notice.actions.is_empty() {
-                        ui.add_space(theme::snap(opts.base_size_pt * 0.75));
+                    for (i, notice) in group.iter().enumerate() {
+                        // Between remarks, not around them: the band's own padding is already
+                        // the gap at the top and bottom.
+                        if i > 0 {
+                            ui.add_space(theme::snap(opts.base_size_pt * 0.45));
+                        }
+                        if let Some(h) = notice.heading {
+                            ui.label(
+                                RichText::new(h)
+                                    .font(theme::notice_heading_font(opts))
+                                    .color(dress.heading),
+                            );
+                            ui.add_space(theme::snap(opts.base_size_pt * 0.5));
+                        }
                         ui.horizontal_wrapped(|ui| {
-                            for b in notice.actions {
-                                if ui.button(b.label()).clicked() {
-                                    pressed = Some(*b);
-                                }
-                            }
+                            ui.spacing_mut().item_spacing.x = theme::snap(opts.base_size_pt * 0.35);
+                            // The mark, so the band survives a screenshot and a monochrome eye.
+                            ui.label(
+                                RichText::new(notice::MARK)
+                                    .color(dress.aside)
+                                    .font(theme::chrome_font(opts)),
+                            );
+                            // The severity, spelled out. Colour is the obvious way to carry
+                            // loudness and the one that fails quietest; see `Severity::word`.
+                            ui.label(
+                                RichText::new(notice.severity.word())
+                                    .color(dress.aside)
+                                    .font(theme::chrome_font(opts)),
+                            );
+                            ui.label(
+                                RichText::new(notice.body.as_str())
+                                    .color(dress.body)
+                                    .font(theme::chrome_font(opts)),
+                            );
                         });
+                        for d in &notice.detail {
+                            ui.label(
+                                RichText::new(d.as_str())
+                                    .color(dress.aside)
+                                    .font(theme::chrome_font(opts)),
+                            );
+                        }
+                        if !notice.actions.is_empty() {
+                            ui.add_space(theme::snap(opts.base_size_pt * 0.75));
+                            ui.horizontal_wrapped(|ui| {
+                                for b in notice.actions {
+                                    if ui.button(b.label()).clicked() {
+                                        pressed = Some(*b);
+                                    }
+                                }
+                            });
+                        }
                     }
                 });
             });
         });
+
     pressed
 }

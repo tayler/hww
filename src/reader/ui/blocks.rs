@@ -67,18 +67,35 @@ pub fn block_ui(ui: &mut Ui, b: &ir::Block, ctx: &mut RenderCtx<'_>) {
                 ui.add_space(super::theme::snap(ctx.opts.base_size_pt * 0.4));
                 // A painted rule rather than an indent alone: an indented paragraph in a
                 // narrow column reads as a paragraph, not as a quotation.
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(2.0, ui.available_height().max(ctx.opts.base_size_pt)),
-                    egui::Sense::hover(),
-                );
-                ui.painter().rect_filled(rect, 1.0, ctx.pal.rule);
+                //
+                // The bar is as tall as the quotation, which is not known until the quotation
+                // has been laid out. `available_height` here is the rest of the *viewport*, so
+                // asking for it drew a rule from the quote to the bottom of the page; at
+                // `rule`'s 1.41:1 that was invisible, and at `guide`'s 3.24:1 it is not. So the
+                // shape is reserved, the content is laid out, and the rect is filled in after.
+                let bar = ui.painter().add(egui::Shape::Noop);
+                let (slot, _) = ui.allocate_exact_size(egui::vec2(2.0, 0.0), egui::Sense::hover());
                 ui.add_space(super::theme::snap(ctx.opts.base_size_pt * 0.6));
-                ui.vertical(|ui| {
-                    blocks_ui(ui, blocks, ctx, None);
-                    if let Some(c) = cite {
-                        ui.label(RichText::new(format!("— {c}")).color(ctx.pal.dim).small());
-                    }
-                });
+                let quote = ui
+                    .vertical(|ui| {
+                        blocks_ui(ui, blocks, ctx, None);
+                        if let Some(c) = cite {
+                            ui.label(RichText::new(format!("— {c}")).color(ctx.pal.dim).small());
+                        }
+                    })
+                    .response
+                    .rect;
+                ui.painter().set(
+                    bar,
+                    egui::Shape::rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(slot.left(), quote.top()),
+                            egui::pos2(slot.left() + 2.0, quote.bottom()),
+                        ),
+                        0.0,
+                        ctx.pal.guide,
+                    ),
+                );
             });
         }
         ir::Block::Code { lang, text } => code_ui(ui, lang.as_deref(), text, ctx),
@@ -111,7 +128,7 @@ fn code_ui(ui: &mut Ui, lang: Option<&str>, text: &str, ctx: &mut RenderCtx<'_>)
     egui::Frame::new()
         .fill(pal.code_bg)
         .inner_margin(egui::Margin::same(8))
-        .corner_radius(3.0)
+        .corner_radius(0.0)
         .show(ui, |ui| {
             if let Some(l) = lang.filter(|l| !l.is_empty()) {
                 ui.label(RichText::new(l).color(pal.dim).small());
@@ -202,9 +219,9 @@ fn embed_ui(ui: &mut Ui, kind: ir::EmbedKind, url: &str, ctx: &mut RenderCtx<'_>
         |u| format!("{}{}", u.host_str().unwrap_or("?"), u.path()),
     );
     egui::Frame::new()
-        .stroke(egui::Stroke::new(1.0, pal.rule))
+        .stroke(egui::Stroke::new(1.0, pal.guide))
         .inner_margin(egui::Margin::same(8))
-        .corner_radius(3.0)
+        .corner_radius(0.0)
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(format!("[{kind:?}]")).color(pal.dim));

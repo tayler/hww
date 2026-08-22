@@ -111,7 +111,10 @@ pub fn runs_ui(ui: &mut Ui, runs: &[Run], set: &Setting, ctx: &mut RenderCtx<'_>
     });
 }
 
-/// Multiple of the font size at which a link's underline sits. Just past the descender.
+/// Multiple of the font size at which an underline sits. Just past the descender.
+///
+/// Both things this file underlines want it: a link, and a find match that is not the current
+/// one. See [`link_ui`] for what epaint does without it.
 const UNDERLINE_LINE_HEIGHT: f32 = 1.22;
 
 fn new_job() -> LayoutJob {
@@ -159,14 +162,28 @@ fn append(
     for (piece, hit) in ctx.split_by_matches(text, offset) {
         let mut fmt = base.clone();
         if let Some(is_current) = hit {
-            fmt.background = if is_current {
-                ctx.pal.find_current_bg
-            } else {
-                ctx.pal.find_bg
-            };
             if is_current {
+                fmt.background = ctx.pal.find_current_bg;
                 fmt.color = ctx.pal.bg;
                 ctx.job_has_current_match = true;
+            } else {
+                // An underline rather than a wash. The wash could not carry `dim` at AA on any
+                // theme (4.25 / 3.78 / 3.74), and lowering its alpha far enough to clear that
+                // leaves a tint too faint to read as a hit at all. An underline changes no ink,
+                // so every run keeps the contrast it already had on the page, and it survives
+                // greyscale, which a second background never did.
+                //
+                // The weight comes from the run's own size, not from `base_size_pt`: a code run
+                // is at 0.92x and a level-1 heading at 1.65x, and one fixed weight looks heavy
+                // on the first and thin on the second. `background` is deliberately left alone,
+                // so a match inside a code run keeps `code_bg` and takes the underline on top.
+                fmt.underline = Stroke::new((fmt.font_id.size * 0.09).max(1.0), ctx.pal.notice_fg);
+                // And the tighter line height that `link_ui` explains: epaint puts an underline
+                // at the bottom of the section's *logical* rect, so at a reading line height of
+                // 1.55 the rule lands most of a line below the match, next to the following
+                // row, where it marks the wrong words. `valign: TOP` in `format_for` is what
+                // keeps this from moving the text with it.
+                fmt.line_height = Some(fmt.font_id.size * UNDERLINE_LINE_HEIGHT);
             }
         }
         job.append(piece, 0.0, fmt);

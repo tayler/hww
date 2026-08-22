@@ -73,6 +73,24 @@ impl Severity {
     pub fn fills_the_viewport(self) -> bool {
         matches!(self, Severity::Quiet | Severity::Failure)
     }
+
+    /// The severity, as a word, drawn beside [`MARK`].
+    ///
+    /// Colour is the obvious way to say how loud a notice is and the one that fails quietest: a
+    /// hue can be missed, screenshotted into greyscale, or read by an eye that does not separate
+    /// rust from brown. The variants are already named, so the cheapest fix is to print the
+    /// name. It costs one token on every band, including the ones about pages that are basically
+    /// fine, and that is the trade; a page that is actually fine emits no band at all.
+    ///
+    /// Wording, so it lives here rather than in `ui/` for the same reason every other notice
+    /// string does: the fast CI job never compiles egui, and this is where a test can read it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Severity::Quiet => "quiet",
+            Severity::Caution => "caution",
+            Severity::Failure => "failure",
+        }
+    }
 }
 
 /// What a failure offers to do about itself.
@@ -410,8 +428,27 @@ mod tests {
             text.extend(notice.heading.map(str::to_owned));
             text.extend(notice.detail.clone());
             text.extend(notice.actions.iter().map(|b| b.label().to_owned()));
+            // The severity word is drawn on every band, so it is swept with the rest.
+            text.push(notice.severity.word().to_owned());
             for t in text {
                 assert!(!t.contains('→'), "unrenderable arrow in {t:?}");
+            }
+        }
+    }
+
+    /// Three severities, three words, and none of them a prefix of another.
+    ///
+    /// The word is there so loudness survives greyscale and a screenshot; two severities sharing
+    /// a word, or one reading as an abbreviation of the next, would put that back where it was.
+    #[test]
+    fn each_severity_says_something_different() {
+        let words = [Severity::Quiet, Severity::Caution, Severity::Failure].map(Severity::word);
+        for (i, a) in words.iter().enumerate() {
+            assert!(!a.is_empty());
+            assert_eq!(*a, a.to_lowercase(), "{a:?} is not set like the rest");
+            for b in &words[i + 1..] {
+                assert_ne!(a, b);
+                assert!(!a.starts_with(b) && !b.starts_with(a), "{a:?} and {b:?}");
             }
         }
     }
