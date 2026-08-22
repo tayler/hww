@@ -1019,9 +1019,10 @@ fn collect_image_srcs(doc: &ir::Document) -> Vec<String> {
                     rows.iter().flatten().for_each(|c| walk_inlines(c, out));
                 }
                 ir::Block::Thread(cs) => cs.iter().for_each(|c| walk_blocks(&c.blocks, out)),
-                // Entry thumbnails are not drawn (see `blocks::entries_ui`), so loading them
-                // would be a request for nothing.
+                // Entry thumbnails draw once loaded (`blocks::entries_ui`), so `I` loads them
+                // with the rest and the page-info panel counts them.
                 ir::Block::Entries(es) => es.iter().for_each(|e| {
+                    out.extend(e.image.as_ref().map(|i| i.src.clone()));
                     walk_inlines(&e.title, out);
                     walk_blocks(&e.summary, out);
                 }),

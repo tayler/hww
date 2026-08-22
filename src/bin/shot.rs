@@ -131,6 +131,38 @@ const THREAD_URL: &str = "https://example.org/thread/1181";
 
 /// Fixtures are markup, not IR: they go through the real extractor, so a scene cannot show a
 /// document shape `html::extract` would never produce.
+/// A front page: two card lists under section headings, a lead with a dek, thumbnails never
+/// loaded. Through the real extractor, so what is photographed is `cards::detect` finding the
+/// groups and the walker emitting `Block::Entries` in place.
+const FRONT_URL: &str = "https://example.com/";
+const FRONT: &str = r#"
+<html lang="en"><head><title>The Example Times - Front Page</title>
+<meta property="og:site_name" content="The Example Times"></head><body>
+<nav><a href="/">home</a> <a href="/world">world</a> <a href="/local">local</a></nav>
+<main>
+<h2>Top stories</h2>
+<div class="card"><a href="/s/1"><img src="/t1.jpg" alt="A harbour at dusk"></a>
+<h3><a href="/s/1">Council approves the harbour plan after a long night of amendments</a></h3>
+<p class="dek">The vote came at two in the morning, with the gallery still full and the dissenters
+still talking. What was agreed, and what was left for the autumn.</p><span class="time">2 hours ago</span></div>
+<div class="card"><a href="/s/2"><img src="/t2.jpg" alt="A rail yard"></a>
+<h3><a href="/s/2">Rail strike called off as both sides accept the mediator's figure</a></h3>
+<p class="dek">Services resume at dawn. The figure is not the one either side asked for.</p><span class="time">3 hours ago</span></div>
+<div class="card"><a href="/s/3"><img src="/t3.jpg" alt="A field"></a>
+<h3><a href="/s/3">Drought order extended to the whole of the valley for a second month</a></h3>
+<p class="dek">Farmers say the river has not been this low since the records began.</p><span class="time">5 hours ago</span></div>
+<h2>World</h2>
+<ul>
+<li class="item"><h4><a href="/w/1">Talks resume in the capital after a week of silence from both delegations</a></h4><span class="time">1 hour ago</span></li>
+<li class="item"><h4><a href="/w/2">Election count enters its third day with the margin still under a point</a></h4><span class="time">4 hours ago</span></li>
+<li class="item"><h4><a href="/w/3">A volcano that had slept for four centuries is venting again, and the town below is calm</a></h4><span class="time">6 hours ago</span></li>
+<li class="item"><h4><a href="/w/4">Central bank holds rates and says very little about the next meeting</a></h4><span class="time">9 hours ago</span></li>
+</ul>
+</main>
+<footer><a href="/about">about</a> <a href="/contact">contact</a></footer>
+</body></html>
+"#;
+
 const ARTICLE: &str = r#"
 <html lang="en"><head><title>Reading without the rest of it</title>
 <meta name="author" content="A. Reader"></head><body>
@@ -240,6 +272,11 @@ fn catalog(port: u16) -> Vec<Scene> {
             "article",
             "a page that arrived clean: no bands, no chrome",
             vec![page(ARTICLE_URL, ARTICLE)],
+        ),
+        scene(
+            "front",
+            "a front page: card lists as entries under their section headings",
+            vec![page(FRONT_URL, FRONT)],
         ),
         scene(
             "thread",

@@ -625,11 +625,17 @@ Real, and worth knowing before re-discovering them:
   switch satisfied at the cost of one block. Not written; the same shape would serve
   `scroll_to_block`.
 
-- **Entry thumbnails are carried and not drawn.** `ir::Entry.image` is filled from the card
-  and `blocks::entries_ui` draws the headline, the dek, and the time without it, because a
-  column of one placeholder per card was the worst thing about these pages. A small per-entry
-  placeholder, or a loaded thumbnail beside the headline, is the obvious next step and has no
-  scene yet.
+- **A lone story card is not an entry.** `cards::detect` wants three same-signature siblings,
+  and a lead card that carries one extra class (`card lead`) or a single card between two
+  lists breaks the group; it renders as the walker sees it, an image placeholder and a linked
+  heading. The `front` scene's fixture gives its lead card the plain class for that reason.
+  Measured on two fronts in the Phase 3 sample; the fix is a detector that accepts a lone card
+  whose shape matches a neighbouring accepted group, and it is not written.
+- **Entry thumbnails have no placeholder, by design.** `ir::Entry.image` is filled from the
+  card; `blocks::entries_ui` draws nothing for it until `I` has loaded the page's images, and
+  then a thumbnail a few lines high above the headline (`images::thumbnail`). A column of one
+  placeholder per card was the worst thing about these pages, and the headline is the card's
+  affordance. There is no per-entry click to load one image; that is the gap.
 - **Nested replies in `thread.rs` are still under-counted** (see Closed decisions). The reader
   reconstructs whatever tree extraction hands it; it cannot recover replies extraction lost.
 - **No justification, and no `justify` setting.** One `Label` per segment cannot justify. The

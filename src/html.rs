@@ -124,6 +124,8 @@ const BLOCK_LEVEL: &[&str] = &[
     "dl",
     "dd",
     "dt",
+    "details",
+    "summary",
 ];
 
 /// One content-root candidate, as `--why` reports it. Plain data: it outlives the parse.
@@ -1010,6 +1012,16 @@ fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, d
             }
             continue;
         };
+        // Media before the noise check: `iframe` is a noise tag (nothing inside one is
+        // readable), but the element itself is a placeholder the reader may act on.
+        if matches!(el.value().name(), "video" | "audio" | "iframe") {
+            if let Some(b) = embed_from(&el, walk) {
+                flush_pending(&mut pending, out, walk);
+                flush_entries(&mut entries, out);
+                out.push(b);
+            }
+            continue;
+        }
         if is_noise(&el, walk) {
             continue;
         }
@@ -1087,6 +1099,21 @@ fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, d
                 }
             }
             "hr" => made.push(Block::Rule),
+            // A definition list is a list whose items lead with their term. `<dt>` is short by
+            // nature and used to fall under the loose-text floor, which dropped every term.
+            "dl" => {
+                if let Some(b) = dl_from(&el, walk, depth) {
+                    made.push(b);
+                }
+            }
+            // `<details>` reads open: its summary is a bold line, whatever its length, and
+            // its body follows as ordinary blocks (the container arm below).
+            "summary" => {
+                let inl = trim_inlines(inlines_from(child, walk, depth + 1));
+                if !inl.is_empty() {
+                    made.push(Block::Paragraph(vec![Inline::Strong(inl)]));
+                }
+            }
             "img" => {
                 if let Some(img) = image_from(&el, walk.base) {
                     made.push(Block::Figure {
@@ -1163,6 +1190,78 @@ fn flush_entries(entries: &mut Vec<crate::ir::Entry>, out: &mut Vec<Block>) {
     if !entries.is_empty() {
         out.push(Block::Entries(std::mem::take(entries)));
     }
+}
+
+/// A definition list as a list whose items lead with their term. Out of `walk_blocks` so the
+/// recursive frame stays small: 256 frames of it have to fit a 2 MiB thread.
+fn dl_from(el: &ElementRef, walk: &Walk<'_>, depth: usize) -> Option<Block> {
+    let mut items: Vec<Vec<Block>> = Vec::new();
+    let mut terms: Vec<Inline> = Vec::new();
+    for c in el.children() {
+        let Some(ce) = ElementRef::wrap(c) else {
+            continue;
+        };
+        match ce.value().name() {
+            "dt" => {
+                let t = trim_inlines(inlines_from(c, walk, depth + 2));
+                if !t.is_empty() {
+                    if !terms.is_empty() {
+                        push_space(&mut terms);
+                    }
+                    terms.extend(t);
+                }
+            }
+            "dd" => {
+                let mut item: Vec<Block> = Vec::new();
+                if !terms.is_empty() {
+                    item.push(Block::Paragraph(vec![Inline::Strong(std::mem::take(
+                        &mut terms,
+                    ))]));
+                }
+                walk_blocks(c, walk, &mut item, depth + 2);
+                if !item.is_empty() {
+                    items.push(item);
+                }
+            }
+            _ => {}
+        }
+    }
+    if !terms.is_empty() {
+        items.push(vec![Block::Paragraph(vec![Inline::Strong(terms)])]);
+    }
+    (!items.is_empty()).then_some(Block::List {
+        ordered: false,
+        items,
+    })
+}
+
+/// A `<video>`, `<audio>`, or `<iframe>` as the placeholder the reader may act on. Never
+/// loaded here; the source is taken from `src` or the first `<source>`, and a media element
+/// with neither (a player that fills itself in by script) is nothing the reader can say.
+fn embed_from(el: &ElementRef, walk: &Walk<'_>) -> Option<Block> {
+    let kind = match el.value().name() {
+        "video" => crate::ir::EmbedKind::Video,
+        "audio" => crate::ir::EmbedKind::Audio,
+        _ => crate::ir::EmbedKind::Iframe,
+    };
+    let source = Selector::parse("source[src]").ok()?;
+    let raw = el
+        .value()
+        .attr("src")
+        .or_else(|| {
+            el.select(&source)
+                .next()
+                .and_then(|s| s.value().attr("src"))
+        })
+        .filter(|s| !s.trim().is_empty() && !s.starts_with("data:") && !s.starts_with("about:"))?;
+    let url = walk.base.join(raw).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    Some(Block::Embed {
+        kind,
+        url: url.to_string(),
+    })
 }
 
 /// One story card as an `Entry`: the headline is the card's heading if it has one and its
@@ -2937,5 +3036,78 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("audio player ready"), "{text}");
+    }
+
+    /// `<dt>` is short by nature and fell under the loose-text floor, which dropped every
+    /// term of every definition list.
+    #[test]
+    fn a_definition_list_keeps_its_short_terms() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(3);
+        let d = doc(&format!(
+            "<html><body><article><p>{body}</p><dl><dt>Term</dt><dd>The definition of the term, in a \
+             sentence.</dd><dt>Other</dt><dt>Alias</dt><dd>Two terms, one definition, in a sentence.</dd></dl>\
+             <p>{body}</p></article></body></html>"
+        ));
+        let text = crate::render::to_text(&d, &crate::render::TextOpts::default());
+        assert!(text.contains("*Term*"), "{text}");
+        assert!(text.contains("*Other Alias*"), "{text}");
+        assert!(text.contains("Two terms, one definition"), "{text}");
+    }
+
+    #[test]
+    fn details_and_summary_are_read_open() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(3);
+        let d = doc(&format!(
+            "<html><body><article><p>{body}</p><details><summary>Show the workings</summary>\
+             <p>The workings, in a paragraph long enough to be kept on its own merits.</p></details>\
+             <p>{body}</p></article></body></html>"
+        ));
+        let text = crate::render::to_text(&d, &crate::render::TextOpts::default());
+        assert!(text.contains("*Show the workings*"), "{text}");
+        assert!(text.contains("The workings, in a paragraph"), "{text}");
+    }
+
+    /// `Block::Embed` existed and nothing constructed it: video, audio, and iframes vanished.
+    #[test]
+    fn media_elements_become_embed_placeholders() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(3);
+        let d = doc(&format!(
+            "<html><body><article><p>{body}</p>\
+             <video controls><source src=\"/clip.mp4\" type=\"video/mp4\"></video>\
+             <audio src=\"/talk.mp3\"></audio>\
+             <iframe src=\"https://player.example.test/embed/1\"></iframe>\
+             <iframe src=\"about:blank\"></iframe>\
+             <p>{body}</p></article></body></html>"
+        ));
+        let kinds: Vec<_> = d
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Embed { kind, url } => Some((*kind, url.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (
+                    crate::ir::EmbedKind::Video,
+                    "https://example.test/clip.mp4".to_owned()
+                ),
+                (
+                    crate::ir::EmbedKind::Audio,
+                    "https://example.test/talk.mp3".to_owned()
+                ),
+                (
+                    crate::ir::EmbedKind::Iframe,
+                    "https://player.example.test/embed/1".to_owned()
+                ),
+            ],
+            "{:?}",
+            d.blocks
+        );
     }
 }

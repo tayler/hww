@@ -7,6 +7,11 @@ Dates are when the pages were fetched. "Clean"
 means the article read well with no host-specific work; generic fixes found on a host are in
 `triage/sheet.md` (gitignored) and the findings doc, not here.
 
+A row older than ninety days is due a re-check the next time its host comes up: the same
+three pages (front, section, article) through `hww --why` and the text render, the profile's
+fixture still matching the live markup, and the date moved. A host whose markup has changed
+under its profile shows as `strip matched nothing` in `--why`, which is the other trigger.
+
 | host | checked | looked at | outcome |
 |---|---|---|---|
 | abc.net.au | 2026-08-22 | front, section, article | "See more ABC coverage in your search results", left |

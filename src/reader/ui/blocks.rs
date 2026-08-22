@@ -134,11 +134,16 @@ pub fn block_ui(ui: &mut Ui, b: &ir::Block, ctx: &mut RenderCtx<'_>) {
 }
 
 /// A run of story cards: each a linked headline in the smallest heading face, its dek in
-/// body, its time in the dim small face. The thumbnail is carried in the IR and not drawn:
-/// a column of one placeholder per card was the worst thing about these pages.
+/// body, its time in the dim small face. The thumbnail is drawn small above the headline
+/// once it is loaded (`I` loads every image on the page, entries included) and is otherwise
+/// not there at all: a column of one placeholder per card was the worst thing about these
+/// pages, and the headline is the card's affordance.
 fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
     for e in entries {
         ui.add_space(super::theme::snap(ctx.opts.base_size_pt * 0.55));
+        if let Some(img) = &e.image {
+            super::images::thumbnail(ui, img, ctx);
+        }
         let title = match &e.href {
             Some(href) => vec![ir::Inline::Link {
                 href: href.clone(),

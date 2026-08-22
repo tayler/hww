@@ -348,6 +348,21 @@ fn show_ready(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     }
 }
 
+/// An entry's thumbnail: drawn at a few lines' height once loaded, and not at all before.
+/// No placeholder, no button; the headline beside it is the card's affordance and `I` is how
+/// the page's images arrive.
+pub fn thumbnail(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
+    if let Some(State::Ready(ready)) = ctx.images.state(&img.src) {
+        let h = ctx.opts.base_size_pt * 3.6;
+        let w = (h * ready.width as f32 / ready.height.max(1) as f32).min(ui.available_width());
+        ui.add(
+            egui::Image::new(&ready.texture)
+                .fit_to_exact_size(egui::vec2(w, h))
+                .corner_radius(0.0),
+        );
+    }
+}
+
 /// An image inside a paragraph. Always the compact strip: an icon-sized image mid-sentence
 /// that expanded to the column width would break the line it sits in.
 pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
