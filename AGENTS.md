@@ -23,6 +23,7 @@ thing that survives a run is `settings.json`.
 ## Commands
 
     cargo run -- [--no-rewrite] [--show-rewrites] <url>   # fetch, extract, render one page
+    cargo run -- --why <url>                              # the same fetch; print why instead
     cargo run --features gui --bin hww-gui -- <url>       # the reading GUI
     cargo run --release --features gui --bin hww-gui -- <url>   # what a long page needs
     cargo test                                            # synthetic fixtures; no network
@@ -46,6 +47,16 @@ Local-only tools. These need gitignored inputs and are **not** run by CI:
     cargo run --features tools --bin corpus -- --limit 150 --per-host 3 --out corpus.jsonl
     cargo run --bin dbg -- <signals.jsonl> <cache-dir> <url-substring> [--text]
     cargo run --bin bench -- <signals.jsonl> <baseline.json> <cache-dir>
+
+**Diagnosing a site starts with `--why`, not with the source.** `hww --why <url>` runs the
+same `session::load` pipeline and prints `html::Explanation` in place of the page: every
+content-root candidate with the emitted length the choice is made on and the winner marked, the
+thread detector's `Verdict` (the largest sibling groups, attribution counts, why each was
+rejected or chosen, and whether the thread replaced or joined the document), each metadata
+field's source, and whether the `<body>` fallback fired. It is produced by the one extraction
+pass (`html::extract_traced`), so it cannot disagree with the document; `bin/dbg` prints the same
+account over a cached corpus page. Pair it with `hww-shot --url <url> --out <dir>` to see how
+the result renders, and the pair is the whole of a triage: what came out, why, and how it looks.
 
 `hww-shot` needs no gitignored input, only a display. It opens the reader in a named state,
 photographs it, and prints one line per scene (`--list` for the catalog, `src/bin/shot.rs` for

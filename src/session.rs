@@ -255,6 +255,35 @@ impl Session {
         opts: &LoadOptions,
         notify: &mut dyn FnMut(&Rewrite),
     ) -> Result<Loaded, LoadError> {
+        let f = self.fetch_page(requested, opts, notify)?;
+        let doc = html::extract(&f.source, &f.resp.final_url);
+        let prov = f.provenance(requested, doc.text_len());
+        Ok(Loaded { doc, prov })
+    }
+
+    /// [`Self::load`], keeping the extractor's account of itself instead of the document.
+    /// Same fetch, same notice, same provenance: `--why` is the reader's own pipeline
+    /// explaining itself, not a second one.
+    pub fn explain(
+        &self,
+        requested: &Url,
+        opts: &LoadOptions,
+        notify: &mut dyn FnMut(&Rewrite),
+    ) -> Result<(html::Explanation, Provenance), LoadError> {
+        let f = self.fetch_page(requested, opts, notify)?;
+        let why = html::explain(&f.source, &f.resp.final_url);
+        let prov = f.provenance(requested, why.text_len);
+        Ok((why, prov))
+    }
+
+    /// Rewrite, notify, fetch, gate on content type, decode. Everything `load` and `explain`
+    /// share, which is everything but the last step.
+    fn fetch_page(
+        &self,
+        requested: &Url,
+        opts: &LoadOptions,
+        notify: &mut dyn FnMut(&Rewrite),
+    ) -> Result<Fetched, LoadError> {
         let url = if opts.rewrite {
             crate::rewrite::apply(requested)
         } else {
@@ -282,26 +311,45 @@ impl Session {
             });
         }
         let (source, enc) = fetch::decode(&resp.body, resp.content_type.as_deref());
-        let doc = html::extract(&source, &resp.final_url);
+        Ok(Fetched {
+            url,
+            rewritten,
+            resp,
+            source,
+            encoding: enc.name(),
+        })
+    }
+}
 
+/// A page after decode and before extraction.
+struct Fetched {
+    /// What was requested, after the rewrite table had its say.
+    url: Url,
+    rewritten: bool,
+    resp: fetch::Response,
+    source: String,
+    encoding: &'static str,
+}
+
+impl Fetched {
+    fn provenance(self, requested: &Url, chars: usize) -> Provenance {
         // The bounce is usually to a sibling of the requested host rather than to that host
         // itself, so comparing against the *request* would miss the common case.
-        let rule_appears_dead = rewritten && resp.final_url.host_str() != url.host_str();
-
-        let prov = Provenance {
+        let rule_appears_dead =
+            self.rewritten && self.resp.final_url.host_str() != self.url.host_str();
+        Provenance {
             requested: requested.clone(),
-            rewritten_to: rewritten.then_some(url),
+            rewritten_to: self.rewritten.then_some(self.url),
             rule_appears_dead,
-            status: resp.status,
-            encoding: enc.name(),
-            final_url: resp.final_url,
-            bytes: resp.body.len(),
-            chars: doc.text_len(),
-            hops: resp.hops,
-            cookie_attempts: resp.cookie_attempts,
-            truncation: resp.truncation,
-        };
-        Ok(Loaded { doc, prov })
+            status: self.resp.status,
+            encoding: self.encoding,
+            final_url: self.resp.final_url,
+            bytes: self.resp.body.len(),
+            chars,
+            hops: self.resp.hops,
+            cookie_attempts: self.resp.cookie_attempts,
+            truncation: self.resp.truncation,
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-//! Debug one cached page: what did content selection pick, and what came out?
+//! Debug one cached page: the extractor's own account of it (`html::explain`), and the text.
 //! usage: dbg <signals.jsonl> <cache-dir> <url-substring> [--text]
 use anyhow::{Result, bail};
 use hww::{html, render};
@@ -53,16 +53,13 @@ fn main() -> Result<()> {
         let enc =
             encoding_rs::Encoding::for_label(sig.enc.as_bytes()).unwrap_or(encoding_rs::UTF_8);
         let (text, _, _) = enc.decode(&bytes);
-        let doc = html::extract(&text, &url::Url::parse(&r.url)?);
+        let url = url::Url::parse(&r.url)?;
+        let doc = html::extract(&text, &url);
         println!(
-            "== {}\n   visible={} blocks={} text_len={} title={:?}\n   ROOT: {}",
-            r.url,
-            sig.chars,
-            doc.blocks.len(),
-            doc.text_len(),
-            doc.title,
-            html::debug_root(&text)
+            "== {}\n   visible={} (from the corpus signal)",
+            r.url, sig.chars
         );
+        print!("{}", html::explain(&text, &url));
         if a.len() > 4 {
             let t = render::to_text(&doc, &render::TextOpts::default());
             println!("{}", head(&t, 1400));

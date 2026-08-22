@@ -104,45 +104,169 @@ const BLOCK_LEVEL: &[&str] = &[
     "dt",
 ];
 
-/// Debug aid: which element did content selection choose, and how big is it?
-pub fn debug_root(source: &str) -> String {
-    let html = Html::parse_document(source);
-    match content_root(&html) {
-        None => "NONE".to_string(),
-        Some(el) => format!(
-            "<{} id={:?} class={:?}> text={} link_density={:.2} children={}",
-            el.value().name(),
-            el.value().id().unwrap_or("-"),
-            el.value().attr("class").unwrap_or("-"),
-            text_len(*el),
-            link_density(&el),
-            el.children().count()
-        ),
+/// One content-root candidate, as `--why` reports it. Plain data: it outlives the parse.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidate {
+    /// `"article"`, `"main"`, `"[role=main]"`, or `"scored"` for the density winner.
+    pub origin: &'static str,
+    pub tag: String,
+    pub id: Option<String>,
+    pub class: Option<String>,
+    /// Visible text under the element, before the walker drops anything.
+    pub raw_text: usize,
+    pub link_density: f64,
+    /// `raw_text * (1 - link_density)`: the first-pass ranking.
+    pub score: f64,
+    /// Text of the blocks the walker actually emits from it: the ranking that decides.
+    pub emitted: usize,
+}
+
+/// What the extractor did to one page and why. Built by the same pass that builds the
+/// `Document`, so it cannot describe a decision the extractor did not take.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Explanation {
+    pub url: String,
+    /// Ranked by `score`, floor applied, at most five: what `content_root` chose among.
+    pub candidates: Vec<Candidate>,
+    /// Index into `candidates` of the one whose blocks became the document.
+    pub winner: Option<usize>,
+    pub thread: crate::thread::Verdict,
+    /// What the thread merge did: `"replaced the document"`, `"appended"`,
+    /// `"dropped (thinner than the floor)"`, or `"no thread"`.
+    pub thread_merge: &'static str,
+    /// `(field, source, value)`: where each metadata field came from, or `"none"`.
+    pub meta: Vec<(&'static str, &'static str, Option<String>)>,
+    /// The `<body>` fallback ran and its blocks replaced the result.
+    pub body_fallback: bool,
+    pub blocks: usize,
+    pub text_len: usize,
+}
+
+/// Extract, and say why. The CLI's `--why` and `bin/dbg` print this.
+pub fn explain(source: &str, url: &Url) -> Explanation {
+    extract_traced(source, url).1
+}
+
+impl std::fmt::Display for Explanation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "why: {}", self.url)?;
+        writeln!(f, "root candidates (ranked by emitted text; * chose):")?;
+        if self.candidates.is_empty() {
+            writeln!(f, "    none cleared the floor")?;
+        }
+        for (i, c) in self.candidates.iter().enumerate() {
+            let mark = if self.winner == Some(i) { '*' } else { ' ' };
+            let id = c.id.as_deref().map(|s| format!("#{s}")).unwrap_or_default();
+            let class = c
+                .class
+                .as_deref()
+                .map(|s| format!(".{}", s.split_whitespace().collect::<Vec<_>>().join(".")))
+                .unwrap_or_default();
+            writeln!(
+                f,
+                "  {mark} {:<11} <{}{id}{class}> raw={} links={:.2} score={:.0} emitted={}",
+                c.origin, c.tag, c.raw_text, c.link_density, c.score, c.emitted
+            )?;
+        }
+        writeln!(f, "thread: {}", self.thread_merge)?;
+        for (i, g) in self.thread.groups.iter().enumerate() {
+            let mark = if self.thread.chosen == Some(i) {
+                '*'
+            } else {
+                ' '
+            };
+            writeln!(f, "  {mark} {g}")?;
+        }
+        writeln!(f, "meta:")?;
+        for (field, source, value) in &self.meta {
+            match value {
+                Some(v) => writeln!(f, "    {field:<9} <- {source}: {v:?}")?,
+                None => writeln!(f, "    {field:<9} <- {source}")?,
+            }
+        }
+        writeln!(
+            f,
+            "body fallback: {}",
+            if self.body_fallback {
+                "fired"
+            } else {
+                "not needed"
+            }
+        )?;
+        writeln!(f, "result: {} blocks, {} chars", self.blocks, self.text_len)
     }
 }
 
 pub fn extract(source: &str, url: &Url) -> Document {
+    extract_traced(source, url).0
+}
+
+/// The one extraction pass. [`extract`] keeps the document and [`explain`] keeps the account;
+/// neither re-enacts the other's decisions.
+fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
     let html = Html::parse_document(source);
+    let (title, title_src) = first_of([
+        ("og:title", meta_prop(&html, "og:title")),
+        ("<title>", title_element(&html)),
+    ]);
+    let (byline, byline_src) = first_of([
+        ("meta[name=author]", meta_attr(&html, "author")),
+        (
+            "meta[property=article:author]",
+            meta_prop(&html, "article:author"),
+        ),
+    ]);
+    let (published, published_src) = first_of([
+        (
+            "meta[property=article:published_time]",
+            meta_prop(&html, "article:published_time"),
+        ),
+        ("meta[name=date]", meta_attr(&html, "date")),
+    ]);
     let mut doc = Document {
         url: url.to_string(),
-        title: meta_title(&html),
-        byline: meta_attr(&html, "author").or_else(|| meta_prop(&html, "article:author")),
-        published: meta_prop(&html, "article:published_time").or_else(|| meta_attr(&html, "date")),
+        title,
+        byline,
+        published,
         site_name: meta_prop(&html, "og:site_name"),
         lang: html.root_element().value().attr("lang").map(str::to_owned),
         blocks: Vec::new(),
     };
-    if let Some(root) = content_root(&html) {
-        doc.blocks = blocks_from(root, url);
+    let mut why = Explanation {
+        url: url.to_string(),
+        candidates: Vec::new(),
+        winner: None,
+        thread: Default::default(),
+        thread_merge: "no thread",
+        meta: vec![
+            ("title", title_src, doc.title.clone()),
+            ("byline", byline_src, doc.byline.clone()),
+            ("published", published_src, doc.published.clone()),
+        ],
+        body_fallback: false,
+        blocks: 0,
+        text_len: 0,
+    };
+    let ranked = root_candidates(&html);
+    why.winner = choose_root(&ranked);
+    why.candidates = ranked.iter().map(|(_, c)| c.clone()).collect();
+    if let Some(i) = why.winner {
+        doc.blocks = blocks_from(ranked[i].0, url);
     }
     // A discussion is not a subtree, so it gets its own algorithm. When the thread dominates
     // the page it *is* the document; when it merely accompanies an article, it is appended.
-    if let Some(comments) = crate::thread::extract_thread(&html, url) {
+    let (thread, verdict) = crate::thread::extract_thread_traced(&html, url);
+    why.thread = verdict;
+    if let Some(comments) = thread {
         let tlen = crate::thread::comments_text_len(&comments);
         if tlen > doc.text_len() {
             doc.blocks = vec![Block::Thread(comments)];
+            why.thread_merge = "replaced the document";
         } else if tlen > crate::ir::THIN_TEXT {
             doc.blocks.push(Block::Thread(comments));
+            why.thread_merge = "appended";
+        } else {
+            why.thread_merge = "dropped (thinner than the floor)";
         }
     }
 
@@ -156,9 +280,24 @@ pub fn extract(source: &str, url: &Url) -> Document {
         let fallback = blocks_from(body, url);
         if block_text(&fallback) > doc.text_len() {
             doc.blocks = fallback;
+            why.body_fallback = true;
         }
     }
-    doc
+    why.blocks = doc.blocks.len();
+    why.text_len = doc.text_len();
+    (doc, why)
+}
+
+/// The first source that produced a value, and its name; `"none"` when nothing did.
+fn first_of<const N: usize>(
+    sources: [(&'static str, Option<String>); N],
+) -> (Option<String>, &'static str) {
+    for (name, value) in sources {
+        if value.is_some() {
+            return (value, name);
+        }
+    }
+    (None, "none")
 }
 
 /// One of the three shared text-length counters (see `AGENTS.md`). This used to build a
@@ -206,33 +345,63 @@ fn own_text_into(node: NodeRef<'_, Node>, out: &mut String, root: bool) {
 /// `<section>`, and in one measured case that section additionally contained a complete nested
 /// `<!DOCTYPE html><html><body>`, which html5ever recovers from per spec. Whichever candidate
 /// carries more non-link text wins.
-fn content_root(html: &Html) -> Option<ElementRef<'_>> {
-    let mut candidates: Vec<ElementRef<'_>> = Vec::new();
+///
+/// The content-root candidates, ranked by first-pass score with the floor applied, each
+/// carrying the emitted length that [`choose_root`] decides on.
+fn root_candidates(html: &Html) -> Vec<(ElementRef<'_>, Candidate)> {
+    let mut candidates: Vec<(ElementRef<'_>, &'static str)> = Vec::new();
     for sel in ["article", "main", "[role=main]"] {
         let Ok(selector) = Selector::parse(sel) else {
             continue;
         };
-        candidates.extend(html.select(&selector));
+        candidates.extend(html.select(&selector).map(|el| (el, sel)));
     }
-    candidates.extend(score_best(html));
-    let mut ranked: Vec<(ElementRef<'_>, f64)> = candidates
+    candidates.extend(score_best(html).map(|el| (el, "scored")));
+    let mut ranked: Vec<(ElementRef<'_>, Candidate)> = candidates
         .into_iter()
-        .map(|el| (el, text_len(*el) as f64 * (1.0 - link_density(&el))))
-        .filter(|(_, s)| *s > 200.0)
+        .map(|(el, origin)| {
+            let raw_text = text_len(*el);
+            let link_density = link_density(&el);
+            let v = el.value();
+            let c = Candidate {
+                origin,
+                tag: v.name().to_owned(),
+                id: v.id().map(str::to_owned),
+                class: v.attr("class").map(str::to_owned),
+                raw_text,
+                link_density,
+                score: raw_text as f64 * (1.0 - link_density),
+                emitted: 0,
+            };
+            (el, c)
+        })
+        .filter(|(_, c)| c.score > 200.0)
         .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| {
+        b.1.score
+            .partial_cmp(&a.1.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     ranked.dedup_by_key(|(el, _)| el.id());
     ranked.truncate(5);
     // Rank by what the block walker actually *emits*, not by raw text. A container can be
     // dense with text yet yield almost nothing once chrome and empty wrappers are dropped,
     // which is how a newsletter post lost 90% of its body to a higher-scoring ancestor.
+    let base = Url::parse("https://x.invalid/").unwrap();
+    for (el, c) in &mut ranked {
+        c.emitted = block_text(&blocks_from(*el, &base));
+    }
     ranked
-        .into_iter()
-        .max_by_key(|(el, _)| {
-            let base = Url::parse("https://x.invalid/").unwrap();
-            block_text(&blocks_from(*el, &base))
-        })
-        .map(|(el, _)| el)
+}
+
+/// Index of the candidate with the most emitted text. Ties go to the later one, which is what
+/// `max_by_key` did when this was inline.
+fn choose_root(ranked: &[(ElementRef<'_>, Candidate)]) -> Option<usize> {
+    ranked
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, (_, c))| c.emitted)
+        .map(|(i, _)| i)
 }
 
 /// Readability-style: score leaf text blocks, propagate to ancestors, and discount link density.
@@ -839,14 +1008,13 @@ fn nearest_ancestor(node: NodeRef<'_, Node>, names: &[&str]) -> Option<ego_tree:
 
 // ---------- metadata ----------
 
-fn meta_title(html: &Html) -> Option<String> {
-    meta_prop(html, "og:title").or_else(|| {
-        let sel = Selector::parse("title").ok()?;
-        html.select(&sel)
-            .next()
-            .map(|e| inner_text(*e))
-            .filter(|s| !s.is_empty())
-    })
+/// The `<title>` element's text, which is the fallback behind `og:title`.
+fn title_element(html: &Html) -> Option<String> {
+    let sel = Selector::parse("title").ok()?;
+    html.select(&sel)
+        .next()
+        .map(|e| inner_text(*e))
+        .filter(|s| !s.is_empty())
 }
 
 fn meta_prop(html: &Html, prop: &str) -> Option<String> {
@@ -1336,5 +1504,114 @@ mod tests {
         assert_eq!(headers.len(), 2);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].len(), 2);
+    }
+
+    /// `explain` is built by the pass that builds the document, so the two cannot disagree;
+    /// this pins that the winner it names is the one whose blocks the document carries.
+    #[test]
+    fn explain_lists_every_candidate_and_names_the_winner() {
+        let body = "Body prose long enough to clear the two-hundred-character floor on its own, \
+                    repeated so the article is the obvious root of this page and nothing else. "
+            .repeat(4);
+        let aside = "An author card with a couple of lines of biography, not the article.";
+        let src = format!(
+            "<html><body><main><article><p>{body}</p><p>{body}</p></article>\
+             <div class=\"bio\"><p>{aside}</p></div></main></body></html>"
+        );
+        let url = Url::parse("https://example.test/a").unwrap();
+        let why = explain(&src, &url);
+        let d = extract(&src, &url);
+        assert!(
+            why.candidates.len() >= 2,
+            "expected main and article at least: {:?}",
+            why.candidates
+        );
+        let w = why.winner.expect("a winner");
+        assert_eq!(why.candidates[w].emitted, d.text_len());
+        assert_eq!(why.text_len, d.text_len());
+        assert_eq!(why.blocks, d.blocks.len());
+        assert_eq!(why.meta[0], ("title", "none", None));
+        assert_eq!(why.thread_merge, "no thread");
+        // The printed form names the winner and every candidate's origin.
+        let text = why.to_string();
+        assert!(text.contains("* "), "no winner marked:\n{text}");
+        assert!(text.contains("main") && text.contains("article"), "{text}");
+    }
+
+    /// The `repeated_paragraphs_are_not_a_thread` fixture, seen from the other side: the
+    /// verdict says what the group was and why it was turned down.
+    #[test]
+    fn explain_reports_why_a_thread_group_was_rejected() {
+        let ps = (0..6)
+            .map(|i| {
+                format!(
+                    "<p class=\"wp-block-paragraph\">Paragraph {i} of an ordinary article, with \
+             plenty of text so it clears every length filter in the detector.</p>"
+                )
+            })
+            .collect::<String>();
+        let why = explain(
+            &format!("<html><body><article>{ps}</article></body></html>"),
+            &Url::parse("https://example.test/a").unwrap(),
+        );
+        assert_eq!(why.thread.chosen, None);
+        let g = why
+            .thread
+            .groups
+            .iter()
+            .find(|g| g.signature == "p.wp-block-paragraph")
+            .unwrap_or_else(|| panic!("group not reported: {:?}", why.thread));
+        assert_eq!(g.count, 6);
+        assert_eq!(g.attributed, 0);
+        assert_eq!(g.rejected, Some("attribution under a majority"));
+    }
+
+    /// The `div_soup` fixture: scoring finds nothing, the `<body>` fallback fires, and the
+    /// explanation says so rather than claiming a root it did not have.
+    #[test]
+    fn explain_and_extract_agree_on_the_body_fallback() {
+        let items = (0..8)
+            .map(|i| {
+                format!(
+                    "<div class=\"item-cell\"><div class=\"item-title\">Item {i} in a listing grid \
+             with a description long enough to be worth reading and scoring.</div></div>"
+                )
+            })
+            .collect::<String>();
+        let src = format!("<html><body><div class=\"grid\">{items}</div></body></html>");
+        let url = Url::parse("https://example.test/a").unwrap();
+        let why = explain(&src, &url);
+        let d = extract(&src, &url);
+        assert_eq!(why.text_len, d.text_len());
+        // Either a candidate cleared the floor and won, or the fallback fired. What is pinned
+        // is that the account matches the outcome, whichever way the scorer went.
+        if why.winner.is_none() {
+            assert!(why.body_fallback, "no root and no fallback: {why}");
+        }
+        assert!(why.to_string().contains("body fallback:"));
+    }
+
+    /// The thread path through `explain`: the table-layout fixture's group is the chosen one,
+    /// and the merge is reported as the replacement it was.
+    #[test]
+    fn explain_names_the_chosen_thread_group_and_the_merge() {
+        let mut rows = String::new();
+        for i in 0..4 {
+            rows.push_str(&format!(
+                "<tr class=\"athing comtr\" id=\"c{i}\"><td><table><tr>\
+                 <td class=\"ind\" indent=\"0\"></td>\
+                 <td><span class=\"hnuser\">user{i}</span> <span class=\"age\">1 hour ago</span>\
+                 <div class=\"commtext\">A comment with enough words in it to clear the median \
+                 text floor and be counted as a post in its own right.</div></td></tr></table></td></tr>"
+            ));
+        }
+        let src = format!("<html><body><table class=\"comment-tree\">{rows}</table></body></html>");
+        let why = explain(&src, &Url::parse("https://example.test/t").unwrap());
+        let c = why.thread.chosen.expect("a chosen group");
+        assert_eq!(why.thread.groups[c].count, 4);
+        assert_eq!(why.thread.groups[c].rejected, None);
+        assert_eq!(why.thread_merge, "replaced the document");
+        let text = why.to_string();
+        assert!(text.contains("* tr.athing.comtr x4"), "{text}");
     }
 }

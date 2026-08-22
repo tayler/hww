@@ -39,7 +39,16 @@ const BODY_HINT: &[&str] = &[
 ];
 
 pub fn extract_thread(html: &Html, base: &Url) -> Option<Vec<Comment>> {
-    let group = best_group(html)?;
+    extract_thread_traced(html, base).0
+}
+
+/// [`extract_thread`], plus the account of every group it weighed. One function under both
+/// entry points, so `--why` reports the decision that was made rather than a re-enactment.
+pub fn extract_thread_traced(html: &Html, base: &Url) -> (Option<Vec<Comment>>, Verdict) {
+    let (group, mut verdict) = best_group(html);
+    let Some(group) = group else {
+        return (None, verdict);
+    };
     let mut comments: Vec<Comment> = Vec::new();
     for el in &group {
         let body = body_of(el, base);
@@ -54,7 +63,57 @@ pub fn extract_thread(html: &Html, base: &Url) -> Option<Vec<Comment>> {
             blocks: body,
         });
     }
-    (comments.len() >= MIN_SIBLINGS).then_some(comments)
+    if comments.len() < MIN_SIBLINGS {
+        if let Some(i) = verdict.chosen.take()
+            && let Some(g) = verdict.groups.get_mut(i)
+        {
+            g.rejected = Some("fewer than 3 posts had a body");
+        }
+        return (None, verdict);
+    }
+    (Some(comments), verdict)
+}
+
+/// One sibling group the detector weighed, as `--why` reports it. No element references:
+/// this outlives the parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupReport {
+    /// `tag.class.class`, as [`signature`] builds it.
+    pub signature: String,
+    pub count: usize,
+    /// How many members carried an author or a timestamp hint.
+    pub attributed: usize,
+    pub median_text: usize,
+    pub total_text: usize,
+    /// Why the group was not a thread, or `None` for one that passed every test.
+    pub rejected: Option<&'static str>,
+}
+
+/// What the thread detector saw: the largest groups by text, and which one it chose.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Verdict {
+    /// Largest first. Capped at [`Verdict::KEEP`], so a long page does not report hundreds.
+    pub groups: Vec<GroupReport>,
+    /// Index into `groups` of the one that became the thread, if any.
+    pub chosen: Option<usize>,
+}
+
+impl Verdict {
+    pub const KEEP: usize = 6;
+}
+
+impl std::fmt::Display for GroupReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} x{} attributed={} median={} total={}",
+            self.signature, self.count, self.attributed, self.median_text, self.total_text
+        )?;
+        if let Some(why) = self.rejected {
+            write!(f, " ({why})")?;
+        }
+        Ok(())
+    }
 }
 
 /// Normalise a class list into a stable signature, dropping per-item noise
@@ -72,8 +131,9 @@ fn signature(el: &ElementRef) -> String {
     format!("{}.{}", el.value().name(), classes.join("."))
 }
 
-/// The largest set of same-signature siblings that looks like posts rather than chrome.
-fn best_group<'a>(html: &'a Html) -> Option<Vec<ElementRef<'a>>> {
+/// The largest set of same-signature siblings that looks like posts rather than chrome, and
+/// the account of every group that was weighed.
+fn best_group<'a>(html: &'a Html) -> (Option<Vec<ElementRef<'a>>>, Verdict) {
     let mut groups: HashMap<(ego_tree::NodeId, String), Vec<ElementRef<'a>>> = HashMap::new();
     for node in html.tree.root().descendants() {
         let Some(el) = ElementRef::wrap(node) else {
@@ -90,16 +150,13 @@ fn best_group<'a>(html: &'a Html) -> Option<Vec<ElementRef<'a>>> {
         groups.entry((parent.id(), sig)).or_default().push(el);
     }
 
-    groups
+    let mut weighed: Vec<(Vec<ElementRef<'a>>, GroupReport)> = groups
         .into_values()
         .filter(|g| g.len() >= MIN_SIBLINGS)
-        .filter_map(|g| {
+        .map(|g| {
             let mut lens: Vec<usize> = g.iter().map(|e| text_len(**e)).collect();
             lens.sort_unstable();
             let median = lens[lens.len() / 2];
-            if median < MIN_MEDIAN_TEXT {
-                return None;
-            }
             // Decisive test: posts carry an author or a timestamp; article paragraphs do not.
             // Without this, a run of sibling <p> tags in a blog post is mistaken for a thread
             // and the article is rendered as a list of comments by "anon".
@@ -109,14 +166,50 @@ fn best_group<'a>(html: &'a Html) -> Option<Vec<ElementRef<'a>>> {
                     find_hint(e, AUTHOR_HINT).is_some() || find_hint(e, TIME_HINT).is_some()
                 })
                 .count();
-            if attributed * 2 < g.len() {
-                return None;
-            }
-            let total: usize = lens.iter().sum();
-            Some((g, total))
+            let rejected = if median < MIN_MEDIAN_TEXT {
+                Some("median text too short")
+            } else if attributed * 2 < g.len() {
+                Some("attribution under a majority")
+            } else {
+                None
+            };
+            let report = GroupReport {
+                signature: signature(&g[0]),
+                count: g.len(),
+                attributed,
+                median_text: median,
+                total_text: lens.iter().sum(),
+                rejected,
+            };
+            (g, report)
         })
-        .max_by_key(|(_, total)| *total)
-        .map(|(g, _)| g)
+        .collect();
+    // Largest first, so the winner is the first unrejected entry and the report reads in the
+    // order the detector ranked it. Ties keep HashMap order, which is why the tests never
+    // build two groups of the same size.
+    weighed.sort_by_key(|w| std::cmp::Reverse(w.1.total_text));
+    let chosen = weighed.iter().position(|(_, r)| r.rejected.is_none());
+    let group = chosen.map(|i| std::mem::take(&mut weighed[i].0));
+    let mut reports: Vec<GroupReport> = weighed.into_iter().map(|(_, r)| r).collect();
+    // The chosen group stays in view even when it is not among the largest.
+    let chosen = chosen.map(|i| {
+        if i >= Verdict::KEEP {
+            let r = reports.remove(i);
+            reports.truncate(Verdict::KEEP - 1);
+            reports.push(r);
+            Verdict::KEEP - 1
+        } else {
+            i
+        }
+    });
+    reports.truncate(Verdict::KEEP);
+    (
+        group,
+        Verdict {
+            groups: reports,
+            chosen,
+        },
+    )
 }
 
 /// Reply nesting. HN encodes depth in an `indent` attribute on a spacer cell; nested markup

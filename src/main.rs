@@ -1,6 +1,6 @@
 use anyhow::Result;
 use hww::{
-    render, rewrite,
+    render, rewrite, session,
     session::{LoadOptions, Session},
 };
 
@@ -8,6 +8,7 @@ fn main() -> Result<()> {
     let mut target = None;
     let mut opts = LoadOptions::default();
     let mut text = render::TextOpts::default();
+    let mut why = false;
     let mut end_of_flags = false;
     for a in std::env::args().skip(1) {
         match a.as_str() {
@@ -19,6 +20,10 @@ fn main() -> Result<()> {
             // it, and a text renderer that never prints an href leaves the CLI unable to
             // show, or check, what the extractor recovered.
             "--links" if !end_of_flags => text.show_links = true,
+            // The extractor's account of itself in place of the page: which root candidates
+            // it weighed and chose, what the thread detector saw, where each metadata
+            // field came from. What a page is triaged with.
+            "--why" if !end_of_flags => why = true,
             "--show-rewrites" if !end_of_flags => {
                 print!("{}", rewrite::describe());
                 return Ok(());
@@ -38,13 +43,21 @@ fn main() -> Result<()> {
         }
     }
     let Some(arg) = target else {
-        eprintln!("usage: hww [--links] [--no-rewrite] [--show-rewrites] <url>");
+        eprintln!("usage: hww [--links] [--why] [--no-rewrite] [--show-rewrites] <url>");
         std::process::exit(2);
     };
 
     let requested = url::Url::parse(&arg)?;
-    // The notice travels before the request does (see `session::Notice`).
-    let loaded = Session::new()?.load(&requested, &opts, &mut |n| eprintln!("{n}"))?;
+    let session = Session::new()?;
+    // The notice travels before the request does (see `session::Rewrite`).
+    let mut notify = |n: &session::Rewrite| eprintln!("{n}");
+    if why {
+        let (why, prov) = session.explain(&requested, &opts, &mut notify)?;
+        eprintln!("{prov}");
+        print!("{why}");
+        return Ok(());
+    }
+    let loaded = session.load(&requested, &opts, &mut notify)?;
 
     eprintln!("{}", loaded.prov);
     print!("{}", render::to_text(&loaded.doc, &text));

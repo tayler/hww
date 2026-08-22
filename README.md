@@ -17,7 +17,7 @@ A quiet reading experience.
 Working end to end for HTML, as a CLI that prints text and as a keyboard-driven reading GUI:
 
 ```
-cargo run -- [--no-rewrite] [--show-rewrites] <url>            # text to stdout
+cargo run -- [--why] [--no-rewrite] [--show-rewrites] <url>    # text to stdout
 cargo run --features gui --bin hww-gui -- [--no-rewrite] <url> # the reader
 ```
 
@@ -46,6 +46,27 @@ cargo run --features gui --bin hww-gui                          # the reader, UR
 cargo run --features gui --bin hww-gui -- example.com/article   # straight to a page
 cargo run -- https://example.com/article                        # the same page as text
 ```
+
+### Diagnosing a site
+
+Two tools say why a page came out the way it did, one for extraction and one for rendering:
+
+```
+cargo run -- --why https://example.com/article                  # the extractor's account
+cargo run --features gui --bin hww-shot -- --url https://example.com/article --out /tmp/look
+```
+
+`--why` fetches the page through the same pipeline as a normal load and prints, instead of the
+article, what `html::extract` did with it: every content-root candidate it weighed (origin,
+tag, id, class, raw text, link density, and the emitted text the choice is actually made on)
+with the winner marked; what the thread detector saw (the largest sibling groups, how many
+members carried an author or timestamp, and why each was rejected or chosen, and whether the
+thread replaced or joined the document); where each metadata field came from; whether the
+`<body>` fallback fired. It is built by the same pass that builds the document, so it cannot
+describe a decision the extractor did not take. The second command photographs the reader on
+the page, so the rendering can be judged rather than guessed at; `--keys "space space"` scrolls
+first, `--theme dark` checks the other palette, and `--out` keeps an ad-hoc look out of the
+regression baseline.
 
 The reader's URL argument is optional; without one it opens empty with the URL bar focused,
 `g` reopens that bar later, and `?` lists every key. It also accepts a bare host and fills in
@@ -106,7 +127,7 @@ one function that owns the pipeline and reports the rewrite before it dispatches
     src/bin/hww-gui thin main: argv -> reader::ui::run
     src/bin/corpus build a test corpus from local browser history. Checks how many of the sites you browse will work on hww.
     src/bin/bench  calibration harness vs a reference extractor (needs a local cache)
-    src/bin/dbg    inspect extraction of one cached page
+    src/bin/dbg    the `--why` account over one cached corpus page
 
 ## The reader
 
