@@ -1,11 +1,18 @@
 //! `notice::Notice` -> a band across the page. **The one place the reader draws its own text.**
 //!
+//! It is not the only thing here any more. [`progress_rule`] is the other half of the same job:
+//! what the reader has to say about a fetch that has not answered yet, said in the chrome because
+//! the reading column is busy holding the page the reader is still on. Both live in this module so
+//! the property below survives: the reader's own marks have one home, and a new one is added
+//! here.
+//!
 //! # Why a function and not a convention
 //!
 //! Before this, a notice was a colour applied by hand at fifteen call sites, and a convention
 //! drifts: `accent` had picked up five unrelated jobs, one of which was the find-match
 //! background, which is not a notice at all. A function is one place. Adding something new for
-//! the reader to report means calling [`band`], and there is nowhere else to put it.
+//! the reader to report means calling [`band`] or [`progress_rule`], and there is nowhere else to
+//! put it.
 //!
 //! # What makes a band unmistakable
 //!
@@ -76,6 +83,61 @@ impl Column {
             // warning across the page in debug builds when one misses the pixel grid.
             gutter: theme::snap(((full - measure) * 0.5).max(0.0)),
         }
+    }
+}
+
+/// The fetch-in-flight indicator: a hairline across the top edge of the status strip.
+///
+/// # Why the chrome and not a band
+///
+/// Because there is a page under it. A navigation keeps the outgoing article on screen until the
+/// new one commits, so the one thing [`band`] exists to do, own the column unmistakably at full
+/// bleed, is the one thing that must not happen here. `notice::loading` returns `None` while a
+/// page is up for exactly this reason, and this is what stands in.
+///
+/// # Why a bar as well as the seconds the strip already counts
+///
+/// Two jobs. The strip's `{:.1}s` is the precise number, and precise on purpose: a bot-block hang
+/// and a slow CDN are indistinguishable for ten seconds, and only a moving number separates them.
+/// But the strip sets `TextWrapMode::Truncate`, so on a narrow window that text is the first thing
+/// cut, the same failure that moved the page-info ribbon into a panel, and a number has to be
+/// *read*. A rule spans the strip at any width and is legible at a glance.
+///
+/// # `guide`, and two pixels
+///
+/// `guide` is the palette's role for a mark that identifies structure rather than decorating it,
+/// and the one held to 3:1 against `chrome_bg` by `guide_is_visible_where_it_is_drawn`, which is
+/// the WCAG 1.4.11 floor a two-pixel graphical object needs. `notice_fg` would clear that too and would be
+/// wrong for another reason: nothing is the matter with a page that is loading, and
+/// `Severity::Quiet` is what the notice system already calls that.
+///
+/// # Where it is painted
+///
+/// On a layer over `rect`, after the panel is laid out, and *downward into the strip*. Inside the
+/// panel closure `ui.painter()` is clipped to the content rect, which the inner margin insets, so
+/// a rule at the true top edge is clipped away; and the hover-URL overlay anchors its bottom edge
+/// at exactly this line, so a rule drawn above it vanishes whenever the pointer is on a link. It
+/// takes layout from nothing either way.
+pub fn progress_rule(ctx: &egui::Context, pal: &Palette, rect: egui::Rect, fraction: f32) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("hww-progress"),
+    ));
+    // Two physical pixels, so the rule keeps its weight at every zoom.
+    let h = (2.0 / ctx.pixels_per_point()).max(1.0);
+    let top = theme::snap(rect.top());
+    let track = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), top),
+        egui::pos2(rect.right(), top + h),
+    );
+    // The track first: without it the bar is invisible for the first second of every fetch, which
+    // is most of them, and an indicator nobody sees appear is not one.
+    painter.rect_filled(track, 0.0, pal.rule);
+    let width = theme::snap(track.width() * fraction.clamp(0.0, 1.0));
+    if width > 0.0 {
+        let mut filled = track;
+        filled.set_right(track.left() + width);
+        painter.rect_filled(filled, 0.0, pal.guide);
     }
 }
 

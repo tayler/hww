@@ -139,9 +139,10 @@ impl ImageStore {
         self.touch(src);
     }
 
-    /// Dropped on navigation. Dimensions and the disclosure counters survive: the first is
-    /// layout memory, and the second is a running account of what this session disclosed,
-    /// which resetting would quietly understate.
+    /// Dropped when a new page commits, not when one is asked for: the outgoing page stays on
+    /// screen for the length of the fetch and its pictures have to stay with it. Dimensions and
+    /// the disclosure counters survive even that: the first is layout memory, and the second is a
+    /// running account of what this session disclosed, which resetting would quietly understate.
     pub fn clear_textures(&mut self) {
         self.entries.clear();
         self.order.clear();
