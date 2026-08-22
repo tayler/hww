@@ -28,7 +28,8 @@ use url::Url;
 pub enum Action {
     Follow(String),
     /// The context menu's second item, and `R`'s per-link equivalent.
-    FollowWithoutRewrite(String),
+    /// Follow with neither table applied: the page as the host sends it.
+    FollowBare(String),
     Copy(String),
     /// Load one image, named by its `src` as it appears in the IR.
     LoadImage(String),
@@ -214,5 +215,5 @@ pub struct Launch {
     pub start: Option<Url>,
     pub settings: Settings,
     pub settings_note: Option<String>,
-    pub rewrite: bool,
+    pub opts: crate::session::LoadOptions,
 }

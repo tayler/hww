@@ -262,3 +262,103 @@ swallow it.
 
 `src/rewrite.rs` is the only file in the crate that contains a hostname. The module graph keeps
 it that way: `rewrite` imports no extractor, and nothing imports `rewrite` except `main.rs`.
+
+
+---
+
+# Phase 3: from okay to good, measured on the top-ten US news sites
+
+Measured 2026-08-22 on the top ten US news sites by monthly visits (a public ranking, not a
+browsing history), three pages each: the front page, one section page, one article. Eight
+hosts were reachable; two answer bot gates (a JS "please enable" 403, an h2 reset) and are
+out of scope. The instrument was `hww --why`, built first: the extractor's own account of each
+page (root candidates with the emitted length the choice is made on, the thread detector's
+verdict, the card detector's verdict, metadata sources, the fallback), produced by the one
+pass that builds the document so it cannot disagree with it, paired with `hww-shot --url` for
+the rendering.
+
+## What the triage found
+
+Article bodies were already good. Of 24 defects recorded, nine were generic extractor bugs,
+five were the shape of a front page, a few were rendering, and five were in-body chrome on
+articles that only a selector could name. Two bug classes dominated:
+
+| | before | after |
+|---|---:|---:|
+| articles with a fake "discussion" appended (captions, carousels, related cards) | 6 of 8 | 0 |
+| fronts replaced outright by a 3–4 post "thread" | 2 of 8 | 0 |
+| a wire service's front page, chars emitted | 2,371 of 16,673 | 16,442 |
+| a network's front page, chars emitted | 945 | 11,798 |
+| a portal's front page, chars emitted | 1,233 | 13,799 |
+
+The first row was one substring: `age` inside `image` attributed every caption container as a
+post. The third was another: `promo` inside the class a wire service gives every story card.
+Hint matching is at token boundaries now (`src/hint.rs`), a thread group whose members are
+mostly links is a card list, and a chrome hint that would delete more than half a root is
+ignored for that root and says so in `--why`.
+
+## Front pages are a shape
+
+No front page was good under article scoring (a legal notice out-scored the page on two of
+them) and none is a discussion. The card detector (`src/cards.rs`) reuses the thread detector's
+sibling groups with a different acceptance test (a headline-length link, few distinct hrefs,
+median text over 40), and the walker emits `Block::Entries` in place, so section headings stay
+between card lists. Entries per front page went from 0 everywhere to between 13 and 106; a
+card stream kept outside `<main>` brings the body in. Measured first, as a verdict in `--why`,
+before the IR block existed: the detector found the real card groups on every page and the only
+false positives were short nav lists.
+
+## Where profiles were needed
+
+After three rounds of generic fixes and the front-page stage, what remained that only a
+selector could name: a "listen to this article" banner and an app-download link mid-article
+(one network), a "see all topics" link under the hero (another), and a lead gallery's overlay
+repeating every caption above the byline (a wire service). Three public hosts, one to five
+junk paragraphs each, on articles otherwise clean. That opened the gate the plan had set (three
+hosts), and it opened onto a vocabulary of one field: `strip`. Nothing asked for a root, a
+metadata source, or a thread shape, and the previous per-site layer was removed for being
+mechanism without a caller, so the profile has the field with callers and grows when a page
+asks. A portal's "Return to Homepage" on a close button turned out generic (screen-reader-only
+labels are chrome) and left the pile.
+
+## A second, wider sample
+
+Fifty-seven more hosts across the political spectrum and across kinds of site (national and
+international news, magazines, business, tech, science, reference), forty-four articles read
+head and tail. Bodies were good throughout. What repeated was generic and landed as such: link
+rubble after the last paragraph (tag lists, "See all", "Most viewed", a "Comments" heading) on
+ten hosts is trimmed; recirculation and audio-player vendors share class names across hundreds
+of hosts and are chrome hints; a dated "related stories" block under a chrome container is not
+a thread. A native-ad slot's placeholder copy at the foot of two hosts of one publisher started
+as a profile and ended as the tail trimmer's job; one more host needed a selector (a
+text-to-speech speed menu set as prose). Later samples (ten non-US sites; twenty across Europe,
+South America, Mexico, and Africa) added eight more: newsletter lines, comments pitches,
+subscriber modals, a gift counter, a consent banner on a page walked with chrome hints off. The
+table spans the spectrum and four continents rather than naming a side of either, and is kept
+sorted by host.
+
+## A second, wider sample
+
+Fifty-seven more hosts across the political spectrum and across kinds of site (national and
+international news, magazines, business, tech, science, reference), forty-four articles read
+head and tail. Bodies were good throughout. What repeated was generic and landed as such: link
+rubble after the last paragraph (tag lists, "See all", "Most viewed", a "Comments" heading) on
+ten hosts is trimmed; recirculation and audio-player vendors share class names across hundreds
+of hosts and are chrome hints; a dated "related stories" block under a chrome container is not
+a thread. A native-ad slot's placeholder copy at the foot of two hosts of one publisher started
+as a profile and ended as the tail trimmer's job; one more host needed a selector (a
+text-to-speech speed menu set as prose). Later samples (ten non-US sites; twenty across Europe,
+South America, Mexico, and Africa) added eight more: newsletter lines, comments pitches,
+subscriber modals, a gift counter, a consent banner on a page walked with chrome hints off. The
+table spans the spectrum and four continents rather than naming a side of either, and is kept
+sorted by host.
+
+## What a profile is
+
+Data, not code: one CSS selector per field, in `src/sites.rs`, the only file in the crate that
+contains a hostname, keyed on the final URL at a label boundary with the same matcher as the
+rewrite table. Applied before anything is scored, refused when it would remove more than half
+the page, and reported field by field (matched *n*, matched nothing, rejected) on stderr after
+the page, in `--why`, and in the page-info panel. Each shipped profile carries a synthetic
+fixture and `every_profile_earns_its_keep` runs it with and without the profile. `--no-profile`
+and `Shift+R` (reload bare) switch it off.

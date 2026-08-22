@@ -86,6 +86,19 @@ pub fn rows(prov: &Provenance, counts: &Counts) -> Vec<Row> {
                 .with_note("Compiled in, never fetched. hww ships no updatable rule list."),
         );
     }
+    if let Some(r) = &prov.profile {
+        let what: Vec<String> = r
+            .fields
+            .iter()
+            .map(|f| format!("{} {}", f.field, f.outcome))
+            .collect();
+        out.push(
+            Row::new("Site profile", format!("{}: {}", r.host, what.join(", "))).with_note(
+                "Compiled in, never fetched. A field that matched nothing is listed, so a \
+                 stale profile is visible here rather than silently doing nothing.",
+            ),
+        );
+    }
     if !prov.hops.is_empty() {
         out.push(
             Row::new("Redirects", plural(prov.hops.len(), "hop")).with_note(
@@ -237,6 +250,7 @@ mod tests {
         for label in [
             "Requested",
             "Rewrite rule",
+            "Site profile",
             "Redirects",
             "Transfer",
             "Images loaded",
@@ -370,5 +384,36 @@ mod tests {
         assert_eq!(human_bytes(1_000), "1 kB");
         assert_eq!(human_bytes(999_999), "999 kB");
         assert_eq!(human_bytes(1_000_000), "1.0 MB");
+    }
+
+    /// Charter point 5 for profiles: what the profile did is a row, dead fields included, and
+    /// the note says where the table comes from.
+    #[test]
+    fn a_profiled_page_reports_its_profile_as_a_row() {
+        let mut p = prov();
+        p.profile = Some(crate::profile::ProfileReport {
+            host: "example.com".into(),
+            fields: vec![
+                crate::profile::FieldReport {
+                    field: "strip",
+                    outcome: crate::profile::Outcome::Matched(2),
+                },
+                crate::profile::FieldReport {
+                    field: "strip",
+                    outcome: crate::profile::Outcome::Dead,
+                },
+            ],
+        });
+        let rows = rows(&p, &Counts::default());
+        let row = find(&rows, "Site profile").expect("a row");
+        assert_eq!(
+            row.value,
+            "example.com: strip matched 2, strip matched nothing"
+        );
+        assert!(
+            row.note
+                .as_deref()
+                .is_some_and(|n| n.contains("Compiled in"))
+        );
     }
 }

@@ -68,6 +68,28 @@ const NOISE_HINT: &[&str] = &[
     "banner",
     "breadcrumb",
     "pagination",
+    // Token matching made `advert` stop matching `advertisement`; these are the forms seen.
+    "advertisement",
+    "ad",
+    "ads",
+    "sponsored",
+    "sponsor",
+    "native-ad",
+    // Recirculation vendors and embedded widgets, the same classes on hundreds of hosts:
+    // outbrain/taboola rows, a "listen to this article" player, a Google preferred-sources box.
+    "taboola",
+    "outbrain",
+    "tts",
+    "text-to-speech",
+    "audio-player",
+    "beyondwords",
+    "preferred-sources",
+    // Text a sighted reader never sees, there to label an icon button for a screen reader:
+    // "Return to Homepage" on a close control. This reader shows no controls.
+    "sr-only",
+    "visually-hidden",
+    "visuallyhidden",
+    "screen-reader-text",
 ];
 
 /// Elements that open a new block context. Used to decide whether a `<div>` is a leaf of
@@ -134,8 +156,10 @@ pub struct Explanation {
     /// Index into `candidates` of the one whose blocks became the document.
     pub winner: Option<usize>,
     pub thread: crate::thread::Verdict,
-    /// What the story-card detector saw. Reported, not yet acted on.
+    /// What the story-card detector saw.
     pub cards: crate::cards::Verdict,
+    /// What the site profile did, if one applied. Its `host` is filled by `session`.
+    pub profile: Option<crate::profile::ProfileReport>,
     /// What the thread merge did: `"replaced the document"`, `"appended"`,
     /// `"dropped (thinner than the floor)"`, or `"no thread"`.
     pub thread_merge: &'static str,
@@ -154,12 +178,32 @@ pub struct Explanation {
 
 /// Extract, and say why. The CLI's `--why` and `bin/dbg` print this.
 pub fn explain(source: &str, url: &Url) -> Explanation {
-    extract_traced(source, url).1
+    extract_traced(source, url, &crate::profile::Profile::NONE).1
+}
+
+/// [`explain`], under a site profile.
+pub fn explain_with_profile(
+    source: &str,
+    url: &Url,
+    profile: &crate::profile::Profile,
+) -> Explanation {
+    extract_traced(source, url, profile).1
 }
 
 impl std::fmt::Display for Explanation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "why: {}", self.url)?;
+        if let Some(p) = &self.profile {
+            writeln!(
+                f,
+                "profile: {}",
+                p.fields
+                    .iter()
+                    .map(|fr| format!("{} {}", fr.field, fr.outcome))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )?;
+        }
         writeln!(f, "root candidates (ranked by emitted text; * chose):")?;
         if self.candidates.is_empty() {
             writeln!(f, "    none cleared the floor")?;
@@ -230,13 +274,38 @@ impl std::fmt::Display for Explanation {
 }
 
 pub fn extract(source: &str, url: &Url) -> Document {
-    extract_traced(source, url).0
+    extract_traced(source, url, &crate::profile::Profile::NONE).0
+}
+
+/// [`extract`] under a site profile, with the account of what the profile did.
+pub fn extract_with_profile(
+    source: &str,
+    url: &Url,
+    profile: &crate::profile::Profile,
+) -> Extraction {
+    let (doc, why) = extract_traced(source, url, profile);
+    Extraction {
+        doc,
+        profile: why.profile,
+    }
+}
+
+/// What [`extract_with_profile`] hands back: the document, and what the profile did to it.
+pub struct Extraction {
+    pub doc: Document,
+    /// `None` when the profile was `Profile::NONE`.
+    pub profile: Option<crate::profile::ProfileReport>,
 }
 
 /// The one extraction pass. [`extract`] keeps the document and [`explain`] keeps the account;
 /// neither re-enacts the other's decisions.
-fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
-    let html = Html::parse_document(source);
+fn extract_traced(
+    source: &str,
+    url: &Url,
+    profile: &crate::profile::Profile,
+) -> (Document, Explanation) {
+    let mut html = Html::parse_document(source);
+    let profile_report = apply_profile(&mut html, profile);
     let (title, title_src) = first_of([
         ("og:title", meta_prop(&html, "og:title")),
         ("<title>", title_element(&html)),
@@ -277,6 +346,7 @@ fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
         winner: None,
         thread: Default::default(),
         cards,
+        profile: profile_report,
         thread_merge: "no thread",
         meta: vec![
             ("title", title_src, doc.title.clone()),
@@ -346,9 +416,96 @@ fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
             why.body_fallback = true;
         }
     }
+    trim_tail(&mut doc.blocks);
     why.blocks = doc.blocks.len();
     why.text_len = doc.text_len();
     (doc, why)
+}
+
+/// An article ends in prose. What trails the last prose block is link rubble: a tag list, a
+/// "See all" or "Read more", a "Most viewed" heading whose list the extractor already dropped,
+/// a rule. Measured on forty articles across fifty-seven hosts: ten ended this way. Prose is
+/// never trimmed, however short; only link-only runs, link-only lists, headings with nothing
+/// after them, and rules.
+fn trim_tail(blocks: &mut Vec<Block>) {
+    if crate::ir::blocks_text_len(blocks) < crate::ir::THIN_TEXT {
+        return;
+    }
+    while let Some(last) = blocks.last() {
+        if is_rubble(last) {
+            blocks.pop();
+        } else {
+            break;
+        }
+    }
+}
+
+/// A closing line is rubble when it is links and nothing else, and short.
+const RUBBLE_TEXT: usize = 80;
+
+fn is_rubble(b: &Block) -> bool {
+    match b {
+        Block::Rule => true,
+        // A closing image with no caption and a short alt is a badge, a logo, or a tracking
+        // pixel ("Google News", "Publicidad", "Imagen de seguimiento"); a closing photograph
+        // carries a caption.
+        Block::Figure {
+            caption: None,
+            image,
+        } => image.alt.as_deref().is_none_or(|a| a.len() < 40),
+        // The same badges set inline: a run that is nothing but short-alt images.
+        Block::Paragraph(inl) if images_only(inl) => true,
+        Block::Heading { inlines, .. } => crate::ir::plain_text(inlines).len() < RUBBLE_TEXT,
+        Block::Paragraph(inl) => links_only(inl),
+        Block::List { items, .. } => items.iter().all(|item| {
+            item.iter()
+                .all(|b| matches!(b, Block::Paragraph(inl) if links_only(inl)))
+        }),
+        _ => false,
+    }
+}
+
+fn images_only(inl: &[Inline]) -> bool {
+    let mut any = false;
+    for i in inl {
+        match i {
+            Inline::Text(t) if t.trim().is_empty() => {}
+            Inline::Image(img) if img.alt.as_deref().is_none_or(|a| a.len() < 40) => any = true,
+            Inline::Link { inlines, .. } => {
+                if !images_only(inlines) {
+                    return false;
+                }
+                any = true;
+            }
+            _ => return false,
+        }
+    }
+    any
+}
+
+fn links_only(inl: &[Inline]) -> bool {
+    fn walk(inl: &[Inline], any: &mut bool) -> bool {
+        for i in inl {
+            match i {
+                // Separators between tags ("Canada, Donald Trump, trade war", "Categories:")
+                // are punctuation, not prose.
+                Inline::Text(t)
+                    if t.chars()
+                        .all(|c| c.is_whitespace() || c.is_ascii_punctuation() || c == '·') => {}
+                Inline::Link { .. } => *any = true,
+                // "*Subscribe to the newsletter*": emphasis around a link is still a link.
+                Inline::Emph(v) | Inline::Strong(v) => {
+                    if !walk(v, any) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+    let mut any = false;
+    walk(inl, &mut any) && any && crate::ir::plain_text(inl).len() < RUBBLE_TEXT
 }
 
 /// A byline names a person. Two of the top-ten US news sites put a URL in
@@ -384,6 +541,66 @@ const SLIVER_RATIO: usize = 5;
 /// Accepted story-card lists carrying this many times the chosen root's text mean the root
 /// is not the page. Measured: 14,891 against 1,233.
 const CARDS_RATIO: usize = 3;
+
+/// A `strip` that would remove more than this share of the page's text is refused: a profile
+/// is a candidate with a floor, and a stale selector that now matches the article body must
+/// not be allowed to delete it silently.
+const STRIP_CEILING: f64 = 0.5;
+
+/// Apply a profile to the parsed page, before anything reads it. `strip` detaches matched
+/// subtrees from the tree, so scoring, walking, metadata, and the thread and card detectors
+/// all see a page without them. One `FieldReport` per set field, whatever happened.
+fn apply_profile(
+    html: &mut Html,
+    profile: &crate::profile::Profile,
+) -> Option<crate::profile::ProfileReport> {
+    use crate::profile::{FieldReport, Outcome, ProfileReport};
+    if profile.is_none() {
+        return None;
+    }
+    let mut fields = Vec::new();
+    if let Some(sel) = &profile.strip {
+        let outcome = match Selector::parse(sel) {
+            Err(_) => Outcome::Rejected("selector does not parse"),
+            Ok(selector) => {
+                let before = text_len(html.tree.root());
+                let ids: Vec<ego_tree::NodeId> = html.select(&selector).map(|e| e.id()).collect();
+                if ids.is_empty() {
+                    Outcome::Dead
+                } else {
+                    // Outermost matches only: a container and its child both matching the
+                    // selector is one removal, not two, against the ceiling.
+                    let set: std::collections::HashSet<ego_tree::NodeId> =
+                        ids.iter().copied().collect();
+                    let removed: usize = ids
+                        .iter()
+                        .filter_map(|id| html.tree.get(*id))
+                        .filter(|n| !n.ancestors().any(|a| set.contains(&a.id())))
+                        .map(text_len)
+                        .sum();
+                    if before > 0 && removed as f64 > STRIP_CEILING * before as f64 {
+                        Outcome::Rejected("would remove most of the page")
+                    } else {
+                        for id in &ids {
+                            if let Some(mut n) = html.tree.get_mut(*id) {
+                                n.detach();
+                            }
+                        }
+                        Outcome::Matched(ids.len())
+                    }
+                }
+            }
+        };
+        fields.push(FieldReport {
+            field: "strip",
+            outcome,
+        });
+    }
+    Some(ProfileReport {
+        host: String::new(),
+        fields,
+    })
+}
 
 /// The first source that produced a value, and its name; `"none"` when nothing did.
 fn first_of<const N: usize>(
@@ -604,6 +821,17 @@ fn is_noise(el: &ElementRef, walk: &Walk<'_>) -> bool {
     crate::hint::matches(&hint, NOISE_HINT)
 }
 
+/// Is this element chrome, or inside chrome, by the same tags and hints the walker drops?
+/// The thread and card detectors read the raw tree, so a "related stories" block under a
+/// `related` container looked like four dated posts to them until they asked.
+pub(crate) fn in_chrome(el: &ElementRef) -> bool {
+    let base = Url::parse("https://x.invalid/").unwrap();
+    let walk = Walk::bare(&base);
+    std::iter::once(*el)
+        .chain(el.ancestors().filter_map(ElementRef::wrap))
+        .any(|e| is_noise(&e, &walk))
+}
+
 // ---------- text measurement ----------
 
 fn inner_text(node: NodeRef<'_, Node>) -> String {
@@ -617,12 +845,35 @@ fn inner_text(node: NodeRef<'_, Node>) -> String {
 /// overflow is an abort that no guard in the reader can contain. See [`MAX_DEPTH`] for the
 /// walkers that cannot be flattened this cheaply.
 fn collect_text(node: NodeRef<'_, Node>, out: &mut String) {
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
+    enum Item<'a> {
+        Node(NodeRef<'a, Node>),
+        Space,
+    }
+    let mut stack = vec![Item::Node(node)];
+    while let Some(item) = stack.pop() {
+        let n = match item {
+            Item::Space => {
+                out.push(' ');
+                continue;
+            }
+            Item::Node(n) => n,
+        };
         match n.value() {
             Node::Text(t) => out.push_str(t),
             Node::Element(e) if NOISE.contains(&e.name.local.as_ref()) => {}
-            _ => stack.extend(n.children().rev()),
+            Node::Element(e) => {
+                // A block-level element starts and ends on a word boundary, as it does on
+                // the page: `<div>21 hours ago</div><div>Joe Inwood</div>` is two things.
+                let block = BLOCK_LEVEL.contains(&e.name.local.as_ref()) || &*e.name.local == "br";
+                if block {
+                    stack.push(Item::Space);
+                }
+                stack.extend(n.children().rev().map(Item::Node));
+                if block {
+                    stack.push(Item::Space);
+                }
+            }
+            _ => stack.extend(n.children().rev().map(Item::Node)),
         }
     }
 }
@@ -765,7 +1016,7 @@ fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, d
         if members.is_some_and(|m| m.contains(&child.id()))
             && let Some(e) = entry_from(&el, walk, depth + 1)
         {
-            flush_pending(&mut pending, out);
+            flush_pending(&mut pending, out, walk);
             entries.push(e);
             continue;
         }
@@ -899,12 +1150,12 @@ fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, d
             }
         }
         if !made.is_empty() {
-            flush_pending(&mut pending, out);
+            flush_pending(&mut pending, out, walk);
             flush_entries(&mut entries, out);
             out.append(&mut made);
         }
     }
-    flush_pending(&mut pending, out);
+    flush_pending(&mut pending, out, walk);
     flush_entries(&mut entries, out);
 }
 
@@ -1086,14 +1337,75 @@ fn unlink(inlines: Vec<Inline>) -> Vec<Inline> {
 /// A run with no link has to clear [`MIN_LOOSE_TEXT`]. A run carrying one is kept whatever
 /// its length: a headline is often shorter than the floor, and the floor was dropping the
 /// only route to the page behind it.
-fn flush_pending(pending: &mut Vec<Inline>, out: &mut Vec<Block>) {
+fn flush_pending(pending: &mut Vec<Inline>, out: &mut Vec<Block>, walk: &Walk<'_>) {
     let inl = trim_inlines(std::mem::take(pending));
     if inl.iter().all(is_blank) {
+        return;
+    }
+    // A run that is one image, linked or not, is a picture: a figure, not a line of alt
+    // text set in the link face. Front pages wrap every thumbnail this way.
+    if let Some(img) = lone_image(&inl) {
+        out.push(Block::Figure {
+            image: img,
+            caption: None,
+        });
+        return;
+    }
+    // A short run of links into the page itself ("Skip to content", a "close" button with
+    // `href="#"`) is a control, not prose. A table of contents is a list, and list items
+    // do not come through here.
+    if inlines_len(&inl) <= MIN_LOOSE_TEXT && all_same_document_links(&inl, walk.base) {
         return;
     }
     if inlines_len(&inl) > MIN_LOOSE_TEXT || inl.iter().any(has_link) {
         out.push(Block::Paragraph(inl));
     }
+}
+
+/// The one image a run consists of, through a link if there is one; `None` if the run holds
+/// anything else.
+fn lone_image(inl: &[Inline]) -> Option<Image> {
+    let mut image = None;
+    for i in inl {
+        match i {
+            Inline::Text(t) if t.trim().is_empty() => {}
+            Inline::Image(img) if image.is_none() => image = Some(img.clone()),
+            Inline::Link { inlines, .. } => {
+                for j in inlines {
+                    match j {
+                        Inline::Text(t) if t.trim().is_empty() => {}
+                        Inline::Image(img) if image.is_none() => image = Some(img.clone()),
+                        _ => return None,
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    image
+}
+
+/// Every non-blank inline is a link whose target is this page plus a fragment.
+fn all_same_document_links(inl: &[Inline], base: &Url) -> bool {
+    use url::Position;
+    let here = &base[..Position::AfterQuery];
+    let mut any = false;
+    for i in inl {
+        match i {
+            Inline::Text(t) if t.trim().is_empty() => {}
+            Inline::Link { href, .. } => {
+                let Ok(u) = Url::parse(href) else {
+                    return false;
+                };
+                if u.fragment().is_none() || &u[..Position::AfterQuery] != here {
+                    return false;
+                }
+                any = true;
+            }
+            _ => return false,
+        }
+    }
+    any
 }
 
 fn is_blank(i: &Inline) -> bool {
@@ -1238,9 +1550,26 @@ fn inline_child(child: NodeRef<'_, Node>, walk: &Walk<'_>, depth: usize, out: &m
             if is_noise(&el, walk) {
                 return;
             }
-            match e.name.local.as_ref() {
-                "em" | "i" => out.push(Inline::Emph(inlines_from(child, walk, depth + 1))),
-                "strong" | "b" => out.push(Inline::Strong(inlines_from(child, walk, depth + 1))),
+            let name = e.name.local.as_ref();
+            match name {
+                // An emphasis element holding nothing but a space (`representing<strong>
+                // </strong>the`, which one CMS emits) is the space; wrapping it welds the
+                // words either side.
+                "em" | "i" | "strong" | "b" => {
+                    let inl = inlines_from(child, walk, depth + 1);
+                    if inl.iter().all(is_blank) {
+                        let held_text = child
+                            .descendants()
+                            .any(|n| matches!(n.value(), Node::Text(t) if !t.is_empty()));
+                        if held_text {
+                            push_space(out);
+                        }
+                    } else if name == "em" || name == "i" {
+                        out.push(Inline::Emph(inl));
+                    } else {
+                        out.push(Inline::Strong(inl));
+                    }
+                }
                 "code" | "kbd" | "samp" => out.push(Inline::Code(inner_text(child))),
                 "br" => out.push(Inline::Break),
                 "img" => {
@@ -1249,7 +1578,7 @@ fn inline_child(child: NodeRef<'_, Node>, walk: &Walk<'_>, depth: usize, out: &m
                     }
                 }
                 "a" => {
-                    let inl = inlines_from(child, walk, depth + 1);
+                    let inl = without_repeated_alt(inlines_from(child, walk, depth + 1));
                     match el.value().attr("href").and_then(|h| walk.base.join(h).ok()) {
                         Some(href) if !inl.is_empty() => out.push(Inline::Link {
                             href: href.to_string(),
@@ -1258,11 +1587,43 @@ fn inline_child(child: NodeRef<'_, Node>, walk: &Walk<'_>, depth: usize, out: &m
                         _ => out.extend(inl),
                     }
                 }
+                // A block-level element flattened into a run (a byline built from sibling
+                // `<div>`s) starts and ends on a word boundary, as it would on a page; an
+                // inline one (`<span>`) does not, as it would not.
+                _ if BLOCK_LEVEL.contains(&name) => {
+                    push_space(out);
+                    out.extend(inlines_from(child, walk, depth + 1));
+                    push_space(out);
+                }
                 _ => out.extend(inlines_from(child, walk, depth + 1)),
             }
         }
         _ => {}
     }
+}
+
+/// An image inside a link whose alt repeats the link's own text is the headline drawn twice:
+/// once as a picture nobody has loaded and once as words. The words stay.
+fn without_repeated_alt(inl: Vec<Inline>) -> Vec<Inline> {
+    let words: String = inl
+        .iter()
+        .filter(|i| !matches!(i, Inline::Image(_)))
+        .map(|i| crate::ir::plain_text(std::slice::from_ref(i)))
+        .collect::<String>()
+        .to_lowercase();
+    let words = words.trim();
+    if words.len() < 10 {
+        return inl;
+    }
+    inl.into_iter()
+        .filter(|i| match i {
+            Inline::Image(img) => {
+                let alt = img.alt.as_deref().unwrap_or("").trim().to_lowercase();
+                alt.len() < 10 || !(alt.contains(words) || words.contains(alt.as_str()))
+            }
+            _ => true,
+        })
+        .collect()
 }
 
 /// Add a separating space, unless we are at the start or the previous inline already ends in
@@ -2121,7 +2482,7 @@ mod tests {
              <figure><picture><source srcset=\"/a-256.jpg 256w, /a-512.jpg 512w\">\
              <img src=\"data:image/gif;base64,R0lGOD\" alt=\"A hero\"></picture>\
              <figcaption>The hero, captioned.</figcaption></figure>\
-             <p>{body}</p><img srcset=\"/b-1x.jpg 1x, /b-2x.jpg 2x\" alt=\"Second\"></article></body></html>"
+             <p>{body}</p><img srcset=\"/b-1x.jpg 1x, /b-2x.jpg 2x\" alt=\"Second\"><p>{body}</p></article></body></html>"
         );
         let d = doc(&src);
         let figs: Vec<_> = d
@@ -2296,5 +2657,285 @@ mod tests {
             d.blocks,
             explain(&src, &url)
         );
+    }
+
+    /// Regression: `representing<strong> </strong>the only person` came out as
+    /// "representingthe only person". A space wrapped in emphasis is a space.
+    #[test]
+    fn an_emphasis_holding_only_a_space_is_a_space() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(3);
+        let d = doc(&format!(
+            "<html><body><article><p>{body}</p><p>The lawyer, representing<strong> </strong>the \
+             only person ever charged, spoke at<em> </em>length about the case.</p></article></body></html>"
+        ));
+        let text = crate::render::to_text(&d, &crate::render::TextOpts::default());
+        assert!(text.contains("representing the only"), "{text}");
+        assert!(text.contains("spoke at length"), "{text}");
+    }
+
+    /// Regression: a byline built as `<div>21 hours ago</div><div>Joe Inwood</div>` with no
+    /// whitespace between the divs came out as "21 hours agoJoe Inwood". Block-level siblings
+    /// flattened into one run keep the boundary a page would draw between them.
+    #[test]
+    fn block_level_siblings_flattened_into_a_run_keep_their_boundary() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(3);
+        let d = doc(&format!(
+            "<html><body><article><div class=\"meta\"><div>21 hours ago</div><div>Joe Inwood</div>\
+             <div>World news correspondent</div>\
+             <span>World</span><span>wide</span></div><p>{body}</p></article></body></html>"
+        ));
+        let text = crate::render::to_text(&d, &crate::render::TextOpts::default());
+        assert!(
+            text.contains("21 hours ago Joe Inwood World news correspondent"),
+            "{text}"
+        );
+        // Inline siblings stay welded, as a browser renders them.
+        assert!(text.contains("Worldwide"), "{text}");
+        // The same boundary in the plain-text measure, which visible bylines are read with.
+        let html = Html::parse_document("<div><div>21 hours ago</div><div>Joe Inwood</div></div>");
+        assert_eq!(inner_text(*html.root_element()), "21 hours ago Joe Inwood");
+    }
+
+    /// "Skip to content" and a "close" button with `href="#"` are controls that point at the
+    /// page itself; a link to another page is not, and a list of fragment links (a table of
+    /// contents) is a list, which never passes through the loose-run floor.
+    #[test]
+    fn a_short_run_of_links_into_the_page_itself_is_not_a_paragraph() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(3);
+        let d = doc(&format!(
+            "<html><body><a href=\"#main\">Skip to content</a><article><a href=\"#\">close</a>\
+             <ul><li><a href=\"#one\">Part one</a></li><li><a href=\"#two\">Part two</a></li>\
+             <li><a href=\"#three\">Part three</a></li></ul>\
+             <a href=\"/next\">Next story</a><p>{body}</p></article></body></html>"
+        ));
+        let text = crate::render::to_text(&d, &crate::render::TextOpts::default());
+        assert!(!text.contains("Skip to content"), "{text}");
+        assert!(!text.contains("close"), "{text}");
+        assert!(text.contains("Next story"), "{text}");
+        assert!(text.contains("Part two"), "{text}");
+    }
+
+    /// A thumbnail wrapped in a link is a picture, not a line of alt text set as a link.
+    #[test]
+    fn an_image_only_link_is_a_figure() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(3);
+        let d = doc(&format!(
+            "<html><body><article><p>{body}</p>\
+             <a href=\"/story\"><img src=\"/t.jpg\" alt=\"A thumbnail described at length here\"></a>\
+             <p>{body}</p></article></body></html>"
+        ));
+        assert!(
+            d.blocks
+                .iter()
+                .any(|b| matches!(b, Block::Figure { image, .. } if image.src.ends_with("/t.jpg"))),
+            "{:?}",
+            d.blocks
+        );
+    }
+
+    /// Regression: one front page wraps `<img alt="Headline - Site">` and the headline text
+    /// in the same anchor, and the alt was read out before the headline as link text.
+    #[test]
+    fn an_alt_that_repeats_its_link_text_is_dropped() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(3);
+        let d = doc(&format!(
+            "<html><body><article><p>{body}</p>\
+             <p><a href=\"/s\"><img src=\"/t.jpg\" alt=\"Boy finds tooth on beach - Site\">Boy finds \
+             tooth on beach</a></p>\
+             <p><a href=\"/u\"><img src=\"/v.jpg\" alt=\"A photo of the sea at dusk\">Boy finds tooth \
+             on beach</a></p><p>{body}</p></article></body></html>"
+        ));
+        let text = crate::render::to_text(&d, &crate::render::TextOpts::default());
+        assert!(!text.contains("tooth on beach - Site"), "{text}");
+        assert!(text.contains("[A photo of the sea at dusk]"), "{text}");
+    }
+
+    fn body_with_banner() -> String {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(4);
+        format!(
+            "<html><body><article><div class=\"listen-banner\"><span>NEW</span>You can now listen \
+             to articles!</div><p>{body}</p><p>{body}</p></article></body></html>"
+        )
+    }
+
+    #[test]
+    fn extract_with_the_none_profile_is_extract() {
+        let src = body_with_banner();
+        let url = Url::parse("https://example.test/a").unwrap();
+        let plain = extract(&src, &url);
+        let x = extract_with_profile(&src, &url, &crate::profile::Profile::NONE);
+        assert!(x.profile.is_none());
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            serde_json::to_string(&x.doc).unwrap()
+        );
+    }
+
+    #[test]
+    fn strip_removes_the_subtree_and_reports_the_count() {
+        let src = body_with_banner();
+        let url = Url::parse("https://example.test/a").unwrap();
+        let p = crate::profile::Profile {
+            strip: crate::profile::sel(".listen-banner"),
+        };
+        let x = extract_with_profile(&src, &url, &p);
+        let text = crate::render::to_text(&x.doc, &crate::render::TextOpts::default());
+        assert!(!text.contains("You can now listen"), "{text}");
+        assert!(text.contains("Prose long enough"), "{text}");
+        let r = x.profile.expect("a report");
+        assert_eq!(r.fields.len(), 1);
+        assert_eq!(r.fields[0].outcome, crate::profile::Outcome::Matched(1));
+        // And the same through `--why`.
+        let why = explain_with_profile(&src, &url, &p);
+        assert!(
+            why.to_string().contains("profile: strip matched 1"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_dead_strip_is_reported_and_changes_nothing() {
+        let src = body_with_banner();
+        let url = Url::parse("https://example.test/a").unwrap();
+        let p = crate::profile::Profile {
+            strip: crate::profile::sel(".no-such-thing"),
+        };
+        let x = extract_with_profile(&src, &url, &p);
+        assert_eq!(
+            x.profile.unwrap().fields[0].outcome,
+            crate::profile::Outcome::Dead
+        );
+        assert_eq!(
+            serde_json::to_string(&x.doc).unwrap(),
+            serde_json::to_string(&extract(&src, &url)).unwrap()
+        );
+    }
+
+    /// A stale selector that has come to match the article is refused, not obeyed: the
+    /// profile is a candidate with a floor.
+    #[test]
+    fn a_strip_that_would_remove_most_of_the_page_is_refused() {
+        let src = body_with_banner();
+        let url = Url::parse("https://example.test/a").unwrap();
+        let p = crate::profile::Profile {
+            strip: crate::profile::sel("article"),
+        };
+        let x = extract_with_profile(&src, &url, &p);
+        assert_eq!(
+            x.profile.unwrap().fields[0].outcome,
+            crate::profile::Outcome::Rejected("would remove most of the page")
+        );
+        assert!(x.doc.text_len() > 500);
+    }
+
+    #[test]
+    fn a_selector_that_does_not_parse_is_rejected_not_fatal() {
+        let src = body_with_banner();
+        let url = Url::parse("https://example.test/a").unwrap();
+        let p = crate::profile::Profile {
+            strip: crate::profile::sel("div[["),
+        };
+        let x = extract_with_profile(&src, &url, &p);
+        assert_eq!(
+            x.profile.unwrap().fields[0].outcome,
+            crate::profile::Outcome::Rejected("selector does not parse")
+        );
+    }
+
+    /// Regression: "Return to Homepage" on a portal's close button, in a `span.sr-only`, read
+    /// out as the first line of every article. A label for a control a sighted reader never
+    /// sees is not prose.
+    #[test]
+    fn screen_reader_only_labels_are_chrome() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(4);
+        let d = doc(&format!(
+            "<html><body><a href=\"/\"><svg></svg><span class=\"sr-only\">Return to Homepage</span></a>\
+             <article><p>{body}</p></article></body></html>"
+        ));
+        let text = crate::render::to_text(&d, &crate::render::TextOpts::default());
+        assert!(!text.contains("Return to Homepage"), "{text}");
+    }
+
+    /// Ten of forty articles across fifty-seven hosts ended in link rubble: a tag list, "See
+    /// all", "HOME", a "Most viewed" heading. The last paragraph of prose stays, however short.
+    #[test]
+    fn link_rubble_after_the_last_prose_is_trimmed_and_prose_is_not() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(4);
+        let d = doc(&format!(
+            "<html><body><article><p>{body}</p><p>We'll see.</p>\
+             <ul><li><a href=\"/t/a\">Tag A</a></li><li><a href=\"/t/b\">Tag B</a></li><li><a href=\"/t/c\">Tag C</a></li></ul>\
+             <h2>Most viewed</h2><p><a href=\"/\">HOME</a></p><hr></article></body></html>"
+        ));
+        let text = crate::render::to_text(&d, &crate::render::TextOpts::default());
+        assert!(text.trim_end().ends_with("We'll see."), "{text}");
+        assert!(
+            !text.contains("Tag A") && !text.contains("Most viewed"),
+            "{text}"
+        );
+        // Comma-separated tag links, a bold newsletter link, and an uncaptioned badge image
+        // at the foot are rubble too; the short closing sentence is not.
+        let d = doc(&format!(
+            "<html><body><article><p>{body}</p><p>We'll see.</p>\
+             <p><a href=\"/t/x\">Canada</a>, <a href=\"/t/y\">Trade war</a></p>\
+             <p><strong><a href=\"/newsletter\">Subscribe to the newsletter</a></strong></p>\
+             <img src=\"/badge.png\" alt=\"Google News\"></article></body></html>"
+        ));
+        let text = crate::render::to_text(&d, &crate::render::TextOpts::default());
+        assert!(text.trim_end().ends_with("We'll see."), "{text}");
+        assert!(!text.contains("Trade war"), "{text}");
+    }
+
+    /// Regression: a "related stories" block of dated summaries under a `related` container
+    /// became a four-post thread, because the thread detector reads the raw tree and had never
+    /// asked whether the group sat in chrome.
+    #[test]
+    fn a_dated_related_list_inside_chrome_is_not_a_thread() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(4);
+        let related = (0..4)
+            .map(|i| {
+                format!(
+                    "<div class=\"related-summary\"><span class=\"story-date\">Aug. {i}, 2023</span> \
+                     A summary of a related story, long enough to be counted as a post body by the detector.</div>"
+                )
+            })
+            .collect::<String>();
+        let d = doc(&format!(
+            "<html><body><article><p>{body}</p></article><div class=\"related\">{related}</div></body></html>"
+        ));
+        assert!(
+            !d.blocks.iter().any(|b| matches!(b, Block::Thread(_))),
+            "{:?}",
+            d.blocks
+        );
+    }
+
+    /// Regression: token matching made `advert` stop matching `advertisement`, and a
+    /// recirculation row classed `advertisement ad-below-entry-recirc` came back.
+    #[test]
+    fn advertisement_and_recirculation_vendor_classes_are_chrome() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(4);
+        let d = doc(&format!(
+            "<html><body><article><p>{body}</p>\
+             <div class=\"advertisement\"><p>Buy a thing, a sentence of sales copy long enough to pass.</p></div>\
+             <div class=\"taboola-container\"><p>From our partner, a sentence of sales copy long enough to pass.</p></div>\
+             <div class=\"trinity-tts-pb\"><strong>Getting your audio player ready, a sentence long enough.</strong></div>\
+             </article></body></html>"
+        ));
+        let text = crate::render::to_text(&d, &crate::render::TextOpts::default());
+        assert!(
+            !text.contains("Buy a thing") && !text.contains("From our partner"),
+            "{text}"
+        );
+        assert!(!text.contains("audio player ready"), "{text}");
     }
 }

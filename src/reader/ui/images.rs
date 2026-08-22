@@ -205,8 +205,24 @@ enum Snapshot {
 /// One line, because no dimensions live in `ir::Image`, so a tall placeholder would reserve
 /// the wrong box and shift the page when it filled. One line shifts by almost nothing, and a
 /// revisit reserves the right box from [`ImageStore::reserved`].
+/// The first [`ALT_SHOWN`] characters of an alt, cut at a word and marked.
+fn short_alt(alt: &str) -> String {
+    if alt.chars().count() <= ALT_SHOWN {
+        return alt.to_owned();
+    }
+    let cut: String = alt.chars().take(ALT_SHOWN).collect();
+    let cut = cut.rsplit_once(' ').map(|(h, _)| h).unwrap_or(&cut);
+    format!("{cut}\u{2026}")
+}
+
+/// Alt text beyond this is read as a caption would be, which is not what a placeholder line
+/// is for; the full alt stays in the IR and in the caption if the page has one.
+const ALT_SHOWN: usize = 90;
+
 pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
-    let alt = img.alt.as_deref().unwrap_or("").trim();
+    let alt_full = img.alt.as_deref().unwrap_or("").trim();
+    let alt_short = short_alt(alt_full);
+    let alt = alt_short.as_str();
     let host = super::inline_ui::image_host(img, &ctx.base);
     let pal = ctx.pal;
 

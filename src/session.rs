@@ -18,15 +18,30 @@ use crate::fetch::{self, FetchError, Fetcher, Limits, Referer, Truncation};
 use crate::{html, ir};
 use url::Url;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadOptions {
-    /// Apply the builtin rewrite table. `--no-rewrite` and the reader's `R` clear it.
+    /// Apply the builtin rewrite table. `--no-rewrite` and the reader's `Shift+R` clear it.
     pub rewrite: bool,
+    /// Apply the builtin profile table to the page that arrives. `--no-profile` and the
+    /// reader's `Shift+R` clear it.
+    pub profile: bool,
 }
 
 impl Default for LoadOptions {
     fn default() -> Self {
-        Self { rewrite: true }
+        Self {
+            rewrite: true,
+            profile: true,
+        }
     }
+}
+
+impl LoadOptions {
+    /// Neither table: the page as the host sent it, read by the extractor unaided.
+    pub const BARE: LoadOptions = LoadOptions {
+        rewrite: false,
+        profile: false,
+    };
 }
 
 /// Emitted *before* the request is dispatched. Charter point 4 is unconditional: a fetch that
@@ -69,6 +84,10 @@ pub struct Provenance {
     pub hops: Vec<Url>,
     pub cookie_attempts: usize,
     pub truncation: Truncation,
+    /// What the site profile did to the page, if one applied. `None` under `--no-profile` or
+    /// for a host with no profile. Not in `Display`: the CLI prints it on its own line, so the
+    /// provenance line stays what it was.
+    pub profile: Option<crate::profile::ProfileReport>,
 }
 
 impl std::fmt::Display for Provenance {
@@ -135,6 +154,7 @@ impl Provenance {
             hops: vec![],
             cookie_attempts: 2,
             truncation: Truncation::Complete,
+            profile: None,
         }
     }
 }
@@ -256,8 +276,14 @@ impl Session {
         notify: &mut dyn FnMut(&Rewrite),
     ) -> Result<Loaded, LoadError> {
         let f = self.fetch_page(requested, opts, notify)?;
-        let doc = html::extract(&f.source, &f.resp.final_url);
-        let prov = f.provenance(requested, doc.text_len());
+        let (host, profile) = f.profile(opts);
+        let x = html::extract_with_profile(&f.source, &f.resp.final_url, profile);
+        let report = x.profile.map(|mut r| {
+            r.host = host.unwrap_or_default().to_owned();
+            r
+        });
+        let doc = x.doc;
+        let prov = f.provenance(requested, doc.text_len(), report);
         Ok(Loaded { doc, prov })
     }
 
@@ -271,8 +297,12 @@ impl Session {
         notify: &mut dyn FnMut(&Rewrite),
     ) -> Result<(html::Explanation, Provenance), LoadError> {
         let f = self.fetch_page(requested, opts, notify)?;
-        let why = html::explain(&f.source, &f.resp.final_url);
-        let prov = f.provenance(requested, why.text_len);
+        let (host, profile) = f.profile(opts);
+        let mut why = html::explain_with_profile(&f.source, &f.resp.final_url, profile);
+        if let Some(r) = &mut why.profile {
+            r.host = host.unwrap_or_default().to_owned();
+        }
+        let prov = f.provenance(requested, why.text_len, why.profile.clone());
         Ok((why, prov))
     }
 
@@ -285,7 +315,7 @@ impl Session {
         notify: &mut dyn FnMut(&Rewrite),
     ) -> Result<Fetched, LoadError> {
         let url = if opts.rewrite {
-            crate::rewrite::apply(requested)
+            crate::sites::apply(requested)
         } else {
             requested.clone()
         };
@@ -332,7 +362,27 @@ struct Fetched {
 }
 
 impl Fetched {
-    fn provenance(self, requested: &Url, chars: usize) -> Provenance {
+    /// The profile for the page that arrived, keyed on the final URL: a profile describes
+    /// bytes in hand, and the rewrite table has already had its say on the entry URL.
+    fn profile(
+        &self,
+        opts: &LoadOptions,
+    ) -> (Option<&'static str>, &'static crate::profile::Profile) {
+        if !opts.profile {
+            return (None, &crate::profile::Profile::NONE);
+        }
+        match crate::sites::profile_for(&self.resp.final_url) {
+            Some((host, p)) => (Some(host), p),
+            None => (None, &crate::profile::Profile::NONE),
+        }
+    }
+
+    fn provenance(
+        self,
+        requested: &Url,
+        chars: usize,
+        profile: Option<crate::profile::ProfileReport>,
+    ) -> Provenance {
         // The bounce is usually to a sibling of the requested host rather than to that host
         // itself, so comparing against the *request* would miss the common case.
         let rule_appears_dead =
@@ -349,6 +399,7 @@ impl Fetched {
             hops: self.resp.hops,
             cookie_attempts: self.resp.cookie_attempts,
             truncation: self.resp.truncation,
+            profile,
         }
     }
 }
@@ -505,5 +556,52 @@ mod tests {
             to: Url::parse("https://old.reddit.com/r/rust/x").unwrap(),
         };
         assert_eq!(n.to_string(), "[rewrote reddit.com -> old.reddit.com]");
+    }
+
+    /// Every shipped profile, run over its own fixture with and without the profile: every
+    /// field matched, and the document changed. A profile that no longer does anything on the
+    /// markup it was written for fails here before it ships stale.
+    #[test]
+    fn every_profile_earns_its_keep() {
+        for p in crate::sites::PROFILES {
+            let url = Url::parse(&format!(
+                "https://{}{}",
+                p.host,
+                p.path_contains.unwrap_or("/")
+            ))
+            .unwrap();
+            let plain = html::extract(p.fixture, &url);
+            let x = html::extract_with_profile(p.fixture, &url, &p.profile);
+            let report = x.profile.unwrap_or_else(|| panic!("{}: no report", p.host));
+            for f in &report.fields {
+                assert!(
+                    matches!(f.outcome, crate::profile::Outcome::Matched(_)),
+                    "{}: {} {}",
+                    p.host,
+                    f.field,
+                    f.outcome
+                );
+            }
+            assert_ne!(
+                serde_json::to_string(&plain).unwrap(),
+                serde_json::to_string(&x.doc).unwrap(),
+                "{}: the profile changed nothing on its fixture",
+                p.host
+            );
+            // And the lookup reaches it.
+            assert!(
+                crate::sites::profile_for(&url).is_some_and(|(h, _)| h == p.host),
+                "{}: profile_for does not find it at {url}",
+                p.host
+            );
+        }
+    }
+
+    #[test]
+    fn bare_options_apply_neither_table_and_the_default_applies_both() {
+        let bare = LoadOptions::BARE;
+        let dflt = LoadOptions::default();
+        assert_eq!((bare.rewrite, bare.profile), (false, false));
+        assert_eq!((dflt.rewrite, dflt.profile), (true, true));
     }
 }

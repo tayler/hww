@@ -1,7 +1,8 @@
 use anyhow::Result;
 use hww::{
-    render, rewrite, session,
+    render, session,
     session::{LoadOptions, Session},
+    sites,
 };
 
 fn main() -> Result<()> {
@@ -16,6 +17,7 @@ fn main() -> Result<()> {
             // starts with a dash.
             "--" if !end_of_flags => end_of_flags = true,
             "--no-rewrite" if !end_of_flags => opts.rewrite = false,
+            "--no-profile" if !end_of_flags => opts.profile = false,
             // `show_links` had no caller until this flag: the GUI marks a link by drawing
             // it, and a text renderer that never prints an href leaves the CLI unable to
             // show, or check, what the extractor recovered.
@@ -25,7 +27,11 @@ fn main() -> Result<()> {
             // field came from. What a page is triaged with.
             "--why" if !end_of_flags => why = true,
             "--show-rewrites" if !end_of_flags => {
-                print!("{}", rewrite::describe());
+                print!("{}", sites::describe_rewrites());
+                return Ok(());
+            }
+            "--show-profiles" if !end_of_flags => {
+                print!("{}", sites::describe_profiles());
                 return Ok(());
             }
             // Without this arm a mistyped flag is silently fetched as if it were the URL.
@@ -43,7 +49,9 @@ fn main() -> Result<()> {
         }
     }
     let Some(arg) = target else {
-        eprintln!("usage: hww [--links] [--why] [--no-rewrite] [--show-rewrites] <url>");
+        eprintln!(
+            "usage: hww [--links] [--why] [--no-rewrite] [--no-profile] [--show-rewrites] [--show-profiles] <url>"
+        );
         std::process::exit(2);
     };
 
@@ -54,12 +62,19 @@ fn main() -> Result<()> {
     if why {
         let (why, prov) = session.explain(&requested, &opts, &mut notify)?;
         eprintln!("{prov}");
+        if let Some(r) = &prov.profile {
+            eprintln!("{r}");
+        }
         print!("{why}");
         return Ok(());
     }
     let loaded = session.load(&requested, &opts, &mut notify)?;
 
     eprintln!("{}", loaded.prov);
+    // Charter point 5 for profiles: what the profile did, on stderr, after the page.
+    if let Some(r) = &loaded.prov.profile {
+        eprintln!("{r}");
+    }
     print!("{}", render::to_text(&loaded.doc, &text));
     Ok(())
 }

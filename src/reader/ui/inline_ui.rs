@@ -376,7 +376,7 @@ fn link_ui(
             ui.close();
         }
         if ui.button("Open without rewrite").clicked() {
-            ctx.act(Action::FollowWithoutRewrite(href.to_owned()));
+            ctx.act(Action::FollowBare(href.to_owned()));
             ui.close();
         }
     });

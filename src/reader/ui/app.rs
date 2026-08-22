@@ -114,9 +114,9 @@ enum Page {
     Failed {
         url: Url,
         error: LoadError,
-        /// Whether the attempt that failed applied rewrite rules, so Retry repeats the same
-        /// request rather than quietly making a different one.
-        rewrite: bool,
+        /// The options the failed attempt used, so Retry repeats the same request rather
+        /// than quietly making a different one.
+        opts: LoadOptions,
     },
 }
 
@@ -233,10 +233,11 @@ pub struct ReaderApp {
     /// Re-centring every frame the match is on screen would make the page unscrollable while
     /// find is open.
     find_scroll: bool,
-    /// Whether the *default* for this session applies rewrites. `--no-rewrite` clears it.
-    rewrite: bool,
-    /// Whether the navigation in flight applied them, which `R` makes differ from the default.
-    last_rewrite: bool,
+    /// The *default* options for this session. `--no-rewrite` and `--no-profile` clear a
+    /// table each.
+    opts: LoadOptions,
+    /// The options of the navigation in flight, which `Shift+R` makes differ from the default.
+    last_opts: LoadOptions,
     /// One-shot: block index to bring into view on the next frame.
     scroll_to_block: Option<usize>,
     /// One-shot: pixels to scroll by, from `j`/`k`/`Space`.
@@ -356,8 +357,8 @@ impl ReaderApp {
             find_current: 0,
             find_total: 0,
             find_scroll: false,
-            rewrite: launch.rewrite,
-            last_rewrite: launch.rewrite,
+            opts: launch.opts,
+            last_opts: launch.opts,
             scroll_to_block: None,
             scroll_delta: 0.0,
             scroll_offset: None,
@@ -375,7 +376,7 @@ impl ReaderApp {
             focus_find: false,
         };
         match launch.start {
-            Some(url) => app.navigate(url, app.rewrite, true),
+            Some(url) => app.navigate(url, app.opts, true),
             // With nothing to read, the URL bar is the only sensible thing on screen, so it is
             // also the only sensible thing to be typing into.
             None => {
@@ -394,7 +395,7 @@ impl ReaderApp {
     /// [`ReaderApp::commit`]'s, and they run when a document actually takes the column. Doing
     /// them at dispatch is what used to clear the textures, collapse state, and scroll offset of
     /// the page the reader was still looking at.
-    fn navigate(&mut self, url: Url, rewrite: bool, push: bool) {
+    fn navigate(&mut self, url: Url, opts: LoadOptions, push: bool) {
         let req = self.net.mint();
         // The page on screen stays on screen. Taken rather than borrowed so a chain of
         // abandoned loads, Back pressed twice inside one slow fetch, carries the same page
@@ -408,7 +409,7 @@ impl ReaderApp {
             // A failure owns the viewport already; there is nothing under it to keep.
             Page::Idle | Page::Failed { .. } => None,
         };
-        self.last_rewrite = rewrite;
+        self.last_opts = opts;
         self.current = Some(req);
         self.rewrite_notice = None;
         self.pending_link = None;
@@ -428,16 +429,12 @@ impl ReaderApp {
             from,
             pushed: push,
         };
-        self.net.submit(Job::Load {
-            req,
-            url,
-            opts: LoadOptions { rewrite },
-        });
+        self.net.submit(Job::Load { req, url, opts });
     }
 
     /// Follow a link. The scheme gate runs here, before anything is dispatched: one place, so
     /// no widget can route around it.
-    fn follow(&mut self, href: &str, rewrite: bool) {
+    fn follow(&mut self, href: &str, opts: LoadOptions) {
         match session::classify_link(href) {
             Target::Navigate(url) => {
                 // A `#fragment` on the page already open is a scroll, not a fetch.
@@ -447,7 +444,7 @@ impl ReaderApp {
                     self.jump_to_fragment(fragment);
                     return;
                 }
-                self.navigate(url, rewrite, true);
+                self.navigate(url, opts, true);
             }
             Target::OfferCopy { url, note } => {
                 self.copy(&url);
@@ -492,21 +489,21 @@ impl ReaderApp {
         }
     }
 
-    fn reload(&mut self, rewrite: bool) {
+    fn reload(&mut self, opts: LoadOptions) {
         if let Some(url) = self.history.current().cloned() {
-            self.navigate(url, rewrite, false);
+            self.navigate(url, opts, false);
         }
     }
 
     fn go_back(&mut self) {
         if let Some(url) = self.history.back().cloned() {
-            self.navigate(url, self.rewrite, false);
+            self.navigate(url, self.opts, false);
         }
     }
 
     fn go_forward(&mut self) {
         if let Some(url) = self.history.forward().cloned() {
-            self.navigate(url, self.rewrite, false);
+            self.navigate(url, self.opts, false);
         }
     }
 
@@ -611,7 +608,7 @@ impl ReaderApp {
                     self.page = Page::Failed {
                         url,
                         error,
-                        rewrite: self.last_rewrite,
+                        opts: self.last_opts,
                     };
                 }
                 Msg::Image {
@@ -658,7 +655,7 @@ impl ReaderApp {
                                     "a worker failed while handling this request",
                                 ),
                             )),
-                            rewrite: self.last_rewrite,
+                            opts: self.last_opts,
                         };
                     }
                 }
@@ -721,7 +718,7 @@ impl ReaderApp {
                 self.page = Page::Failed {
                     url,
                     error,
-                    rewrite: self.last_rewrite,
+                    opts: self.last_opts,
                 }
             }
         }
@@ -832,8 +829,8 @@ impl ReaderApp {
             self.scroll_offset = Some(self.max_scroll);
         }
         if k(Modifiers::SHIFT, Key::R) {
-            self.reload(false);
-            self.flash("reloaded without rewrite rules".to_owned());
+            self.reload(LoadOptions::BARE);
+            self.flash("reloaded bare: no rewrite rule, no site profile".to_owned());
         }
         if k(Modifiers::SHIFT, Key::I) {
             self.load_all_images(ctx);
@@ -893,7 +890,7 @@ impl ReaderApp {
             self.go_back();
         }
         if k(Modifiers::NONE, Key::R) {
-            self.reload(self.rewrite);
+            self.reload(self.opts);
         }
         if k(Modifiers::NONE, Key::T) {
             self.chrome.outline_open = !self.chrome.outline_open;
@@ -953,7 +950,7 @@ impl ReaderApp {
         if k(Modifiers::NONE, Key::Enter)
             && let Some(h) = self.focused_href.clone()
         {
-            self.follow(&h, self.rewrite);
+            self.follow(&h, self.opts);
         }
     }
 
@@ -1383,7 +1380,7 @@ impl ReaderApp {
                 format!("https://{typed}")
             };
             match Url::parse(&candidate) {
-                Ok(url) => self.navigate(url, self.rewrite, true),
+                Ok(url) => self.navigate(url, self.opts, true),
                 Err(e) => {
                     self.flash(format!("{typed} is not a usable address ({e})"));
                     keep = true;
@@ -1691,13 +1688,16 @@ impl ReaderApp {
 
         // Acting is deferred past the borrow, the same shape `status_strip` uses for
         // `StripAction`: widgets record an intent, `app` acts on it once per frame.
-        let (Some(b), Page::Failed { url, rewrite, .. }) = (pressed, &self.page) else {
+        let (Some(b), Page::Failed { url, opts, .. }) = (pressed, &self.page) else {
             return;
         };
-        let (url, rewrite) = (url.to_string(), *rewrite);
+        let (url, opts) = (url.to_string(), *opts);
         match b {
-            Button::Retry => self.reload(rewrite),
-            Button::RetryWithoutRewrite => self.reload(false),
+            Button::Retry => self.reload(opts),
+            Button::RetryWithoutRewrite => self.reload(LoadOptions {
+                rewrite: false,
+                ..opts
+            }),
             Button::CopyUrl => {
                 self.copy(&url);
                 self.flash("URL copied".to_owned());
@@ -1839,8 +1839,8 @@ impl ReaderApp {
 
     fn apply(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            Action::Follow(href) => self.follow(&href, self.rewrite),
-            Action::FollowWithoutRewrite(href) => self.follow(&href, false),
+            Action::Follow(href) => self.follow(&href, self.opts),
+            Action::FollowBare(href) => self.follow(&href, LoadOptions::BARE),
             Action::Copy(text) => {
                 self.copy(&text);
                 self.flash(format!("copied {text}"));
@@ -1912,7 +1912,10 @@ const HELP: &[(&str, &str)] = &[
     ("Tab / Shift+Tab", "cycle links · Enter follows"),
     ("Alt+Left / Backspace", "back"),
     ("Alt+Right", "forward · the mouse side buttons do both"),
-    ("r / R", "reload · reload without rewrite rules"),
+    (
+        "r / R",
+        "reload · reload bare: no rewrite rule, no site profile",
+    ),
     ("i / I", "load focused image · load all, naming their hosts"),
     ("t", "outline"),
     ("p", "page info: how this page arrived"),
@@ -2038,7 +2041,7 @@ mod tests {
         let mut failed = Page::Failed {
             url: Url::parse("https://example.com/a").expect("a fixture URL parses"),
             error: LoadError::Fetch(crate::fetch::FetchError::LikelyBlocked),
-            rewrite: false,
+            opts: LoadOptions::BARE,
         };
         assert!(failed.take_shown().is_none());
     }

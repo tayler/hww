@@ -100,7 +100,23 @@ pub fn block_ui(ui: &mut Ui, b: &ir::Block, ctx: &mut RenderCtx<'_>) {
         }
         ir::Block::Code { lang, text } => code_ui(ui, lang.as_deref(), text, ctx),
         ir::Block::Figure { image, caption } => {
-            super::images::placeholder(ui, image, ctx);
+            // A caption that repeats the alt is drawn once, as the caption: the placeholder
+            // says "[image]" and the host, and the words follow in the caption face.
+            let caption_is_alt = caption.as_ref().is_some_and(|c| {
+                image
+                    .alt
+                    .as_deref()
+                    .is_some_and(|a| a.trim() == ir::plain_text(c).trim())
+            });
+            if caption_is_alt {
+                let bare = ir::Image {
+                    src: image.src.clone(),
+                    alt: None,
+                };
+                super::images::placeholder(ui, &bare, ctx);
+            } else {
+                super::images::placeholder(ui, image, ctx);
+            }
             if let Some(c) = caption {
                 let set = Setting::dim(ctx.opts, &ctx.pal);
                 runs(ui, c, &set, ctx);

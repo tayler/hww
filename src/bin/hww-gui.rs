@@ -8,14 +8,19 @@ use hww::reader::{settings, ui};
 
 fn main() -> eframe::Result {
     let mut target = None;
-    let mut rewrite = true;
+    let mut opts = hww::session::LoadOptions::default();
     let mut end_of_flags = false;
     for a in std::env::args().skip(1) {
         match a.as_str() {
             "--" if !end_of_flags => end_of_flags = true,
-            "--no-rewrite" if !end_of_flags => rewrite = false,
+            "--no-rewrite" if !end_of_flags => opts.rewrite = false,
+            "--no-profile" if !end_of_flags => opts.profile = false,
             "--show-rewrites" if !end_of_flags => {
-                print!("{}", hww::rewrite::describe());
+                print!("{}", hww::sites::describe_rewrites());
+                return Ok(());
+            }
+            "--show-profiles" if !end_of_flags => {
+                print!("{}", hww::sites::describe_profiles());
                 return Ok(());
             }
             s if !end_of_flags && s.starts_with("--") => {
@@ -56,6 +61,6 @@ fn main() -> eframe::Result {
         start,
         settings,
         settings_note,
-        rewrite,
+        opts,
     })
 }

@@ -205,6 +205,8 @@ fn best_group<'a>(
             let median_links = densities[densities.len() / 2];
             let rejected = if cards.holds(&g[0]) {
                 Some("a list of story cards, not posts")
+            } else if crate::html::in_chrome(&g[0]) {
+                Some("inside chrome")
             } else if median < MIN_MEDIAN_TEXT {
                 Some("median text too short")
             } else if attributed * 2 < g.len() {

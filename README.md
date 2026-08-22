@@ -17,14 +17,14 @@ A quiet reading experience.
 Working end to end for HTML, as a CLI that prints text and as a keyboard-driven reading GUI:
 
 ```
-cargo run -- [--why] [--no-rewrite] [--show-rewrites] <url>    # text to stdout
+cargo run -- [--why] [--no-rewrite] [--no-profile] <url>       # text to stdout
 cargo run --features gui --bin hww-gui -- [--no-rewrite] <url> # the reader
 ```
 
 | Piece | State |
 |---|---|
 | `fetch` | Privacy rules enforced in code; no cookie jar exists at compile time |
-| `rewrite` | Per-site rules; builtin table only, every rewrite reported on stderr |
+| `sites` | Per-site rules: a rewrite table and a profile table, builtin only, every application reported |
 | `html` | Parse, article extraction, IR mapping |
 | `thread` | Forum/discussion extraction (structural, not heuristic) |
 | `cards` | Story-card detection: a front page or section page as a run of entries, in place |
@@ -74,8 +74,8 @@ The reader's URL argument is optional; without one it opens empty with the URL b
 `https://`. The `hww` CLI wants a full URL, and prints the article to stdout with its
 provenance on stderr.
 
-Both binaries take `--no-rewrite` to switch off per-site rules and `--show-rewrites` to print
-the table and exit. The reader lives behind the `gui` feature because it adds one network
+Both binaries take `--no-rewrite` and `--no-profile` to switch off a per-site table, and
+`--show-rewrites` / `--show-profiles` to print one and exit. The reader lives behind the `gui` feature because it adds one network
 capability the CLI does not have, loading an image on an explicit click; in the `hww` binary
 that code is not compiled at all.
 
@@ -97,7 +97,7 @@ Against 150 real URLs sampled from browsing history ([full findings](docs/phase0
 - On the one JS-gated discussion site in that sample: **0 chars, then 8,331** once a per-site
   rule reaches the operator's own server-rendered domain
 
-## Rewrite rules
+## Site rules
 
 Some sites serve a fully server-rendered alternate of themselves. Phase 0 measured one such
 site among its JS-only losses, which is why per-site rules are a feature rather than a hack.
@@ -111,7 +111,19 @@ or hangs cannot swallow the notice. Third-party frontend proxies are expressible
 will never be builtin: they move your reading to an unrelated operator, which is the thing
 this client exists not to do.
 
-`src/rewrite.rs` is the only file in the crate that contains a hostname, and the module graph
+The second table is **profiles**: what a host's pages need beyond the generic extractor, as
+data. Today that is one CSS selector per host, `strip`, for in-body chrome the extractor cannot
+tell from prose (a "listen to this article" banner, a "see all topics" link, a lead gallery's
+duplicate captions), measured on the top-ten US news sites after every generic fix had landed.
+A profile is applied to the bytes that arrived, before anything is scored; it is refused when
+it would remove most of the page; and every field reports what it did, on stderr after the
+page, in `--why`, and in the page-info panel, so a profile that has gone stale says so. Each
+shipped profile carries a fixture that the tests run, and `docs/sites-checked.md` lists every
+host the extractor has been measured against, with the outcome, so the same host is not
+triaged twice. `--show-profiles` prints the table,
+`--no-profile` turns it off, and `Shift+R` in the reader reloads bare: no rewrite, no profile.
+
+`src/sites.rs` is the only file in the crate that contains a hostname, and the module graph
 keeps it that way: it imports no extractor, and nothing imports it but `src/session.rs`, the
 one function that owns the pipeline and reports the rewrite before it dispatches.
 
@@ -119,7 +131,8 @@ one function that owns the pipeline and reports the rewrite before it dispatches
 
     src/ir.rs      the IR (no styling)
     src/fetch.rs   HTTP with privacy as code
-    src/rewrite.rs per-site rules (a JS-gated host -> its own server-rendered alternate)
+    src/profile.rs a site profile as data: selectors, outcomes, a report; no hostname
+    src/sites.rs   the two per-site tables: rewrites (entry URL) and profiles (final URL)
     src/session.rs the pipeline: rewrite -> fetch -> decode -> extract, plus provenance
     src/html.rs    HTML -> IR (article path)
     src/thread.rs  HTML -> IR (discussion path)

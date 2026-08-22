@@ -390,9 +390,22 @@ fn catalog(port: u16) -> Vec<Scene> {
         ),
         scene(
             "pageinfo",
-            "the page info panel: hops, cookies, rewrite, referer",
+            "the page info panel: hops, cookies, rewrite, profile, referer",
             vec![
                 page_with(ARTICLE_URL, ARTICLE, |p| {
+                    p.profile = Some(hww::profile::ProfileReport {
+                        host: "example.com".to_owned(),
+                        fields: vec![
+                            hww::profile::FieldReport {
+                                field: "strip",
+                                outcome: hww::profile::Outcome::Matched(2),
+                            },
+                            hww::profile::FieldReport {
+                                field: "strip",
+                                outcome: hww::profile::Outcome::Dead,
+                            },
+                        ],
+                    });
                     p.rewritten_to = Some(url("https://text.example.com/2026/the-quiet-web"));
                     p.final_url = url("https://text.example.com/2026/the-quiet-web");
                     p.hops = vec![
@@ -810,6 +823,7 @@ fn build(url: &Url, body: &str, tweak: fn(&mut Provenance)) -> Loaded {
         hops: Vec::new(),
         cookie_attempts: 0,
         truncation: Truncation::Complete,
+        profile: None,
     };
     tweak(&mut prov);
     Loaded { doc, prov }
@@ -1493,7 +1507,7 @@ fn main() -> ExitCode {
                     start: None,
                     settings,
                     settings_note: None,
-                    rewrite: true,
+                    opts: hww::session::LoadOptions::default(),
                 },
             )?;
             Ok(Box::new(Runner {

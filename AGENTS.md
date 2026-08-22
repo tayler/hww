@@ -22,8 +22,9 @@ thing that survives a run is `settings.json`.
 
 ## Commands
 
-    cargo run -- [--no-rewrite] [--show-rewrites] <url>   # fetch, extract, render one page
+    cargo run -- [--no-rewrite] [--no-profile] <url>      # fetch, extract, render one page
     cargo run -- --why <url>                              # the same fetch; print why instead
+    cargo run -- --show-rewrites / --show-profiles        # the two per-site tables
     cargo run --features gui --bin hww-gui -- <url>       # the reading GUI
     cargo run --release --features gui --bin hww-gui -- <url>   # what a long page needs
     cargo test                                            # synthetic fixtures; no network
@@ -88,7 +89,8 @@ actually moved:
 Everything funnels through the IR:
 
     main.rs ───┐
-               ├─> session.rs ─> rewrite.rs (entry URL only) ─> fetch.rs (bytes + decode)
+               ├─> session.rs ─> sites.rs (rewrite: entry URL) ─> fetch.rs (bytes + decode)
+               │        │         sites.rs (profile: final URL) ─> html.rs, as data
     reader/ ───┘        │                                              │
                         └── Notice, before dispatch                    │
                               ┌────────────────────────────────────────┴─┐
@@ -339,7 +341,19 @@ site from the path before we said a word), while the *path*, which is the real l
 sent. Reported in the page-info panel, and disableable in the settings file, accepting the
 breakage.
 
-**`src/rewrite.rs` is the only file in the crate that contains a hostname.** `html.rs` scores
+**`src/sites.rs` is the only file in the crate that contains a hostname.** It holds two tables
+keyed the same way: the rewrite rules, and the site profiles (`src/profile.rs` is the data type
+they hand to the extractor; it knows no hostname). A profile is one `strip` selector today, and
+the vocabulary grows only when a page asks: it is applied to the bytes that arrived (keyed on
+the final URL, never the request), before anything is scored; it is refused when it would
+remove most of the page; and every field reports its outcome, matched, dead, or rejected, on
+stderr, in `--why`, and in the page-info panel. `--no-profile` and the reader's `Shift+R`
+("reload bare") switch it off. Each shipped profile carries a synthetic fixture and
+`every_profile_earns_its_keep` runs it. The table is kept sorted by `host`, alphabetically, and
+the soundness test says so when it is not. `docs/sites-checked.md` is the ledger of every host
+the extractor has been measured against, with the date and the outcome: look there before
+triaging a host, add or update its row after, and `every_profile_host_is_in_the_ledger` keeps
+the two in step. `html.rs` scores
 subtrees, `thread.rs` groups siblings by class signature, `bin/corpus.rs` classifies by URL
 shape; none of them know a domain name. Nothing imports `rewrite` except `src/session.rs`, and
 `rewrite` imports no extractor. `session::load` owns the whole pipeline, so the notice is a value
@@ -378,7 +392,13 @@ and sit at `visit_count = 1`.
 
 Measured already. Do not re-propose without new measurement.
 
-**Per-site extraction hints (`Hints`, `extract_with`, `force_thread`) were built and removed.**
+**Per-site extraction hints (`Hints`, `extract_with`, `force_thread`) were built and removed;
+per-site profiles were built later, on measurement, in the opposite shape.** The hint was a
+boolean override of a measured merge. A profile (Phase 3) is data with a floor and a report: it
+was built only after `--why` triage of the top-ten US news sites, three rounds of generic fixes,
+and the front-page stage had left a pile of defects that only a selector could name (in-body
+chrome on otherwise good articles, on three public hosts), and its vocabulary is exactly that
+pile. The history stays, because its lesson is built into the mechanism:
 Forcing the thread path on a comment page looks obviously right (a comment page *is* a
 discussion), and it measured 2,254 chars against 8,331 unhinted on identical bytes. The thread
 detector finds 13 of 61 comments, because replies nest in child containers rather than sitting
@@ -399,7 +419,7 @@ in for a retry until one is measured to be needed.
 ## Testing
 
 Regression cover is synthetic `#[cfg(test)]` fixtures inside each module (`src/html.rs`,
-`src/fetch.rs`, `src/rewrite.rs`, and every module under `src/reader/` that is not `ui/`, plus
+`src/fetch.rs`, `src/sites.rs`, and every module under `src/reader/` that is not `ui/`, plus
 `ui/theme.rs`, whose `palette` takes no `egui::Context` and is therefore reachable): no
 network and no corpus, so CI can run them. The reader's split exists for this: everything
 decidable without an `egui::Context` is tested, and only chrome, widget dispatch, and texture
@@ -412,6 +432,11 @@ upload are merely compiled. Tests worth keeping named:
   safety property, which is the whole safety story of the rewrite layer.
 - `builtin_table_is_sound` guards the shipped rule table against silent rot: normalized
   hosts, no scheme downgrade, idempotence, and no unreachable rules.
+  `every_selector_in_the_table_parses_and_every_profile_is_sound` does the same for the profile
+  table, and `every_profile_earns_its_keep` (`src/session.rs`, the one module that imports
+  both `sites` and the extractor) runs each profile over its own fixture and asserts every
+  field matched and the document changed. `a_strip_that_would_remove_most_of_the_page_is_refused`
+  is the floor: a stale selector that has come to match the article is refused, not obeyed.
 - `flatten_reproduces_the_old_markdown_exactly` (`src/render.rs`) holds a verbatim copy of
   the recursive `inline_text` that `reader::inline::flatten` replaced, and runs both over every
   inline shape the extractor produces. It is the entire safety net for building the text
