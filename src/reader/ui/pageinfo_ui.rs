@@ -68,9 +68,13 @@ pub fn panel(
     open: &mut bool,
 ) {
     let font = theme::chrome_font(opts);
-    egui::Window::new("Page info")
-        .collapsible(false)
-        .resizable(false)
+    // An `Area` and not a `Window`, for the reason the help card is one: a `Window` paints its
+    // title bar from egui's own visuals rather than from the palette, which left this panel
+    // wearing a grey band no theme here chose. The title and the close button are drawn below
+    // instead, which also puts the close on the same monospace, labelled footing as the rest of
+    // the chrome; egui's own is a painted glyph.
+    egui::Area::new(egui::Id::new("hww-pageinfo-panel"))
+        .order(egui::Order::Foreground)
         // Anchored above the icon that opens it, rather than centred like the help overlay:
         // this panel is about the strip, and rising from the affordance says so. `strip_height`
         // is written by `status_strip`, which runs earlier in the same frame.
@@ -78,40 +82,66 @@ pub fn panel(
             egui::Align2::RIGHT_BOTTOM,
             egui::vec2(-8.0, -(strip_height + 8.0)),
         )
-        // Unlike the help overlay, this one is opened by a pointer, so it must be closable by
-        // one. `Esc` and `p` still work; the button is what a mouse-only reader has.
-        .open(open)
+        .constrain(true)
         .show(ctx, |ui| {
-            if rows.is_empty() {
-                ui.label(
-                    RichText::new("No page loaded.")
-                        .color(pal.dim)
-                        .font(font.clone()),
-                );
-                return;
-            }
-            egui::Grid::new("hww-pageinfo")
-                .num_columns(2)
-                .spacing([
-                    theme::snap(opts.base_size_pt),
-                    theme::snap(opts.base_size_pt * 0.4),
-                ])
+            egui::Frame::new()
+                .fill(pal.chrome_bg)
+                .stroke(egui::Stroke::new(1.0, pal.guide))
+                .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
-                    for row in rows {
-                        ui.label(RichText::new(row.label).color(pal.dim).font(font.clone()));
-                        ui.vertical(|ui| {
-                            // A URL and a redirect chain are the long values here, and both are
-                            // read left to right for a host: wrapping keeps the whole address
-                            // legible where the strip could only truncate it.
-                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                            ui.set_max_width(theme::snap(opts.base_size_pt * 26.0));
-                            ui.label(RichText::new(&row.value).color(pal.fg).font(font.clone()));
-                            if let Some(note) = &row.note {
-                                ui.label(RichText::new(note).color(pal.dim).small());
+                    ui.style_mut().override_font_id = Some(font.clone());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Page info").color(pal.dim).font(font.clone()));
+                        // Opened by a pointer, so it must be closable by one. `Esc` and `p` still work;
+                        // this is what a mouse-only reader has.
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("close").clicked() {
+                                *open = false;
                             }
                         });
-                        ui.end_row();
+                    });
+                    ui.add_space(theme::snap(opts.base_size_pt * 0.4));
+                    if rows.is_empty() {
+                        ui.label(
+                            RichText::new("No page loaded.")
+                                .color(pal.dim)
+                                .font(font.clone()),
+                        );
+                        return;
                     }
+                    egui::Grid::new("hww-pageinfo")
+                        .num_columns(2)
+                        .spacing([
+                            theme::snap(opts.base_size_pt),
+                            theme::snap(opts.base_size_pt * 0.4),
+                        ])
+                        .show(ui, |ui| {
+                            for row in rows {
+                                ui.label(
+                                    RichText::new(row.label).color(pal.dim).font(font.clone()),
+                                );
+                                ui.vertical(|ui| {
+                                    // A URL and a redirect chain are the long values here, and both are
+                                    // read left to right for a host: wrapping keeps the whole address
+                                    // legible where the strip could only truncate it.
+                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                                    ui.set_max_width(theme::snap(opts.base_size_pt * 26.0));
+                                    ui.label(
+                                        RichText::new(&row.value).color(pal.fg).font(font.clone()),
+                                    );
+                                    if let Some(note) = &row.note {
+                                        // `chrome_font`, not `.small()`: every other row here already
+                                        // asks for it by name, and after `Small` moved to the page's
+                                        // family this was the one proportional line in a monospace
+                                        // panel.
+                                        ui.label(
+                                            RichText::new(note).color(pal.dim).font(font.clone()),
+                                        );
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        });
                 });
         });
 }

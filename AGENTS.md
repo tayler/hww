@@ -131,14 +131,49 @@ or layout idiom with the page.** This is the no-styling rule one layer out. Ever
 reader reports *about* a page is a band drawn by `reader::ui::notice_ui::band`, full-bleed across
 the central panel, which is the one property an `ir::Block` cannot have: the column is a fixed
 measure and a band is not. That is the load-bearing signal, because it survives a screenshot, a
-monochrome eye, and a theme nobody has designed yet; `notice::MARK` is the second. Colour is
-support, and `theme::notice_fill_clears_every_page_colour` holds the floor, because exact
-inequality means nothing when two roles sit five units apart, which is what `chrome_bg` and
-`code_bg` do. A band borrows no page idiom: not `heading_font`, not `body_font`, not the quote
-rule, not the code frame. The three inline exceptions (`[image]`, `Block::Embed`, "(N replies
-hidden)") are *positional*, marking one thing at one place, which a full-bleed band cannot do;
-they carry the bracket convention instead. Wording lives in `src/reader/notice.rs`, outside
-`ui/`, so the fast CI job tests it.
+monochrome eye, and a theme nobody has designed yet; `notice::MARK` is the second, and
+`Severity::word` is the third, because a hue can be missed and a printed word cannot. Colour is
+support, and `theme::every_notice_ink_is_legible_on_its_own_ground` holds the floor by walking
+`notice_ink` rather than by listing pairs. A band borrows no page idiom: not `heading_font`, not
+`body_font`, not the quote rule, not the code frame. Only `Caution` has a ground of its own:
+`Quiet` and `Failure` fill the viewport, so they have no page underneath to be a different
+surface *from*, and a notice that is the whole viewport needs no mark to be told apart from a
+page that is not there. The three inline
+exceptions (`[image]`, `Block::Embed`, "(N replies hidden)") are *positional*, marking one thing
+at one place, which a full-bleed band cannot do; they carry the bracket convention instead.
+Wording lives in `src/reader/notice.rs`, outside `ui/`, so the fast CI job tests it.
+
+**The form carries no colour, and a palette carries nothing else.** Layout and type change on a
+different clock from colour, and mixing them meant adding a theme required reading layout code
+while colour drifted unwatched: `dim` was under AA on every ground but the page for as long as
+the euclidean-distance test that was supposed to catch it existed. Form is the measure, the
+family roles, the type scale, band geometry, panel separation, and which severity gets a heading.
+A palette is thirteen colours and `dark_mode`; a contrast floor is not a colour, so it is
+`Theme::floor()` and not a `Palette` field.
+
+The chrome is **monospace and labelled**, the page is proportional and gets no chrome fills. One
+family is what tells a reader which of the two is speaking. `TextStyle::Small` therefore maps to
+`theme::small_font`, which is the chrome *size* in the *page's* family, because `.small()` is page
+text at most of its call sites; chrome asks for `theme::chrome_font` by name. The rule: the page's
+words take `Small`, the reader's take `chrome_font`.
+
+**A docked panel takes `bg` and one `guide` edge; only a surface that floats over the page takes
+`chrome_bg`.** Position already separates a docked panel from the page, and a fill on top of
+position says it twice. `chrome_bg` has exactly four consumers, all floating: the hover-URL strip,
+the page-info panel, the help card, and `visuals.window_fill`, which dresses egui's tooltips.
+Anything else reaching for it is a docked surface that has drifted. `rule` and `guide` are two
+roles for a reason: `rule` is decoration (a separator, the code frame, the window stroke) and
+measures 1.41 / 1.41 / 1.48 against `bg`, while `guide` identifies structure (the blockquote bar,
+the thread indent, a panel edge, a band hairline, the border of a button or text field at rest)
+and is held to 3:1 against both `bg` and `chrome_bg`. Firming every divider in order to fix two
+bars was the alternative, and it was worse.
+
+A control at rest has no fill, so its border is the whole affordance and it is a `guide`. The
+failure screen is where that bites: Retry, Retry without rewrite, and Copy URL are the only
+controls the reader has left, and `rule` had them at 1.41. Text contrast is not the lever, and
+reaching for it is the wrong instinct: the labels take `override_text_color`, which is `fg`, the
+highest-contrast ink in every palette. This is WCAG 1.4.11 non-text contrast, and the boundary is
+the thing measured.
 
 **Privacy is compile-time absence, not policy.** `reqwest` is built with
 `default-features = false`, so no cookie jar exists: the capability is absent, not merely
@@ -276,14 +311,22 @@ upload are merely compiled. Tests worth keeping named:
   embedded-font gap. The prose rule below existed the whole time and two strings shipped with
   `→` anyway, one of them a heading, tofu from the day it was written. Prose does not fail a
   build.
-- `notice_fill_clears_every_page_colour` (`src/reader/ui/theme.rs`): the executable form of the
-  notice/page separation. Argued rather than assumed: `theme::palette` takes no `egui::Context`,
-  unlike `apply`, `measure_px`, and `system_is_dark`, so it is reachable by the directory's own
-  "split by what a test can reach" rule. It and
-  `a_failed_image_still_reports_what_its_request_disclosed` (`src/reader/ui/images.rs`, where
-  `counts` and `fail` take no `Context` but `insert` uploads a texture) are **the only two tests
-  under `ui/`**, and both are admitted on that same argument rather than by exception. A third
-  needs the argument made again, not the precedent cited.
+- The contrast tests in `src/reader/ui/theme.rs`: `every_palette_meets_its_floor`,
+  `every_notice_ink_is_legible_on_its_own_ground`, `a_caution_band_is_a_different_surface`,
+  `guide_is_visible_where_it_is_drawn`, and `chrome_is_monospace`. They measure WCAG 2.2 relative
+  luminance and they replaced `notice_fill_clears_every_page_colour`, which measured euclidean RGB
+  against a floor of 24 and passed a band at 47.6 / 35.9 / 48.0 that was 1.29 / 1.19 / 1.34 in
+  luminance. That is how a palette drifts under a passing test, and it is why the metric matters
+  more than the threshold. `every_notice_ink_is_legible_on_its_own_ground` walks `notice_ink`
+  rather than listing pairs: `dim` is 3.10 on Light's `caution_bg`, so a hand-written list cannot
+  catch `aside` reverting to it.
+
+  These are admitted under `ui/` on the argument, not the precedent: `palette`, `notice_ink`,
+  `chrome_font`, and `small_font` take no `egui::Context`, unlike `apply`, `measure_px`, and
+  `system_is_dark`, so they are reachable by the directory's own "split by what a test can reach"
+  rule. `a_failed_image_still_reports_what_its_request_disclosed` (`src/reader/ui/images.rs`,
+  where `counts` and `fail` take no `Context` but `insert` uploads a texture) is admitted the same
+  way. A further one needs the argument made again, not this paragraph cited.
 - `a_pathologically_deep_thread_builds_and_traverses_completely`
   (`src/reader/thread_tree.rs`): a hostile thread is untrusted input, so the traversal is
   iterative.
@@ -351,17 +394,22 @@ everywhere else. Back and forward are the one place the platforms genuinely disa
 
 Real, and worth knowing before re-discovering them:
 
-- **egui's proportional stack has no arrows at all**, so `→` renders as tofu and no chrome
-  string may contain one. `no_notice_contains_an_arrow` enforces that rather than leaving it
-  remembered: the rule was stated here in prose while two strings shipped with `→` in them, one
-  of them a failure heading. Prime marks (`′ ″`) are missing too, so coordinates on some pages
-  read as boxes. The fix is the same embedded-face work that `Strong` needs.
+- **Arrows are a family gap, not a build gap.** All four arrows and the prime marks are in Hack,
+  and none is in Ubuntu-Light, NotoEmoji, or emoji-icon-font; `Proportional` resolves to the
+  latter three and never reaches Hack. So `→` in a proportional label is tofu and the same
+  character in a `.monospace()` one is fine, which is why the help table's arrows always
+  rendered.
 
-  This entry used to say `←`, `↑`, and `↓` were fine. Parsing the four embedded cmaps says
-  otherwise: **all four arrows are in Hack and none is in Ubuntu-Light, NotoEmoji, or
-  emoji-icon-font.** The help table's arrows render only because that column is drawn
-  `.monospace()`; the same characters in a proportional label are tofu, and its asymmetry was
-  never buying what it looked like it was buying.
+  Since the chrome moved to `Monospace`, the ban on `→` in a chrome string is **policy, not
+  necessity**. It stays: no string wants an arrow today, and lifting it is a separate decision.
+  `no_notice_contains_an_arrow` and `chrome_is_monospace` are the two halves of that fact and are
+  written to be read together. The gap that remains is real for *page* text, which is
+  proportional: prime marks on a page still read as boxes, and the fix is the embedded-face work
+  that `Strong` needs.
+
+  This entry used to say the four arrows differed from each other. They do not; parsing the four
+  embedded cmaps says all of them are in exactly one face. The asymmetry was never buying what it
+  looked like it was buying.
 - **No circled `i`, and no info glyph worth the name.** `ⓘ` (U+24D8) is in none of the four
   faces `default_fonts` embeds, and the only info glyph any of them carries is NotoEmoji's `ℹ`
   (U+2139), a bare serif *i* with no circle. `reader::ui::pageinfo_ui::icon` paints two arcs

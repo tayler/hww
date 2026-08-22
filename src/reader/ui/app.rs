@@ -890,12 +890,23 @@ impl ReaderApp {
     fn status_strip(&mut self, ui: &mut Ui, pal: &theme::Palette) {
         let mut action: Option<StripAction> = None;
         let strip = egui::Panel::bottom("hww-status")
+            // egui paints its own separator on a panel's inner edge, from
+            // `noninteractive.bg_stroke`, and reserves outer-margin room for it. That is `rule`,
+            // and next to `panel_edge`'s `guide` it made every docked panel a two-tone double
+            // hairline. One edge, and it is the one this crate chose.
+            .show_separator_line(false)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.chrome_bg)
+                    .fill(pal.bg)
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show(ui, |ui| {
+                // Every word in this panel is the reader's, so the family is set once here
+                // rather than at each label. Only `RichText::font` still wins: egui resolves
+                // `override_font_id` *before* a `TextStyle`, so `.small()` and `.monospace()`
+                // lose to it, and the labels that also set a colour name `chrome_font` outright
+                // rather than relying on a style.
+                ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
@@ -954,6 +965,7 @@ impl ReaderApp {
                     });
                 });
             });
+        panel_edge(ui, strip.response.rect, Side::Top, pal);
         self.strip_height = strip.response.rect.height();
         match action {
             Some(StripAction::Back) => self.go_back(),
@@ -1007,6 +1019,8 @@ impl ReaderApp {
                     .fill(pal.chrome_bg)
                     .inner_margin(egui::Margin::symmetric(8, 4))
                     .show(ui, |ui| {
+                        ui.style_mut().override_font_id =
+                            Some(theme::chrome_font(&self.settings.read));
                         // An `Area` offers unbounded width, so wrapping needs an explicit one.
                         ui.set_max_width(width);
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
@@ -1036,13 +1050,15 @@ impl ReaderApp {
         };
         let mut go = false;
         let mut keep = true;
-        egui::Panel::top("hww-url")
+        let bar = egui::Panel::top("hww-url")
+            .show_separator_line(false)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.chrome_bg)
+                    .fill(pal.bg)
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show(ui, |ui| {
+                ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
                 ui.horizontal(|ui| {
                     ui.label("URL");
                     let resp = ui.add(
@@ -1061,6 +1077,7 @@ impl ReaderApp {
                     }
                 });
             });
+        panel_edge(ui, bar.response.rect, Side::Bottom, pal);
         if go {
             let typed = text.trim().to_owned();
             // A bare host is what people type. Assuming https is the only assumption that does
@@ -1090,13 +1107,15 @@ impl ReaderApp {
         let total = self.find_total;
         let current = self.find_current;
         let mut next = None;
-        egui::Panel::top("hww-find")
+        let bar = egui::Panel::top("hww-find")
+            .show_separator_line(false)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.chrome_bg)
+                    .fill(pal.bg)
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show(ui, |ui| {
+                ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
                 ui.horizontal(|ui| {
                     ui.label("Find");
                     let resp = ui.add(
@@ -1123,9 +1142,14 @@ impl ReaderApp {
                         format!("{} of {total}", current + 1)
                     };
                     ui.label(shown);
-                    ui.label(RichText::new("n / N to step · Esc to dismiss").small());
+                    ui.label(
+                        RichText::new("n / N to step · Esc to dismiss")
+                            .color(pal.dim)
+                            .font(theme::chrome_font(&self.settings.read)),
+                    );
                 });
             });
+        panel_edge(ui, bar.response.rect, Side::Bottom, pal);
         if let Some(n) = next {
             self.find_current = n;
             self.find_scroll = true;
@@ -1142,16 +1166,24 @@ impl ReaderApp {
         };
         let entries: Vec<OutlineEntry> = ready.outline.clone();
         let mut jump = None;
-        egui::Panel::left("hww-outline")
+        let panel = egui::Panel::left("hww-outline")
             .resizable(true)
+            // See `status_strip`. A resizable panel still shows its transient line while the
+            // edge is hovered or dragged, which is the affordance rather than the separation.
+            .show_separator_line(false)
             .default_size(240.0)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.chrome_bg)
+                    .fill(pal.bg)
                     .inner_margin(egui::Margin::symmetric(8, 6)),
             )
             .show(ui, |ui| {
-                ui.label(RichText::new("Outline").color(pal.dim).small());
+                ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
+                ui.label(
+                    RichText::new("Outline")
+                        .color(pal.dim)
+                        .font(theme::chrome_font(&self.settings.read)),
+                );
                 ui.separator();
                 if entries.is_empty() {
                     ui.label(RichText::new("no headings on this page").color(pal.dim));
@@ -1170,6 +1202,7 @@ impl ReaderApp {
                     }
                 });
             });
+        panel_edge(ui, panel.response.rect, Side::Right, pal);
         if let Some(b) = jump {
             self.scroll_to_block = Some(b);
         }
@@ -1203,26 +1236,39 @@ impl ReaderApp {
         if !self.chrome.help_open {
             return;
         }
-        egui::Window::new("Keys")
-            .collapsible(false)
-            .resizable(false)
+        // An `Area` and not a `Window`. A `Window` brings a title bar egui paints from its own
+        // visuals, which is why this was the one piece of chrome that did not take the reader's
+        // palette. Two things `Window` was giving away for free have to be asked for: the order,
+        // or this draws under `hover_strip`, which is `Foreground`; and the constraint, or a
+        // help table taller than a short window runs off the bottom edge with no way back.
+        egui::Area::new(egui::Id::new("hww-help"))
+            .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .constrain(true)
             .show(ctx, |ui| {
-                egui::Grid::new("hww-help").num_columns(2).show(ui, |ui| {
-                    for (keys, what) in HELP {
-                        ui.label(RichText::new(*keys).color(pal.strong).monospace());
-                        ui.label(*what);
-                        ui.end_row();
-                    }
-                });
-                ui.separator();
-                ui.label(
+                egui::Frame::new()
+                    .fill(pal.chrome_bg)
+                    .stroke(egui::Stroke::new(1.0, pal.guide))
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.style_mut().override_font_id =
+                            Some(theme::chrome_font(&self.settings.read));
+                        egui::Grid::new("hww-help").num_columns(2).show(ui, |ui| {
+                            for (keys, what) in HELP {
+                                ui.label(RichText::new(*keys).color(pal.strong).monospace());
+                                ui.label(*what);
+                                ui.end_row();
+                            }
+                        });
+                        ui.separator();
+                        ui.label(
                     RichText::new(
                         "Ctrl means Cmd on macOS. Zoom is egui's: Ctrl +/-/0, Ctrl+wheel, pinch.",
                     )
                     .color(pal.dim)
-                    .small(),
+                    .font(theme::chrome_font(&self.settings.read)),
                 );
+                    });
             });
     }
 
@@ -1320,8 +1366,12 @@ impl ReaderApp {
             Page::Ready(r) => notice::about_page(&r.loaded.prov, r.loaded.doc.text_len()),
         };
         let mut pressed = None;
-        for notice in &notices {
-            if let Some(b) = notice_ui::band(ui, pal, &self.settings.read, column, notice) {
+        // Consecutive notices of one severity are one band. `about_page` can return four
+        // cautions about the same page, and four bands of one ground sit flush and read as one
+        // remark; see the `notice_ui` module doc. Grouping is by run rather than by sorting,
+        // because the order `about_page` chose is the order the reader should read them in.
+        for group in notices.chunk_by(|a, b| a.severity == b.severity) {
+            if let Some(b) = notice_ui::band(ui, pal, &self.settings.read, column, group) {
                 pressed = Some(b);
             }
         }
@@ -1407,6 +1457,48 @@ impl ReaderApp {
             Action::LoadImage(src) => self.load_image(ctx, &src),
             Action::GoToBlock(b) => self.scroll_to_block = Some(b),
             Action::ToggleComment(key) => toggle(&mut self.collapsed, key),
+        }
+    }
+}
+
+/// Which side of a docked panel faces the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Top,
+    Bottom,
+    Right,
+}
+
+/// One rule on one side of a docked panel.
+///
+/// A docked panel takes `bg` and this; only a surface that *floats* over the page takes
+/// `chrome_bg`. Position is what separates a docked panel from the page, and a fill on top of
+/// position was saying the same thing twice in a client whose whole argument is that the page
+/// gets no chrome treatment of its own.
+///
+/// It cannot be `Frame::stroke`, which draws four sides: the other three are the window's own
+/// edges, and a box drawn around the status strip is not what this means. `guide` rather than
+/// `rule`, because with the fill gone this hairline is the entire separation and `rule` measures
+/// 1.41 / 1.41 / 1.48 against `bg`.
+fn panel_edge(ui: &Ui, rect: egui::Rect, side: Side, pal: &theme::Palette) {
+    let stroke = egui::Stroke::new(1.0, pal.guide);
+    // Clipped to the panel's own rect rather than to the `Ui`'s, which has already shrunk around
+    // the panel by the time its rect is known.
+    let painter = ui.painter().with_clip_rect(rect);
+    // Inset by half the stroke, so the whole hairline lands *inside* the panel. Centred on the
+    // boundary, its outer half falls in the neighbouring panel's rect, and that panel's own fill
+    // is added to this layer later in the frame and paints over it: the `guide` held to 3:1 by
+    // `theme::guide_is_visible_where_it_is_drawn` rendered at half its width.
+    let inset = 0.5 * stroke.width;
+    match side {
+        Side::Top => {
+            painter.hline(rect.x_range(), theme::snap(rect.top()) + inset, stroke);
+        }
+        Side::Bottom => {
+            painter.hline(rect.x_range(), theme::snap(rect.bottom()) - inset, stroke);
+        }
+        Side::Right => {
+            painter.vline(theme::snap(rect.right()) - inset, rect.y_range(), stroke);
         }
     }
 }

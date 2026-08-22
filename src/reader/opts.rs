@@ -31,19 +31,78 @@ pub enum Theme {
     Sepia,
     /// Follow the desktop.
     System,
+    /// Reached from `settings.json`, not from `d`. See [`Theme::next`].
+    ContrastLight,
+    ContrastDark,
 }
 
 impl Theme {
+    /// Every theme with colours of its own.
+    ///
+    /// `System` is a redirect, not a palette. The contrast tests walk this rather than a
+    /// hardcoded list, because a palette added without an entry here is a palette nothing
+    /// checks, and the way that fails is a theme whose own warnings are unreadable.
+    /// `real_lists_every_palette` is what makes a missing entry a compile error rather than a
+    /// silence.
+    pub const REAL: [Theme; 5] = [
+        Theme::Light,
+        Theme::Sepia,
+        Theme::Dark,
+        Theme::ContrastLight,
+        Theme::ContrastDark,
+    ];
+
+    /// The contrast this theme's palette holds itself to: AA, or AAA for the contrast pair.
+    ///
+    /// Not a `Palette` field. It is not a colour, and a palette carries nothing else;
+    /// `dark_mode` is already the one exception and a second would make it a pattern.
+    pub fn floor(self) -> f32 {
+        match self {
+            Theme::ContrastLight | Theme::ContrastDark => 7.0,
+            _ => 4.5,
+        }
+    }
+
     /// `d` cycles; `System` is deliberately in the cycle so it can be got back to without
     /// opening a settings file.
+    ///
+    /// The contrast palettes are **not** in the cycle. Someone who wants high contrast wants it
+    /// permanently, and someone pressing `d` for reading comfort should not pass through two
+    /// high-contrast screens to get back. They still need an arm, because this match is
+    /// exhaustive and because a self-loop is a key that silently does nothing; both drop into
+    /// the cycle at `System`.
     pub fn next(self) -> Self {
         match self {
             Theme::System => Theme::Light,
             Theme::Light => Theme::Sepia,
             Theme::Sepia => Theme::Dark,
             Theme::Dark => Theme::System,
+            Theme::ContrastLight | Theme::ContrastDark => Theme::System,
         }
     }
+}
+
+/// A `theme` this binary does not know falls back to `System` instead of failing the whole file.
+///
+/// `ReadOpts` is `#[serde(default)]`, which covers a *missing* field and not an unparseable one.
+/// Without this, an older binary reading a `settings.json` containing `"ContrastDark"` loses
+/// every other setting in the file, and then writes the defaults back over it on the first `d`,
+/// `[`, or `]`. That is a data-loss path with a keystroke as its trigger, for the price of one
+/// type.
+fn theme_or_system<'de, D>(d: D) -> Result<Theme, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Known(Theme),
+        Unknown(serde::de::IgnoredAny),
+    }
+    Ok(match Wire::deserialize(d)? {
+        Wire::Known(t) => t,
+        Wire::Unknown(_) => Theme::System,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +129,7 @@ pub struct ReadOpts {
     /// Multiple of the font size, between blocks.
     pub paragraph_spacing: f32,
     pub family: FontChoice,
+    #[serde(deserialize_with = "theme_or_system")]
     pub theme: Theme,
     /// Show a link's target inline, the way `render::TextOpts::show_links` does.
     pub show_link_urls: bool,
@@ -149,6 +209,79 @@ mod tests {
             t = t.next();
         }
         assert_eq!(t, Theme::System);
+    }
+
+    /// `d` from a contrast palette lands back in the four-cycle rather than doing nothing.
+    ///
+    /// The failure this catches is a self-loop: an arm added only to satisfy the exhaustive
+    /// match, which compiles, ships, and makes the key look broken.
+    #[test]
+    fn a_contrast_palette_is_not_a_dead_end() {
+        let cycle = [Theme::System, Theme::Light, Theme::Sepia, Theme::Dark];
+        for t in [Theme::ContrastLight, Theme::ContrastDark] {
+            assert!(cycle.contains(&t.next()), "{t:?} does not rejoin the cycle");
+        }
+    }
+
+    /// [`Theme::REAL`] lists every theme that is not the redirect.
+    ///
+    /// The `match` is exhaustive on purpose and is the whole point of the test: a variant added
+    /// to `Theme` fails to compile *here*, which is the prompt to classify it and put it in
+    /// `REAL`. Without that, a palette can be added to `theme::palette`'s own exhaustive match
+    /// and to nothing else, and it escapes every contrast test in the crate silently. Asserting
+    /// `REAL.len()` cannot catch it: the length is still whatever it was.
+    #[test]
+    fn real_lists_every_palette() {
+        for t in [
+            Theme::System,
+            Theme::Light,
+            Theme::Sepia,
+            Theme::Dark,
+            Theme::ContrastLight,
+            Theme::ContrastDark,
+        ] {
+            let is_redirect = match t {
+                Theme::System => true,
+                Theme::Light
+                | Theme::Sepia
+                | Theme::Dark
+                | Theme::ContrastLight
+                | Theme::ContrastDark => false,
+            };
+            assert_eq!(Theme::REAL.contains(&t), !is_redirect, "{t:?}");
+        }
+    }
+
+    /// Every real theme names a floor, and the contrast pair asks for more than AA.
+    #[test]
+    fn the_contrast_pair_holds_itself_higher() {
+        for t in Theme::REAL {
+            assert!(t.floor() >= 4.5);
+        }
+        assert!(Theme::ContrastLight.floor() > Theme::Light.floor());
+        assert!(Theme::ContrastDark.floor() > Theme::Dark.floor());
+    }
+
+    /// A theme this binary has never heard of costs the theme, not the file.
+    #[test]
+    fn an_unknown_theme_does_not_take_the_rest_of_the_settings_with_it() {
+        let o: ReadOpts =
+            serde_json::from_str(r#"{"theme": "Aubergine", "measure_chars": 80.0}"#).unwrap();
+        assert_eq!(o.theme, Theme::System);
+        assert_eq!(o.measure_chars, 80.0);
+    }
+
+    /// And a theme it does know still round-trips, including the two new ones.
+    #[test]
+    fn every_real_theme_round_trips_through_json() {
+        for t in Theme::REAL {
+            let o = ReadOpts {
+                theme: t,
+                ..Default::default()
+            };
+            let back: ReadOpts = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+            assert_eq!(back.theme, t);
+        }
     }
 
     /// Settings round-trip through the on-disk JSON, and an older file missing a field still

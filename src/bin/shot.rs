@@ -1259,11 +1259,22 @@ fn main() -> ExitCode {
             "--timeout" => cfg.timeout_s = value(&mut i).parse().unwrap_or(cfg.timeout_s),
             "--measure" => measure = value(&mut i).parse().ok(),
             "--theme" => {
-                theme = match value(&mut i).as_str() {
+                let name = value(&mut i);
+                theme = match name.as_str() {
+                    "light" => Theme::Light,
                     "dark" => Theme::Dark,
                     "sepia" => Theme::Sepia,
                     "system" => Theme::System,
-                    _ => Theme::Light,
+                    "contrast-light" => Theme::ContrastLight,
+                    "contrast-dark" => Theme::ContrastDark,
+                    // Not a fallback to Light. This used to be `_ => Theme::Light`, which meant
+                    // `--theme contrast-dark` exited 0 and photographed Light: a tool whose
+                    // whole job is catching a change nobody noticed cannot have a silent
+                    // fallback in its own argument parser.
+                    other => {
+                        eprintln!("--theme: {other} is not a theme");
+                        std::process::exit(2);
+                    }
                 }
             }
             "--size" => {
@@ -1539,7 +1550,8 @@ hww-shot: open the reader in a named state and photograph it.
     --all              every scene (the default)
     --url URL          one ad-hoc scene: fetch URL for real
     --keys \"t wait:5 / 'quiet\"  extra steps, appended to every scene
-    --theme light|dark|sepia|system   (default light: System follows the desktop)
+    --theme light|dark|sepia|system|contrast-light|contrast-dark
+                       (default light: system follows the desktop)
     --measure N        reading column, in characters
     --size WxH         window size in points (default 900x800)
     --max-dim N        longest edge of the saved PNG (default 900, 0 for native)
