@@ -2,11 +2,15 @@
 //!
 //! # Why the icon is painted rather than typed
 //!
-//! `ⓘ` (U+24D8) is in none of the four faces `default_fonts` embeds: not Ubuntu-Light, not
-//! NotoEmoji, not emoji-icon-font, not Hack. It renders as tofu, the same failure AGENTS.md
-//! records for `→` and `no_notice_contains_an_arrow` exists to catch. The only info glyph any
-//! of them carries is `ℹ` (U+2139, in NotoEmoji), which is a bare serif *i* with no circle at
-//! all, so it does not say what this affordance is.
+//! `ⓘ` (U+24D8) is in none of the ten faces `reader::ui::fonts` embeds, and it was in none of
+//! the four epaint used to embed before them. Enclosed Alphanumerics is a symbol-font block:
+//! swapping the whole font stack did not move it, and neither did checking a dozen more faces,
+//! including one with 5,918 glyphs. The only info glyph anything here carries is `ℹ` (U+2139,
+//! in NotoEmoji), a bare serif *i* with no circle at all, which does not say what this
+//! affordance is.
+//!
+//! This outlived the gap it was written next to. `→` was tofu under the old faces and is not
+//! under these; `ⓘ` was tofu under both.
 //!
 //! Two arcs and a letter cost about ten lines and have no font to be wrong about. They also
 //! take the palette exactly, and scale with `chrome_font`, so the icon tracks `[`/`]` and

@@ -5,6 +5,7 @@
 
 mod app;
 mod blocks;
+pub mod fonts;
 pub mod images;
 mod inline_ui;
 pub mod net;

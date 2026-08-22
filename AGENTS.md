@@ -24,6 +24,7 @@ thing that survives a run is `settings.json`.
 
     cargo run -- [--no-rewrite] [--show-rewrites] <url>   # fetch, extract, render one page
     cargo run --features gui --bin hww-gui -- <url>       # the reading GUI
+    cargo run --release --features gui --bin hww-gui -- <url>   # what a long page needs
     cargo test                                            # synthetic fixtures; no network
 
 CI gates (`.github/workflows/ci.yml`). Two jobs run five commands, and all five must pass:
@@ -106,7 +107,10 @@ and `session::Loaded` and touches no extractor.
     reader/pageinfo.rs     how a page arrived, as labelled rows. notice's quiet half
     reader/settings.rs     the config-path triple, atomic write, never fatal
     reader/image_decode.rs sniff, ceilings, partial handling, downscale. &[u8] -> pixels
+    reader/measure.rs      how tall each block was last time; which of them the column may skip
+    reader/face.rs         which of the ten faces an inline style is set in. No egui types
     reader/ui/             everything that needs an egui::Context, and nothing else
+    reader/ui/fonts.rs     the font bytes, and the family chains they are registered in
     reader/ui/notice_ui.rs the one place the reader draws about itself: a band, and the
                            progress rule the status strip wears during a fetch
     reader/ui/pageinfo_ui.rs  the strip's circled i, and the panel behind it
@@ -114,6 +118,12 @@ and `session::Loaded` and touches no extractor.
 `image_decode` is the sharp case: it is the only module in the project that parses untrusted
 binary input, and putting it under `ui/` would have made the highest-risk code the one code no
 test ever runs.
+
+`face` / `ui/fonts` is the same cut through a smaller problem. Which face `Strong` is set in is a
+decision about the shipped set of faces, not about egui, so it is decidable without a `Context`
+and is tested in the fast job; the bytes and the `FontDefinitions` are not, so they are not. The
+seam between them is a family *name*, and the two tests named below check that every name one
+side asks for is a name the other side registers.
 
 Text length is the shared scoring currency: `Document::text_len`, `ir::blocks_text_len`, and
 `thread::comments_text_len`. Reuse these rather than adding a fourth counter. `ir::THIN_TEXT`
@@ -165,6 +175,43 @@ inside the column, in a notice colour, in the page's own link idiom, and painted
 the hover rule already uses. `[loading]` says the same thing and borrows nothing.
 Wording lives in `src/reader/notice.rs`, outside `ui/`, so the fast CI job tests it.
 
+**The reading column lays out a window, not a page.** egui lays out every widget it is handed,
+every frame; only *painting* is clipped by the scroll area. A thousand-block changelog measured
+8 ms a frame in release and 77 ms in debug to show the thirty blocks on screen, which is a
+60 Hz budget spent on text nobody can see. `reader::measure` remembers what each block measured
+the last time it was laid out, and `ready_screen` hands egui empty space of that height for any
+block clear of the band, which is the window plus a window either way. Same page, 0.2 ms.
+
+A remembered height is a measurement, so `Heights::under` throws the table away when anything
+that would change one changes: the column width, the zoom, the reading settings, or the image
+store, because a placeholder that becomes a photograph is a different height. `allocate_space`
+and not `add_space`, so the item spacing either side of the gap is the spacing the block itself
+would have had; `hww-shot` at the foot of a long page is what says the two agree, because
+landing there is the sum of every height above it.
+
+`ReaderApp::lays_out_whole_page` is the other half, and it is the load-bearing one. Skipping a
+block is invisible to the eye and is not invisible to anything that walks the page by *widget*:
+find counts matches across the whole document, Tab moves focus among the widgets of the frame
+the key arrived in, a focused widget that stops being drawn loses focus, and egui builds the
+copy buffer out of the labels drawn this frame, deselecting outright when it cannot see both
+ends of a selection. egui builds the AccessKit tree out of that same set of widgets, so a
+screen reader turns skipping off outright, for as long as one is attached: the eye loses
+nothing to a block replaced by empty space and an assistive technology loses the page.
+Each of those turns skipping off for that frame, which is why the reader is never slower than
+it was and is usually much faster.
+
+Two of them are read a frame wide rather than at the instant they are asked about, and both
+were bugs first. Focus is discovered *during* the render and cleared at the top of the frame,
+so the guard reads `focus_was_on_page`, taken before the clear; and `tab_frames` holds Tab for
+two frames, because at the last focusable widget egui takes no focus that pass and carries the
+request into the next one, where a partial page would offer the wrap the first link in the band
+rather than the first in the document.
+
+The `measure::Layout` key covers everything that changes what a block measures, and the find
+query is in it for a reason that is easy to miss: a match is drawn at a tighter line height than
+the page reads at, so heights recorded while the bar is open are shorter than the page it closes
+back to.
+
 **A navigation does not blank the reading column.** The outgoing page stays, readable and
 scrollable, until a new document commits; `Page::Loading::from` is where it lives and
 `Page::take_shown` is how it is drawn. The loading band is therefore emitted only when there is no
@@ -213,6 +260,21 @@ controls the reader has left, and `rule` had them at 1.41. Text contrast is not 
 reaching for it is the wrong instinct: the labels take `override_text_color`, which is `fg`, the
 highest-contrast ink in every palette. This is WCAG 1.4.11 non-text contrast, and the boundary is
 the thing measured.
+
+**Every face is compiled in, and `default_fonts` is off.** `eframe` is built without it, so the
+four faces epaint would otherwise embed (Ubuntu-Light, Hack, NotoEmoji, emoji-icon-font) are not
+in the binary, and `reader::ui::fonts` is the only file in the crate that contains font bytes.
+The reasoning is the same as `reqwest`'s `default-features = false` two paragraphs down: a face
+nobody chose cannot appear on a page, and text renders identically on every platform because no
+system font is ever probed. Ten files, 2.86 MB: IBM Plex Sans (variable, so its bold is the same
+bytes at `wght` 700), Plex Serif and Plex Mono in four and two weights, `DejaVuSerif` as the one
+coverage tail behind all three chains, and NotoEmoji behind that.
+
+Three rules for changing this. **The tail carries no RTL script and that is deliberate**, not an
+oversight to correct: see Known gaps. **A chain ends `[…, tail, emoji]`**, because a chain that
+forgets the tail tofus exactly the scripts the tail exists for, on pages nobody tests with.
+And **`wdth` is pinned at 100 explicitly** rather than left to the face's default, so a change in
+how skrifa resolves an unset axis cannot quietly narrow the page.
 
 **Privacy is compile-time absence, not policy.** `reqwest` is built with
 `default-features = false`, so no cookie jar exists: the capability is absent, not merely
@@ -346,10 +408,17 @@ upload are merely compiled. Tests worth keeping named:
   the href. The first is the sharper one, because the old behaviour was decided by *length*:
   Hacker News shipped a linked title and an unlinked one in identical markup on one page, and
   the only difference between them was that one cleared 40 characters and the other did not.
-- `no_notice_contains_an_arrow` (`src/reader/notice.rs`): the executable form of the
-  embedded-font gap. The prose rule below existed the whole time and two strings shipped with
-  `→` anyway, one of them a heading, tofu from the day it was written. Prose does not fail a
-  build.
+- `every_style_resolves_to_a_declared_family` (`src/reader/face.rs`) and
+  `every_name_the_reader_can_ask_for_is_registered` (`src/reader/ui/fonts.rs`): the two halves of
+  the font split, checked against each other. A family name that is asked for but never
+  registered does not fail loudly, because egui falls back to whatever face it can find, so
+  `Strong` would quietly stop being bold and nothing would say so. `face` decides names without
+  an `egui::Context` and is therefore in the fast job; `fonts` owns the bytes.
+
+  These replaced `no_notice_contains_an_arrow`, which was the executable form of a gap that has
+  since closed: every shipped face carries the arrows. It earned its keep first. The prose rule
+  existed the whole time and two strings shipped with `→` anyway, one of them a heading, tofu
+  from the day it was written. Prose does not fail a build.
 - The contrast tests in `src/reader/ui/theme.rs`: `every_palette_meets_its_floor`,
   `every_notice_ink_is_legible_on_its_own_ground`, `a_caution_band_is_a_different_surface`,
   `guide_is_visible_where_it_is_drawn`, and `chrome_is_monospace`. They measure WCAG 2.2 relative
@@ -375,6 +444,10 @@ upload are merely compiled. Tests worth keeping named:
   the page and puts it back inside one frame, so a picture taken before or after looks perfect. What
   is pinned is that the placeholder keeps the variant: swapping `Idle` into a `Loading` drops the
   `url` and `started` that the status strip and the progress rule read on that very frame.
+- `a_block_straddling_the_edge_of_the_band_is_laid_out` (`src/reader/measure.rs`): the mistake
+  an is-inside test makes. A block that starts above the band and ends inside it is the one on
+  screen, and skipping it blanks the top of the window; the same test pins the other three
+  straddles and the zero-height case on the boundary.
 - `a_pathologically_deep_thread_builds_and_traverses_completely`
   (`src/reader/thread_tree.rs`): a hostile thread is untrusted input, so the traversal is
   iterative.
@@ -419,7 +492,7 @@ deferral rather than becoming an assumption.
 
 Portable by construction, and not by accident: `reqwest` uses `rustls`, so there is no OpenSSL
 build to lose a day to on Windows; `rusqlite`'s bundled C SQLite is behind `tools`, so neither
-the default nor the `gui` build touches a C toolchain; `default_fonts` embeds egui's own faces
+the default nor the `gui` build touches a C toolchain; `reader::ui::fonts` embeds its ten faces
 rather than probing system fonts, so text renders identically everywhere; `accesskit` has real
 backends on all three; `wgpu` is Metal, DX12, and Vulkan natively rather than one API stretched
 across three platforms; and winit gates its Wayland dependencies behind
@@ -457,30 +530,45 @@ Real, and worth knowing before re-discovering them:
   which is exactly the hole `hww-shot` exists to close. A pointer-click step would fix both
   scenes at once and is the obvious next thing to build.
 
-- **Arrows are a family gap, not a build gap.** All four arrows and the prime marks are in Hack,
-  and none is in Ubuntu-Light, NotoEmoji, or emoji-icon-font; `Proportional` resolves to the
-  latter three and never reaches Hack. So `→` in a proportional label is tofu and the same
-  character in a `.monospace()` one is fine, which is why the help table's arrows always
-  rendered.
+- **No circled `i`, and no info glyph worth the name.** `ⓘ` (U+24D8) is in none of the ten faces
+  `reader::ui::fonts` embeds, was in none of the four `default_fonts` embedded before them, and is
+  in none of the dozen more that were checked while choosing, including one with 5,918 glyphs.
+  Enclosed Alphanumerics is a symbol-font block, so replacing the entire font stack did not move
+  it. The only info glyph anything here carries is NotoEmoji's `ℹ` (U+2139), a bare serif *i* with
+  no circle. `reader::ui::pageinfo_ui::icon` paints two arcs and a letter instead: ten lines, no
+  font to be wrong about, the palette taken exactly, and it scales with `chrome_font`. Recorded so
+  nobody replaces it with a character.
 
-  Since the chrome moved to `Monospace`, the ban on `→` in a chrome string is **policy, not
-  necessity**. It stays: no string wants an arrow today, and lifting it is a separate decision.
-  `no_notice_contains_an_arrow` and `chrome_is_monospace` are the two halves of that fact and are
-  written to be read together. The gap that remains is real for *page* text, which is
-  proportional: prime marks on a page still read as boxes, and the fix is the embedded-face work
-  that `Strong` needs.
+  The arrow entry that used to sit beside this one is gone, and the difference between the two is
+  worth keeping: `→` was a gap in a particular set of faces and closed when the faces changed,
+  while `ⓘ` is a gap in what text faces are *for*.
+- **Right-to-left text cannot work, and the tail is chosen so that it fails visibly.** epaint
+  shapes with `harfrust`, so joining and marks are right, but it has no bidi: `epaint::text::font`
+  carries `TODO(emilk): heed bidi characters` and `text_layout` notes that script-aware run
+  splitting waits on the same work. A Hebrew or Arabic run therefore lays out in logical order,
+  which is backwards. `DejaVuSans` would have been the wider tail and carries exactly those
+  scripts; `DejaVuSerif` is the tail instead because it carries none of them, so those pages tofu
+  rather than rendering a confident, plausible, reversed line. Same argument as the substituted
+  hotlink image, one medium over. The honest completion is a `Notice` when a document contains a
+  run in U+0590–U+08FF; it is not written.
+- **Devanagari, Thai, and CJK are absent.** All three shape correctly under `harfrust` and none is
+  covered by the shipped faces. Devanagari and Thai are a Noto file each, roughly 100–250K. CJK is
+  10–16 MB per weight, which is the one addition that would change the binary's size story rather
+  than round off in it.
+- **A discussion is one block, so skipping does not reach it.** `reader::measure` works over
+  `doc.blocks`, and `thread.rs` hands the reader a whole thread as a single `Block::Thread`. A
+  long article now costs a window of layout and a long discussion still costs the whole page, plus
+  a `thread_tree::build` per frame. The shape of the fix is the same one (`thread_ui` already walks
+  the tree iteratively, so it has a per-comment index to key heights on); it has not been measured
+  or written.
 
-  This entry used to say the four arrows differed from each other. They do not; parsing the four
-  embedded cmaps says all of them are in exactly one face. The asymmetry was never buying what it
-  looked like it was buying.
-- **No circled `i`, and no info glyph worth the name.** `ⓘ` (U+24D8) is in none of the four
-  faces `default_fonts` embeds, and the only info glyph any of them carries is NotoEmoji's `ℹ`
-  (U+2139), a bare serif *i* with no circle. `reader::ui::pageinfo_ui::icon` paints two arcs
-  and a letter instead: ten lines, no font to be wrong about, the palette taken exactly, and it
-  scales with `chrome_font`. Recorded so nobody replaces it with a character.
-- **`Strong` is colour, not weight.** `default_fonts` ship no bold face and egui synthesizes
-  none. `theme::Palette::strong` is the whole implementation, and it is the one line that
-  changes when a real face is embedded.
+- **A click on page text keeps the page laid out whole.** egui records a caret as a selection, and
+  `lays_out_whole_page` cannot tell a caret from a selected passage: `LabelSelectionState` exposes
+  `has_selection` and nothing finer. So a stray click costs what the reader cost before any of this,
+  until Escape or a click off the text. Deliberate in that direction: the alternative reading is
+  that egui silently deselects a passage the moment it leaves the band, and a `Ctrl+C` that copies
+  half of what is highlighted is worse than a slow frame.
+
 - **Nested replies in `thread.rs` are still under-counted** (see Closed decisions). The reader
   reconstructs whatever tree extraction hands it; it cannot recover replies extraction lost.
 - **No justification, and no `justify` setting.** One `Label` per segment cannot justify. The

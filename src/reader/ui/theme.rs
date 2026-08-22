@@ -3,8 +3,10 @@
 //! Everything here is a presentation decision, which is exactly why it is confined to one
 //! module that the IR cannot reach and that no extractor imports.
 
+use crate::reader::face::Face;
 use crate::reader::notice::Severity;
-use crate::reader::opts::{FontChoice, ReadOpts, Theme};
+use crate::reader::opts::{ReadOpts, Theme};
+use crate::reader::ui::fonts;
 use eframe::egui::{self, Color32, FontFamily, FontId, Stroke};
 
 /// The complete set of colours the reader draws with. Adding a role here is cheap; reaching
@@ -17,8 +19,12 @@ pub struct Palette {
     /// Metadata, provenance, and placeholders: present but not competing with the prose.
     pub dim: Color32,
     pub link: Color32,
-    /// `Strong` is colour until an embedded bold face lands: egui's default fonts ship no
-    /// bold and there is no synthetic bold, so weight is not available to ask for.
+    /// Emphasised ink in the reader's own surfaces: a comment's author, a table's header row,
+    /// the help card's key column.
+    ///
+    /// **Not** inline `Style::strong`, which is a real bold face now that one is embedded. This
+    /// role is what is left after that moved out: places with no run structure to carry a face,
+    /// where the emphasis is the reader's rather than the page's.
     pub strong: Color32,
     pub code_bg: Color32,
     /// Decoration: a separator that says "these are two things" and nothing more.
@@ -168,11 +174,12 @@ pub fn palette(theme: Theme, system_dark: bool) -> Palette {
 }
 
 /// The family body text is set in. Headings, quotes, and captions follow it; code never does.
+///
+/// Plain weight and upright: `Strong` and `Emph` are separate faces, resolved per run by
+/// [`crate::reader::face::Face`] rather than here, because a `FontId` covers a whole galley
+/// section and an inline style covers part of one.
 fn body_family(opts: &ReadOpts) -> FontFamily {
-    match opts.family {
-        FontChoice::Sans => FontFamily::Proportional,
-        FontChoice::Mono => FontFamily::Monospace,
-    }
+    fonts::family(Face::new(opts.family, false, false))
 }
 
 pub fn body_font(opts: &ReadOpts) -> FontId {
@@ -206,12 +213,10 @@ pub fn mono_font(opts: &ReadOpts) -> FontId {
 /// family tells a reader which of the two is speaking, and it survives a screenshot and a
 /// monochrome eye the way a colour does not.
 ///
-/// It is not free. `Proportional` resolves to `[Ubuntu-Light, NotoEmoji, emoji-icon-font]` and
-/// Hack is in `Monospace` only, so this also moves the chrome onto the one embedded face that
-/// has arrows and prime marks; see `chrome_is_monospace`. Hack's advance is wider at the same
-/// size, so the status strip truncates sooner. And with [`FontChoice::Mono`] the page is in this
-/// family too, which leaves size as the only type signal for that reader; the band's full bleed
-/// and `notice::MARK` are what carry it there.
+/// It is not free. A monospace advance is wider at the same size, so the status strip truncates
+/// sooner; see `chrome_is_monospace`. And with [`crate::reader::opts::FontChoice::Mono`] the page is in this family
+/// too, which leaves size as the only type signal for that reader; the band's full bleed and
+/// `notice::MARK` are what carry it there.
 pub fn chrome_font(opts: &ReadOpts) -> FontId {
     FontId::new((opts.base_size_pt * 0.78).max(11.0), FontFamily::Monospace)
 }
@@ -440,6 +445,7 @@ pub fn apply(ctx: &egui::Context, opts: &ReadOpts) -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reader::opts::FontChoice;
 
     /// These tests are the exception to "no tests under `ui/`", and the exception is argued
     /// rather than assumed.
@@ -587,17 +593,14 @@ mod tests {
     /// Reachable for the same reason [`palette`] is: [`chrome_font`] and [`small_font`] take
     /// only a `&ReadOpts`, never a `Context`.
     ///
-    /// Tied to `notice::no_notice_contains_an_arrow`, which lives where the wording does. The
-    /// two are one fact: `Proportional` resolves to `[Ubuntu-Light, NotoEmoji,
-    /// emoji-icon-font]` and none of those carries an arrow or a prime mark, while Hack, which
-    /// is `Monospace` only, carries all of them. Moving the chrome here means the ban on arrows
-    /// is policy rather than necessity, and the ban stays: no string wants one today, and
-    /// lifting it is a separate decision. If this test ever fails, that decision has been taken
-    /// by accident.
+    /// This used to be tied to `notice::no_notice_contains_an_arrow`, because the four faces
+    /// epaint embedded put arrows in `Monospace` and nowhere else. That is no longer the shape
+    /// of the problem: every shipped face carries the arrows, so the chrome is monospace for the
+    /// reason stated on [`chrome_font`] and for no other.
     #[test]
     fn chrome_is_monospace() {
         let mut opts = ReadOpts::default();
-        for family in [FontChoice::Sans, FontChoice::Mono] {
+        for family in [FontChoice::Sans, FontChoice::Serif, FontChoice::Mono] {
             opts.family = family;
             assert_eq!(chrome_font(&opts).family, FontFamily::Monospace);
             assert_eq!(notice_heading_font(&opts).family, FontFamily::Monospace);

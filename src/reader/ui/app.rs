@@ -41,6 +41,7 @@
 
 use crate::ir;
 use crate::reader::history::History;
+use crate::reader::measure::{self, Heights};
 use crate::reader::notice::{self, Button, Notice};
 use crate::reader::outline::{self, OutlineEntry};
 use crate::reader::pageinfo;
@@ -48,7 +49,9 @@ use crate::reader::settings::{self, Settings};
 use crate::reader::thread_tree::CommentKey;
 use crate::reader::title;
 use crate::reader::ui::images::ImageStore;
-use crate::reader::ui::{Action, Launch, RenderCtx, blocks, net, notice_ui, pageinfo_ui, theme};
+use crate::reader::ui::{
+    Action, Launch, RenderCtx, blocks, fonts, net, notice_ui, pageinfo_ui, theme,
+};
 use crate::session::{self, LoadError, LoadOptions, Loaded, Rewrite, Target};
 use eframe::egui::{self, Align, Key, Layout, Modifiers, RichText, Ui};
 use net::{Job, Msg, Net, ReqId};
@@ -213,6 +216,9 @@ pub struct ReaderApp {
     strip_height: f32,
     chrome: Chrome,
     images: ImageStore,
+    /// How tall each block was the last time it was laid out, so the blocks off the window can
+    /// be skipped. See `reader::measure` for why, and `ready_screen` for when it is ignored.
+    heights: Heights,
     /// Toggles against the auto-collapse default (see `thread_ui::is_collapsed`).
     collapsed: HashSet<CommentKey>,
     find_current: usize,
@@ -254,6 +260,22 @@ pub struct ReaderApp {
     focused_href: Option<String>,
     focused_image: Option<String>,
     focused_comment: Option<CommentKey>,
+    /// Whether the *previous* frame's render found focus on the page, taken before the three
+    /// above are cleared for the frame in flight.
+    ///
+    /// `lays_out_whole_page` runs inside that render, downstream of the clear and upstream of
+    /// the write, so reading the fields themselves gets `None` on every frame and the guard
+    /// they were meant to be never fires. The snapshot is the value the guard wanted: focus was
+    /// on a link when this frame began, so the widget carrying it has to be drawn again.
+    focus_was_on_page: bool,
+    /// Frames that a Tab reaches into, counted down in `ui`.
+    ///
+    /// Two, not one. egui moves focus among the widgets of the frame the key arrived in, so
+    /// the link Tab is reaching for has to be drawn on it; and when Tab arrives at the *last*
+    /// focusable widget nothing takes focus that pass and `give_to_next` carries the request
+    /// into the next one, where a page laid out in part would hand the wrap the first link in
+    /// the band instead of the first in the document.
+    tab_frames: u8,
     /// The link a click has been dispatched for, marked in place until the navigation ends.
     ///
     /// A widget id rather than an href: `html::link_block` copies one block-level anchor's href
@@ -287,11 +309,26 @@ fn scroll_step(settings: &Settings) -> f32 {
     theme::line_height_px(&settings.read) * settings.scroll_lines()
 }
 
+/// Whether egui is building an AccessKit tree this pass, which is to say whether an assistive
+/// technology is attached.
+///
+/// egui has no getter for it, so this asks the one question that answers it: `accesskit_node_builder`
+/// returns `None` when accesskit is off, and the root node is the single id that always exists
+/// while it is on, so asking for *that* one reads the state rather than creating a node nobody
+/// wanted. The closure writes nothing.
+fn accesskit_is_building(ctx: &egui::Context) -> bool {
+    ctx.accesskit_node_builder(egui::accesskit_root_id(), |_| ())
+        .is_some()
+}
+
 impl ReaderApp {
     /// Public so an embedder can own the app without owning `run`: `bin/shot.rs` wraps it to
     /// drive scenes and work the shutter. Nothing else calls it.
     pub fn new(cc: &eframe::CreationContext<'_>, launch: Launch) -> Result<Self, LoadError> {
         let net = Net::new(cc.egui_ctx.clone())?;
+        // Before anything draws. `eframe` is built without `default_fonts`, so until this runs
+        // there is no face registered at all and every string is blank rather than tofu.
+        fonts::install(&cc.egui_ctx);
         cc.egui_ctx.set_zoom_factor(launch.settings.zoom_factor);
         apply_scroll_speed(&cc.egui_ctx, &launch.settings);
         let mut app = Self {
@@ -308,6 +345,7 @@ impl ReaderApp {
             strip_height: 0.0,
             chrome: Chrome::default(),
             images: ImageStore::default(),
+            heights: Heights::default(),
             collapsed: HashSet::new(),
             find_current: 0,
             find_total: 0,
@@ -323,6 +361,8 @@ impl ReaderApp {
             focused_href: None,
             focused_image: None,
             focused_comment: None,
+            focus_was_on_page: false,
+            tab_frames: 0,
             pending_link: None,
             focus_url_bar: false,
             focus_find: false,
@@ -690,6 +730,7 @@ impl ReaderApp {
     fn commit(&mut self) {
         // Textures die with the page they were loaded for; the disclosure counters do not.
         self.images.clear_textures();
+        self.heights.clear();
         self.collapsed.clear();
         self.find_current = 0;
         self.find_total = 0;
@@ -1008,10 +1049,22 @@ impl eframe::App for ReaderApp {
         // matters most: `ready_screen` is the only writer, so a value left standing survives
         // into `Loading` and onto the failure screen, where it pins the previous page's link
         // over hww's own words for as long as the fetch takes.
+        self.focus_was_on_page = self.focused_href.is_some()
+            || self.focused_image.is_some()
+            || self.focused_comment.is_some();
         self.focused_href = None;
         self.focused_image = None;
         self.focused_comment = None;
         self.hover_href = None;
+
+        // Read here rather than where it is used, so it can be held for the frame after as
+        // well; see `tab_frames`. `handle_keys` has already run and does not consume Tab, and
+        // egui's own focus handling reads it without taking it out of `events`.
+        self.tab_frames = if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+            2
+        } else {
+            self.tab_frames.saturating_sub(1)
+        };
 
         // Order matters: the strip is laid out first so it keeps its line at the bottom no
         // matter what the rest of the chrome does. It is the one thing that never hides.
@@ -1630,12 +1683,56 @@ impl ReaderApp {
 
     /// Draw the page the reading column is showing, which during a navigation is the outgoing
     /// one rather than the one being fetched.
+    /// Whether this frame has to lay the page out whole, skipping nothing.
+    ///
+    /// Skipping a block off the window is invisible to the eye and is not invisible to
+    /// everything that walks the page by *widget*. Each of these is a case where a block
+    /// nowhere near the window still has to be one of this frame's widgets:
+    ///
+    /// - **Find.** `find_total` counts matches across the whole document, and `n` scrolls to
+    ///   one that is by definition somewhere the reader is not looking.
+    /// - **Tab.** egui moves focus among the widgets of the frame the key arrived in, so the
+    ///   link Tab is reaching for has to be drawn on it, and on the frame after as well; see
+    ///   `tab_frames`.
+    /// - **Focus already on the page.** A focused widget that stops being drawn loses focus,
+    ///   and `Enter`, `Y`, `i`, and `z` all read what Tab last landed on. `focus_was_on_page`
+    ///   and not the three fields, which this is downstream of the clearing of.
+    /// - **A selection.** egui builds the copy buffer out of the labels drawn this frame, so
+    ///   a selection running off the window would put only the visible part on the clipboard.
+    /// - **A screen reader.** egui builds the AccessKit tree out of the widgets drawn this
+    ///   frame too, and a block replaced by empty space contributes no text to it. The eye
+    ///   loses nothing to skipping and an assistive technology would lose the page, so the
+    ///   whole optimization turns off for as long as one is attached.
+    ///
+    /// A jump (`scroll_to_block`) is the sixth and is tested at the call site: it scrolls to a
+    /// `Response`, which a block replaced by empty space does not have.
+    fn lays_out_whole_page(&self, ui: &Ui) -> bool {
+        self.chrome.find.as_deref().is_some_and(|q| !q.is_empty())
+            || self.focus_was_on_page
+            || self.tab_frames > 0
+            || ui
+                .ctx()
+                .plugin_opt::<egui::text_selection::LabelSelectionState>()
+                .is_some_and(|p| p.lock().has_selection())
+            || accesskit_is_building(ui.ctx())
+    }
+
     fn ready_screen(&mut self, ui: &mut Ui) {
         // The page is behind `&mut self`, and rendering needs both it and the image store, so
         // take it for the duration and put it back. Cheaper than cloning a document.
         let Some(ready) = self.page.take_shown() else {
             unreachable!("checked by the caller")
         };
+        // Both before `RenderCtx`, which borrows `self.images` for the rest of the function.
+        let whole = self.scroll_to_block.is_some() || self.lays_out_whole_page(ui);
+        self.heights.under(&measure::Layout {
+            opts: self.settings.read.clone(),
+            measure: ui.max_rect().width(),
+            pixels_per_point: ui.ctx().pixels_per_point(),
+            images: self.images.changes(),
+            find: self.chrome.find.clone(),
+            pending_link: self.pending_link.map(|id| id.value()),
+        });
         let base = ready.loaded.prov.final_url.clone();
         let mut ctx = RenderCtx::new(
             theme::palette(self.settings.read.theme, theme::system_is_dark(ui.ctx())),
@@ -1657,13 +1754,25 @@ impl ReaderApp {
         let doc = &ready.loaded.doc;
         blocks::document_header(ui, doc, &mut ctx);
         let scroll_to = self.scroll_to_block.take();
+        let band = measure::Band::around(ui.clip_rect().top(), ui.clip_rect().bottom());
         for (i, b) in doc.blocks.iter().enumerate() {
             // The article's <h1> is usually also its <title>; rendering both shows the
             // headline twice.
             if ready.skip_block == Some(i) {
                 continue;
             }
+            // Empty space of the height this block measured last time, for as long as it is
+            // clear of the window. `allocate_space` and not `add_space`, so the item spacing
+            // either side of it is the spacing the block itself would have had.
+            if !whole
+                && let Some(h) = self.heights.get(i)
+                && band.skips(ui.next_widget_position().y, h)
+            {
+                ui.allocate_space(egui::vec2(0.0, h));
+                continue;
+            }
             let resp = ui.scope(|ui| blocks::block_ui(ui, b, &mut ctx)).response;
+            self.heights.set(i, resp.rect.height());
             if scroll_to == Some(i) {
                 resp.scroll_to_me(Some(Align::TOP));
             }

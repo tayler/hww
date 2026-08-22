@@ -2,11 +2,12 @@
 //!
 //! `src/ir.rs` keeps the page's *styling* out of the document. This module is the same fence
 //! one layer out: it keeps the reader's own *wording* out of `ui/`, so the text hww puts on
-//! screen is decided where `cargo test` can read it. That matters more than it looks. Two strings in the old
-//! error screen contained `→`, which egui's embedded fonts do not carry, and both had been
-//! rendering as tofu since the day they were written; AGENTS.md stated the rule in prose the
-//! whole time. [`tests::no_notice_contains_an_arrow`] is that rule in a form that fails a
-//! build.
+//! screen is decided where `cargo test` can read it. That matters more than it looks. Two strings
+//! in the old error screen contained `→`, which the faces egui embedded by default did not carry,
+//! and both had been rendering as tofu since the day they were written while AGENTS.md stated the
+//! rule in prose. The rule was `no_notice_contains_an_arrow`, and it is gone: `reader::ui::fonts`
+//! embeds faces that carry the arrows in every role, so the constraint it enforced is no longer
+//! true. What the episode leaves behind is the reason this module sits outside `ui/` at all.
 //!
 //! # Severity, not colour
 //!
@@ -304,8 +305,8 @@ pub fn failure(error: &LoadError, url: &Url) -> Notice {
 
     let mut detail = vec![url.to_string()];
     if let LoadError::Fetch(FetchError::TooManyRedirects(hops)) = error {
-        // A redirect loop is usually a consent wall, and the chain is what shows it.
-        // `->`, never `→`: see the module doc.
+        // A redirect loop is usually a consent wall, and the chain is what shows it. ASCII `->`
+        // by habit rather than by necessity now: the shipped faces carry `→`.
         detail.extend(hops.iter().map(|h| format!("  -> {h}")));
     }
 
@@ -445,51 +446,6 @@ mod tests {
         .iter()
         .map(|e| failure(e, &u))
         .collect()
-    }
-
-    fn every_notice() -> Vec<Notice> {
-        let mut all = every_failure();
-        all.push(idle());
-        all.extend(loading(
-            &url("https://example.com/"),
-            Duration::from_secs(3),
-            false,
-        ));
-        // `true` yields nothing, which is the point of it; extend covers both arms either way.
-        all.extend(loading(
-            &url("https://example.com/"),
-            Duration::from_secs(3),
-            true,
-        ));
-        all.extend(about_page(&page(404), 10));
-        all.extend(about_page(&page(503), 9_000));
-        all.extend(about_page(&dead_rule(), 9_000));
-        for t in every_truncation() {
-            let mut p = page(200);
-            p.truncation = t;
-            all.extend(about_page(&p, 9_000));
-        }
-        all
-    }
-
-    /// The executable form of the embedded-font gap.
-    ///
-    /// egui's `default_fonts` carry no `→`, so one renders as tofu. AGENTS.md said so in prose
-    /// and two strings shipped with it anyway, including a heading nobody could read. Prose
-    /// does not fail a build.
-    #[test]
-    fn no_notice_contains_an_arrow() {
-        for notice in every_notice() {
-            let mut text = vec![notice.body.clone()];
-            text.extend(notice.heading.map(str::to_owned));
-            text.extend(notice.detail.clone());
-            text.extend(notice.actions.iter().map(|b| b.label().to_owned()));
-            // The severity word is drawn on every band, so it is swept with the rest.
-            text.push(notice.severity.word().to_owned());
-            for t in text {
-                assert!(!t.contains('→'), "unrenderable arrow in {t:?}");
-            }
-        }
     }
 
     /// Three severities, three words, and none of them a prefix of another.

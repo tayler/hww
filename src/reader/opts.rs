@@ -14,13 +14,19 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FontChoice {
-    /// egui's embedded proportional face.
+    /// IBM Plex Sans. Variable, so its bold is the same file at `wght` 700.
     Sans,
-    /// egui's embedded monospace face. A whole page in it is a real preference, not a joke.
+    /// IBM Plex Serif.
+    ///
+    /// This variant used to be absent on the grounds that a setting with no face behind it is
+    /// worse than no setting, the same reason there is still no `justify` field. The face
+    /// arrived, so the variant did: see `reader::ui::fonts`.
+    Serif,
+    /// IBM Plex Mono. A whole page in it is a real preference, not a joke.
+    ///
+    /// The one role with no italic face shipped, so emphasis here is epaint's skew. See
+    /// [`crate::reader::face::Face::synthesises_italics`].
     Mono,
-    // No `Serif`. egui's `default_fonts` ship no serif face, so the variant would be a setting
-    // with nothing behind it, the same reason there is no `justify` field. It arrives with the
-    // embedded face, and the two are one decision.
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

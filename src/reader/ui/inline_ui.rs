@@ -31,11 +31,12 @@
 //! badly enough it arrives together with the galley renderer, and the two are one decision.
 
 use crate::ir;
+use crate::reader::face::Face;
 use crate::reader::inline::{Run, Style};
 use crate::reader::notice;
-use crate::reader::opts::ReadOpts;
+use crate::reader::opts::{FontChoice, ReadOpts};
 use crate::reader::ui::theme::Palette;
-use crate::reader::ui::{Action, RenderCtx, theme};
+use crate::reader::ui::{Action, RenderCtx, fonts, theme};
 use eframe::egui::{
     self, Align, Color32, FontId, Label, RichText, Sense, Stroke, TextFormat, TextWrapMode, Ui,
     text::LayoutJob,
@@ -46,8 +47,10 @@ use eframe::egui::{
 pub struct Setting {
     pub font: FontId,
     pub color: Color32,
-    /// Headings are already heavy; colouring `Strong` inside one just makes it patchy.
-    pub allow_strong_color: bool,
+    /// The role the runs are set in, so `Strong` and `Emph` can resolve to real faces. Carried
+    /// separately from `font` because a `FontId` names one family and an inline style needs the
+    /// other three of that role's four.
+    pub role: FontChoice,
 }
 
 impl Setting {
@@ -55,15 +58,16 @@ impl Setting {
         Self {
             font: theme::body_font(opts),
             color: pal.fg,
-            allow_strong_color: true,
+            role: opts.family,
         }
     }
 
+    /// Chrome, so monospace regardless of what the page is set in.
     pub fn dim(opts: &ReadOpts, pal: &Palette) -> Self {
         Self {
             font: theme::chrome_font(opts),
             color: pal.dim,
-            allow_strong_color: false,
+            role: FontChoice::Mono,
         }
     }
 
@@ -71,7 +75,7 @@ impl Setting {
         Self {
             font: theme::heading_font(opts, level),
             color: pal.fg,
-            allow_strong_color: false,
+            role: opts.family,
         }
     }
 }
@@ -192,27 +196,25 @@ fn append(
 }
 
 fn format_for(style: Style, set: &Setting, pal: &Palette, line_height: f32) -> TextFormat {
-    let font = if style.code {
-        FontId::new(set.font.size * 0.92, egui::FontFamily::Monospace)
+    // Code is monospace whatever the page is set in, and 0.92x for the same reason
+    // `theme::mono_font` is.
+    let (role, size) = if style.code {
+        (FontChoice::Mono, set.font.size * 0.92)
     } else {
-        set.font.clone()
+        (set.role, set.font.size)
     };
+    let face = Face::new(role, style.strong, style.emph);
     TextFormat {
-        font_id: font,
-        // egui's default fonts ship no bold face and there is no synthetic bold, so weight is
-        // not available to ask for. Colour is the honest stand-in until a real face is
-        // embedded, at which point this line is the only one that changes.
-        color: if style.strong && set.allow_strong_color {
-            pal.strong
-        } else {
-            set.color
-        },
+        font_id: FontId::new(size, fonts::family(face)),
+        color: set.color,
         background: if style.code {
             pal.code_bg
         } else {
             Color32::TRANSPARENT
         },
-        italics: style.emph,
+        // A real italic face is shipped for every role but mono, so the skew is asked for in
+        // exactly the one case where no face exists. Both at once would slant it twice.
+        italics: face.synthesises_italics(),
         // Shared by every section of every segment: this is what keeps the several labels of
         // one paragraph on one baseline. A segment that forgets it sits a pixel off its
         // neighbours, and the eye reads that as a broken line rather than as a subtle bug.
@@ -253,7 +255,6 @@ fn link_ui(
         };
         let mut link_set = set.clone();
         link_set.color = ctx.pal.link;
-        link_set.allow_strong_color = false;
         let start = job.sections.len();
         append(&mut job, text, style, &link_set, ctx, *offset);
         // Underline is per-section within one galley, so it continues correctly across a

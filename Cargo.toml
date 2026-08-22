@@ -29,7 +29,7 @@ url = "2.5.8"
 # entry is a version-skew trap. `links` is off (it hands URLs to a system browser via
 # `webbrowser`; hww never shells out to Chrome unasked) and `persistence` is off (it pulls
 # `ron` in to remember a window size; settings are hand-rolled JSON via `serde_json`).
-eframe = { version = "0.36.1", default-features = false, features = ["wgpu", "x11", "wayland", "default_fonts", "accesskit"], optional = true }
+eframe = { version = "0.36.1", default-features = false, features = ["wgpu", "x11", "wayland", "accesskit"], optional = true }
 # Direct dep purely to restore winit's defaults — `wayland-dlopen` (no link-time libwayland)
 # and `wayland-csd-adwaita` (client-side decorations; without it the window has no titlebar on
 # GNOME/Wayland). It cannot be done as `features = ["winit/default"]` on eframe: cargo rejects

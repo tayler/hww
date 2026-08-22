@@ -16,8 +16,13 @@
 //! The module is named `reader` rather than `gui` because the pure half is exactly what a
 //! future TUI reuses.
 
+/// Which face an inline style is set in. No egui types, so the fast CI job tests it.
+pub mod face;
 pub mod history;
 pub mod inline;
+/// How tall each block of the page was last time it was laid out, so a page longer than the
+/// window costs a window's worth of layout. No egui types, so the fast CI job tests it.
+pub mod measure;
 /// What the reader has to say about a page, and how loud. No egui types, so the fast CI
 /// job tests it.
 pub mod notice;

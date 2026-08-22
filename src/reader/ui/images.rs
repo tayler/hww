@@ -63,6 +63,10 @@ pub struct ImageStore {
     /// Distinct hosts contacted for images this session, for the status strip.
     pub hosts: HashSet<String>,
     pub loaded: usize,
+    /// Bumped by every change to `entries`. The reading column caches a height per block
+    /// (`reader::measure`), and an image that arrives, fails, or is evicted re-sizes the block
+    /// it sits in, including blocks nowhere near the window when `I` loads a whole page.
+    changes: u64,
     pub cookie_attempts: usize,
     pub referer_requests: usize,
 }
@@ -76,7 +80,13 @@ impl ImageStore {
         self.dims.get(src).copied()
     }
 
+    /// How many times `entries` has changed. See the field.
+    pub fn changes(&self) -> u64 {
+        self.changes
+    }
+
     pub fn begin(&mut self, src: &str) {
+        self.changes += 1;
         self.entries.insert(src.to_owned(), State::Loading);
         self.touch(src);
         self.evict();
@@ -114,6 +124,7 @@ impl ImageStore {
             }),
         );
         self.loaded += 1;
+        self.changes += 1;
         self.touch(src);
         self.evict();
     }
@@ -135,6 +146,7 @@ impl ImageStore {
     }
 
     pub fn fail(&mut self, src: &str, why: String) {
+        self.changes += 1;
         self.entries.insert(src.to_owned(), State::Failed(why));
         self.touch(src);
     }
@@ -144,6 +156,7 @@ impl ImageStore {
     /// the disclosure counters survive even that: the first is layout memory, and the second is a
     /// running account of what this session disclosed, which resetting would quietly understate.
     pub fn clear_textures(&mut self) {
+        self.changes += 1;
         self.entries.clear();
         self.order.clear();
     }
@@ -171,6 +184,7 @@ impl ImageStore {
             }
             let oldest = self.order.remove(i);
             self.entries.remove(&oldest);
+            self.changes += 1;
         }
     }
 }
