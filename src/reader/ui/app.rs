@@ -1166,6 +1166,7 @@ impl ReaderApp {
         // boundary makes every glyph in it resample, which reads as soft text rather than as a
         // bug, and egui's debug build paints an "Unaligned" warning over the page to say so.
         let wanted = theme::measure_px(ui.ctx(), &self.settings.read);
+        self.wheel_during_drag(ui.ctx());
         let mut scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             // Drag-to-select depends on a mouse drag never being taken by the scroll area, so
@@ -1213,6 +1214,27 @@ impl ReaderApp {
                 });
                 self.viewport_height = out.inner_rect.height().max(1.0);
             });
+    }
+
+    /// The wheel, for the one case egui hands the page nothing: a live drag.
+    ///
+    /// `ScrollArea` tests `ctx.dragged_id().is_none()` before it will look at the wheel, so
+    /// that a drag inside it never scrolls two things at once. A selectable `Label` senses
+    /// `click_and_drag`, so holding the button down to select text sets that id and turns the
+    /// wheel off for as long as the selection lasts, which is exactly when a selection running
+    /// past the bottom of the window needs it. Take the wheel here instead and put it through
+    /// the same one-shot `scroll_delta` that `j`/`k`/`Space` use; the reading column is the
+    /// only vertical scroll in the window, so there is no second area for it to belong to.
+    ///
+    /// Zoom is unaffected: egui turns Ctrl+wheel into `zoom_delta` before this ever sees it.
+    fn wheel_during_drag(&mut self, ctx: &egui::Context) {
+        if ctx.dragged_id().is_none() {
+            return;
+        }
+        // Zeroing it is what keeps the delta from being spent twice: `smooth_scroll_delta` is
+        // what `ScrollArea` reads, and a drag that ends mid-smoothing would otherwise hand the
+        // tail of this notch to the scroll area a second time.
+        self.scroll_delta += ctx.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y));
     }
 
     /// Every notice for the current page, in the one place they are drawn.
