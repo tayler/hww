@@ -115,6 +115,30 @@ pub struct Loaded {
     pub prov: Provenance,
 }
 
+/// A plain 200 `Provenance`, for tests in this crate that need one to vary.
+///
+/// It lives here rather than in each test module because a `Provenance` is eleven fields and
+/// two `Url`s: copied into every module that reports on one, the copies drift, and a test then
+/// asserts about a page shape the fetcher can no longer produce.
+#[cfg(test)]
+impl Provenance {
+    pub(crate) fn fixture(url: &str) -> Self {
+        Self {
+            requested: Url::parse(url).unwrap(),
+            rewritten_to: None,
+            rule_appears_dead: false,
+            status: 200,
+            encoding: "UTF-8",
+            final_url: Url::parse(url).unwrap(),
+            bytes: 1234,
+            chars: 567,
+            hops: vec![],
+            cookie_attempts: 2,
+            truncation: Truncation::Complete,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
     #[error(transparent)]
@@ -332,19 +356,7 @@ mod tests {
     use super::*;
 
     fn prov(url: &str) -> Provenance {
-        Provenance {
-            requested: Url::parse(url).unwrap(),
-            rewritten_to: None,
-            rule_appears_dead: false,
-            status: 200,
-            encoding: "UTF-8",
-            final_url: Url::parse(url).unwrap(),
-            bytes: 1234,
-            chars: 567,
-            hops: vec![],
-            cookie_attempts: 2,
-            truncation: Truncation::Complete,
-        }
+        Provenance::fixture(url)
     }
 
     #[test]

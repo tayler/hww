@@ -78,10 +78,12 @@ and `session::Loaded` and touches no extractor.
     reader/thread_tree.rs  flat Vec<Comment> + depth -> tree; CommentKey
     reader/title.rs        title / blocks[0] de-duplication
     reader/notice.rs       what the reader reports about a page, and how loud. No egui types
+    reader/pageinfo.rs     how a page arrived, as labelled rows. notice's quiet half
     reader/settings.rs     the config-path triple, atomic write, never fatal
     reader/image_decode.rs sniff, ceilings, partial handling, downscale. &[u8] -> pixels
     reader/ui/             everything that needs an egui::Context, and nothing else
     reader/ui/notice_ui.rs the one place the reader draws its own text: Notice -> a band
+    reader/ui/pageinfo_ui.rs  the strip's circled i, and the panel behind it
 
 `image_decode` is the sharp case: it is the only module in the project that parses untrusted
 binary input, and putting it under `ui/` would have made the highest-risk code the one code no
@@ -149,9 +151,9 @@ CDN hosts constantly, and "no third-party requests" is in the first paragraph of
 and this file. The capability lives behind the `gui` feature, so the `hww` CLI retains
 compile-time absence of it, and inside the reader it is allowed only because: the placeholder
 **names the host before the click**, the click is a deliberate user action, the load is
-counted in the status strip alongside cookie attempts, and nothing is ever auto-loaded,
-prefetched, or loaded on hover. `I` (load all) still names the distinct hosts first. No image
-touches disk.
+counted alongside cookie attempts in the page-info panel (`p`, or the circled `i` at the right
+of the status strip), and nothing is ever auto-loaded, prefetched, or loaded on hover. `I`
+(load all) still names the distinct hosts first. No image touches disk.
 
 **`referer(false)` remains.** `reqwest` never attaches a Referer on its own, on any request or
 any redirect hop. Image subresource requests, and only those, set an explicit origin-only
@@ -168,7 +170,7 @@ photograph has failed worse than one that shows no picture. Sending the origin r
 trigger; sending it only after a 403 cannot, because there is no 403 to react to. The origin
 adds nearly nothing to what the request already discloses (the CDN inferred the referring
 site from the path before we said a word), while the *path*, which is the real leak, is never
-sent. Reported in the status strip, and disableable in the settings file, accepting the
+sent. Reported in the page-info panel, and disableable in the settings file, accepting the
 breakage.
 
 **`src/rewrite.rs` is the only file in the crate that contains a hostname.** `html.rs` scores
@@ -262,9 +264,13 @@ upload are merely compiled. Tests worth keeping named:
   `→` anyway, one of them a heading, tofu from the day it was written. Prose does not fail a
   build.
 - `notice_fill_clears_every_page_colour` (`src/reader/ui/theme.rs`): the executable form of the
-  notice/page separation, and **the one test under `ui/`**. Argued rather than assumed:
-  `theme::palette` takes no `egui::Context`, unlike `apply`, `measure_px`, and `system_is_dark`,
-  so it is reachable by the directory's own "split by what a test can reach" rule.
+  notice/page separation. Argued rather than assumed: `theme::palette` takes no `egui::Context`,
+  unlike `apply`, `measure_px`, and `system_is_dark`, so it is reachable by the directory's own
+  "split by what a test can reach" rule. It and
+  `a_failed_image_still_reports_what_its_request_disclosed` (`src/reader/ui/images.rs`, where
+  `counts` and `fail` take no `Context` but `insert` uploads a texture) are **the only two tests
+  under `ui/`**, and both are admitted on that same argument rather than by exception. A third
+  needs the argument made again, not the precedent cited.
 - `a_pathologically_deep_thread_builds_and_traverses_completely`
   (`src/reader/thread_tree.rs`): a hostile thread is untrusted input, so the traversal is
   iterative.
@@ -306,12 +312,22 @@ everywhere else. Back and forward are the one place the platforms genuinely disa
 
 Real, and worth knowing before re-discovering them:
 
-- **egui's embedded fonts have no arrows.** `→` renders as tofu, though `←`, `↑`, and `↓` do
-  not, which is why the help table is asymmetric on purpose. Prime marks (`′ ″`) are missing
-  too, so coordinates on some pages read as boxes. The fix is the same embedded-face work that
-  `Strong` needs, and until then no chrome string may contain `→`. That rule is now enforced by
-  `no_notice_contains_an_arrow` rather than remembered: it was stated here in prose while
-  two strings shipped with `→` in them, one of them a failure heading.
+- **egui's proportional stack has no arrows at all**, so `→` renders as tofu and no chrome
+  string may contain one. `no_notice_contains_an_arrow` enforces that rather than leaving it
+  remembered: the rule was stated here in prose while two strings shipped with `→` in them, one
+  of them a failure heading. Prime marks (`′ ″`) are missing too, so coordinates on some pages
+  read as boxes. The fix is the same embedded-face work that `Strong` needs.
+
+  This entry used to say `←`, `↑`, and `↓` were fine. Parsing the four embedded cmaps says
+  otherwise: **all four arrows are in Hack and none is in Ubuntu-Light, NotoEmoji, or
+  emoji-icon-font.** The help table's arrows render only because that column is drawn
+  `.monospace()`; the same characters in a proportional label are tofu, and its asymmetry was
+  never buying what it looked like it was buying.
+- **No circled `i`, and no info glyph worth the name.** `ⓘ` (U+24D8) is in none of the four
+  faces `default_fonts` embeds, and the only info glyph any of them carries is NotoEmoji's `ℹ`
+  (U+2139), a bare serif *i* with no circle. `reader::ui::pageinfo_ui::icon` paints two arcs
+  and a letter instead: ten lines, no font to be wrong about, the palette taken exactly, and it
+  scales with `chrome_font`. Recorded so nobody replaces it with a character.
 - **`Strong` is colour, not weight.** `default_fonts` ship no bold face and egui synthesizes
   none. `theme::Palette::strong` is the whole implementation, and it is the one line that
   changes when a real face is embedded.

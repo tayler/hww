@@ -16,6 +16,15 @@
 //! navigation costs no new persistent chrome. **No affordance is reachable by keyboard alone**:
 //! a mouse-only reader must be able to follow a link, come back, and type a new URL.
 //!
+//! What it does *not* carry is provenance. Seven facts `·`-joined into one dim right-aligned
+//! line crowded the URL, and with `wrap_mode = Truncate` on a narrow window the tail was not
+//! drawn at all, which is a poor way to report anything. They are labelled rows in the
+//! page-info panel now (`p`, or the circled `i`, `reader::ui::pageinfo_ui`). The two that could
+//! not wait for a click went the other way and became bands: a truncated body and a rewrite
+//! rule that landed on the wrong host both change how the page in front of the reader should be
+//! read. The dead rule in particular used to be a twelve-second `flash` here, which is to say
+//! it was unrecoverable by anyone who looked away.
+//!
 //! # Zoom is egui's, not ours
 //!
 //! egui already binds `Ctrl`+`+`/`=`/`-`/`0` to `zoom_factor` and folds `Ctrl`+wheel and pinch
@@ -34,11 +43,12 @@ use crate::ir;
 use crate::reader::history::History;
 use crate::reader::notice::{self, Button, Notice};
 use crate::reader::outline::{self, OutlineEntry};
+use crate::reader::pageinfo;
 use crate::reader::settings::{self, Settings};
 use crate::reader::thread_tree::CommentKey;
 use crate::reader::title;
 use crate::reader::ui::images::ImageStore;
-use crate::reader::ui::{Action, Launch, RenderCtx, blocks, net, notice_ui, theme};
+use crate::reader::ui::{Action, Launch, RenderCtx, blocks, net, notice_ui, pageinfo_ui, theme};
 use crate::session::{self, LoadError, LoadOptions, Loaded, Rewrite, Target};
 use eframe::egui::{self, Align, Key, Layout, Modifiers, RichText, Ui};
 use net::{Job, Msg, Net, ReqId};
@@ -95,6 +105,7 @@ struct Chrome {
     outline_open: bool,
     find: Option<String>,
     help_open: bool,
+    info_open: bool,
 }
 
 pub struct ReaderApp {
@@ -404,11 +415,18 @@ impl ReaderApp {
                     };
                 }
                 Msg::Image {
-                    page, src, result, ..
+                    page,
+                    src,
+                    cookies,
+                    result,
+                    ..
                 } => {
                     if self.current != Some(page) {
                         continue;
                     }
+                    // Counted before the result is looked at: a cookie the CDN tried to set is
+                    // a thing that happened whether or not the picture ever decoded.
+                    self.images.cookie_attempts += cookies;
                     match result {
                         Ok(decoded) => self.images.insert(ctx, &src, decoded),
                         Err(e) => self.images.fail(&src, e.to_string()),
@@ -424,19 +442,9 @@ impl ReaderApp {
     }
 
     fn settle(&mut self, loaded: Loaded) {
-        // The rewrite landed somewhere other than the rule aimed at. Not an error, but the
-        // rule is dead, and that is the whole early-warning system.
-        if loaded.prov.rule_appears_dead {
-            self.flash(format!(
-                "{} redirected away; that rewrite rule appears dead",
-                loaded
-                    .prov
-                    .rewritten_to
-                    .as_ref()
-                    .and_then(Url::host_str)
-                    .unwrap_or("?")
-            ));
-        }
+        // A dead rewrite rule used to flash here for twelve seconds and then be unrecoverable.
+        // It is a band now (`notice::about_page`), which lasts as long as the page it is about:
+        // "this may not be the page you asked for" is not a thing to say once and withdraw.
         let outline = outline::build(&loaded.doc.blocks);
         let skip_block = title::dedupe(&loaded.doc);
         let fragment = self
@@ -483,6 +491,7 @@ impl ReaderApp {
             self.chrome.find = None;
             self.chrome.help_open = false;
             self.chrome.outline_open = false;
+            self.chrome.info_open = false;
             ctx.memory_mut(|m| m.surrender_focus(egui::Id::new(URL_BAR_ID)));
             return;
         }
@@ -580,6 +589,9 @@ impl ReaderApp {
         }
         if k(Modifiers::NONE, Key::T) {
             self.chrome.outline_open = !self.chrome.outline_open;
+        }
+        if k(Modifiers::NONE, Key::P) {
+            self.chrome.info_open = !self.chrome.info_open;
         }
         if k(Modifiers::NONE, Key::Slash) {
             self.chrome.find = Some(self.chrome.find.take().unwrap_or_default());
@@ -749,6 +761,7 @@ impl eframe::App for ReaderApp {
         // `hover_strip`.
         self.hover_strip(ui, &pal);
         self.help_overlay(&ctx, &pal);
+        self.info_panel(&ctx, &pal);
 
         if let Some(text) = self.pending_copy.take() {
             ctx.copy_text(text);
@@ -866,14 +879,13 @@ impl ReaderApp {
                         ui.label(RichText::new(text).color(pal.notice_fg));
                     }
 
+                    // The wrapper is what pins to the right edge; the icon alone would sit
+                    // wherever the notices happened to end. What used to be here was seven
+                    // facts `·`-joined into one dim truncated line, which crowded the URL and
+                    // on a narrow window was not drawn at all. It is a panel now.
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let summary = self.provenance_summary();
-                        let resp = ui.label(RichText::new(&summary).color(pal.dim).small());
-                        if !self.images.hosts.is_empty() {
-                            let mut hosts: Vec<&str> =
-                                self.images.hosts.iter().map(String::as_str).collect();
-                            hosts.sort_unstable();
-                            resp.on_hover_text(format!("image hosts: {}", hosts.join(", ")));
+                        if pageinfo_ui::icon(ui, pal, &self.settings.read).clicked() {
+                            action = Some(StripAction::ToggleInfo);
                         }
                     });
                 });
@@ -883,6 +895,7 @@ impl ReaderApp {
             Some(StripAction::Back) => self.go_back(),
             Some(StripAction::Forward) => self.go_forward(),
             Some(StripAction::OpenUrlBar) => self.open_url_bar(),
+            Some(StripAction::ToggleInfo) => self.chrome.info_open = !self.chrome.info_open,
             None => {}
         }
     }
@@ -951,41 +964,6 @@ impl ReaderApp {
             Page::Failed { url, .. } => notice::host_and_path(url),
             Page::Idle => "hww: press Ctrl+L for a URL, ? for help".to_owned(),
         }
-    }
-
-    fn provenance_summary(&self) -> String {
-        let Page::Ready(r) = &self.page else {
-            return String::new();
-        };
-        let p = &r.loaded.prov;
-        let mut parts = vec![
-            format!("{} {}", p.status, p.encoding),
-            format!("{} -> {} chars", human_bytes(p.bytes), p.chars),
-        ];
-        if !p.hops.is_empty() {
-            parts.push(format!("{} redirect(s)", p.hops.len()));
-        }
-        let cookies = p.cookie_attempts + self.images.cookie_attempts;
-        if cookies > 0 {
-            parts.push(format!("{cookies} cookie attempt(s) discarded"));
-        }
-        if let Some(t) = truncation_note(p.truncation) {
-            parts.push(t);
-        }
-        if self.images.loaded > 0 {
-            parts.push(format!(
-                "{} image(s), {} host(s)",
-                self.images.loaded,
-                self.images.hosts.len()
-            ));
-        }
-        if self.images.referer_requests > 0 {
-            parts.push(format!(
-                "{} origin-only referer(s)",
-                self.images.referer_requests
-            ));
-        }
-        parts.join(" · ")
     }
 
     fn url_bar(&mut self, ui: &mut Ui, pal: &theme::Palette) {
@@ -1132,6 +1110,30 @@ impl ReaderApp {
         }
     }
 
+    /// The page-info panel, and the rows it draws.
+    ///
+    /// Built only while the panel is open: `pageinfo::rows` allocates a dozen `String`s, and
+    /// this runs every frame.
+    fn info_panel(&mut self, ctx: &egui::Context, pal: &theme::Palette) {
+        if !self.chrome.info_open {
+            return;
+        }
+        let rows = match &self.page {
+            Page::Ready(r) => pageinfo::rows(&r.loaded.prov, &self.images.counts()),
+            _ => Vec::new(),
+        };
+        let mut open = true;
+        pageinfo_ui::panel(
+            ctx,
+            pal,
+            &self.settings.read,
+            &rows,
+            self.strip_height,
+            &mut open,
+        );
+        self.chrome.info_open = open;
+    }
+
     fn help_overlay(&mut self, ctx: &egui::Context, pal: &theme::Palette) {
         if !self.chrome.help_open {
             return;
@@ -1249,7 +1251,7 @@ impl ReaderApp {
             Page::Idle => vec![notice::idle()],
             Page::Loading { url, started } => vec![notice::loading(url, started.elapsed())],
             Page::Failed { url, error, .. } => vec![notice::failure(error, url)],
-            Page::Ready(r) => notice::about_page(r.loaded.prov.status, r.loaded.doc.text_len()),
+            Page::Ready(r) => notice::about_page(&r.loaded.prov, r.loaded.doc.text_len()),
         };
         let mut pressed = None;
         for notice in &notices {
@@ -1345,6 +1347,7 @@ enum StripAction {
     Back,
     Forward,
     OpenUrlBar,
+    ToggleInfo,
 }
 
 /// Written with the glyphs egui's embedded fonts actually carry. `→` is not one of them; it
@@ -1361,6 +1364,7 @@ const HELP: &[(&str, &str)] = &[
     ("r / R", "reload · reload without rewrite rules"),
     ("i / I", "load focused image · load all, naming their hosts"),
     ("t", "outline"),
+    ("p", "page info: how this page arrived"),
     ("/ then n / N", "find in page · next / previous match"),
     ("z / Z", "collapse focused reply · collapse all"),
     ("y / Y", "copy page URL · copy focused link"),
@@ -1368,24 +1372,3 @@ const HELP: &[(&str, &str)] = &[
     ("d", "cycle theme"),
     ("? / Esc / q", "this help · dismiss chrome · quit"),
 ];
-
-fn human_bytes(n: usize) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1} MB", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{} kB", n / 1_000)
-    } else {
-        format!("{n} B")
-    }
-}
-
-fn truncation_note(t: crate::fetch::Truncation) -> Option<String> {
-    use crate::fetch::Truncation;
-    match t {
-        Truncation::Complete => None,
-        Truncation::AtCap(n) => Some(format!("truncated at {} MB", n / 1_000_000)),
-        Truncation::MaybeAtCap(n) => Some(format!("may be truncated at {} MB", n / 1_000_000)),
-        Truncation::Timeout(d) => Some(format!("truncated: timed out after {}s", d.as_secs())),
-        Truncation::Incomplete(n) => Some(format!("truncated: connection dropped at {n} bytes")),
-    }
-}

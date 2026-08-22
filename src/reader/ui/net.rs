@@ -117,6 +117,12 @@ pub enum Msg {
         req: ReqId,
         page: ReqId,
         src: String,
+        /// Cookies the subresource tried to set, counted whether or not it decoded.
+        ///
+        /// Its own field rather than a member of the `Ok`: the fetch is what sees a cookie and
+        /// the decode is what fails, so pairing the count with the picture loses it on exactly
+        /// the untrusted-input path most likely to fail.
+        cookies: usize,
         result: Result<Decoded, ImageError>,
     },
     /// A worker unwound. Carries the page so the UI can stop waiting on it.
@@ -321,11 +327,12 @@ fn run_job(session: &Session, job: Job, tx: &mpsc::Sender<Msg>, ctx: &egui::Cont
             max_width,
             send_referer,
         } => {
-            let result = load_image(session, &url, &referrer, max_width, send_referer);
+            let (cookies, result) = load_image(session, &url, &referrer, max_width, send_referer);
             let _ = tx.send(Msg::Image {
                 req,
                 page,
                 src,
+                cookies,
                 result,
             });
         }
@@ -333,22 +340,28 @@ fn run_job(session: &Session, job: Job, tx: &mpsc::Sender<Msg>, ctx: &egui::Cont
     ctx.request_repaint();
 }
 
+/// Returns the cookie attempts alongside the result rather than inside it.
+///
+/// A cookie attempt is a fact about the *request*, and it is discovered before the bytes are
+/// ever decoded. Folding it into the `Ok` arm would discard it whenever a decode failed, which
+/// is the one path where untrusted bytes get a say in whether the count survives.
 fn load_image(
     session: &Session,
     url: &Url,
     referrer: &Url,
     max_width: u32,
     send_referer: bool,
-) -> Result<Decoded, ImageError> {
-    let fetched = session.fetch_image(url, referrer, send_referer)?;
+) -> (usize, Result<Decoded, ImageError>) {
+    let fetched = match session.fetch_image(url, referrer, send_referer) {
+        Ok(f) => f,
+        Err(e) => return (0, Err(e.into())),
+    };
+    let cookies = fetched.cookie_attempts;
     let _serialized = DECODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let limits = DecodeLimits {
         max_width,
         ..DecodeLimits::default()
     };
-    Ok(image_decode::decode(
-        &fetched.bytes,
-        &fetched.partial,
-        &limits,
-    )?)
+    let decoded = image_decode::decode(&fetched.bytes, &fetched.partial, &limits);
+    (cookies, decoded.map_err(ImageError::from))
 }

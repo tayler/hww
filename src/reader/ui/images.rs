@@ -19,6 +19,7 @@
 use crate::ir;
 use crate::reader::image_decode::Decoded;
 use crate::reader::opts::ImagePolicy;
+use crate::reader::pageinfo::Counts;
 use crate::reader::ui::{Action, RenderCtx};
 use eframe::egui::{self, RichText, TextureHandle, Ui};
 use std::collections::{HashMap, HashSet};
@@ -115,6 +116,22 @@ impl ImageStore {
         self.loaded += 1;
         self.touch(src);
         self.evict();
+    }
+
+    /// The disclosure counters, for the page-info panel.
+    ///
+    /// Assembled here so the field list lives beside the fields it reads: `pageinfo::Counts`
+    /// is one directory up, where egui cannot reach, and a second hand-written copy of these
+    /// four names is one that goes stale the next time a counter is added.
+    pub fn counts(&self) -> Counts {
+        let mut hosts: Vec<String> = self.hosts.iter().cloned().collect();
+        hosts.sort_unstable();
+        Counts {
+            images: self.loaded,
+            hosts,
+            cookie_attempts: self.cookie_attempts,
+            referer_requests: self.referer_requests,
+        }
     }
 
     pub fn fail(&mut self, src: &str, why: String) {
@@ -301,5 +318,43 @@ pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>)
                 ctx.act(Action::LoadImage(img.src.clone()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The second test under `ui/`, admitted on the same argument as the first.
+    ///
+    /// `counts` and `fail` take no `egui::Context`, unlike `insert`, which uploads a texture.
+    /// The directory's rule is "split by what a test can reach", and these are reachable; the
+    /// half that needs a window stays merely compiled.
+    ///
+    /// What this does **not** reach is `net::load_image`, where a cookie attempt is actually
+    /// counted: that needs a live `Session`. The guard there is the signature,
+    /// `(usize, Result<Decoded, ImageError>)`, which has no arm that can drop the count.
+    #[test]
+    fn a_failed_image_still_reports_what_its_request_disclosed() {
+        let mut store = ImageStore {
+            cookie_attempts: 2,
+            referer_requests: 1,
+            ..ImageStore::default()
+        };
+        store.hosts.insert("img.example.org".to_owned());
+        store.hosts.insert("cdn.example.net".to_owned());
+
+        // The decode failed. Nothing about what the request disclosed is undone by that.
+        store.fail("a.png", "not an image".to_owned());
+
+        let counts = store.counts();
+        assert_eq!(counts.cookie_attempts, 2);
+        assert_eq!(counts.referer_requests, 1);
+        assert_eq!(counts.images, 0, "nothing decoded");
+        assert_eq!(
+            counts.hosts,
+            vec!["cdn.example.net", "img.example.org"],
+            "sorted here, so the panel never reorders between frames"
+        );
     }
 }

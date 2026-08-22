@@ -113,14 +113,21 @@ one function that owns the pipeline and reports the rewrite before it dispatches
     cargo run --features gui --bin hww-gui -- <url>
 
 Keyboard first, but nothing is keyboard-only: `?` lists the keys, and the status strip along
-the bottom carries back/forward and a clickable URL so a mouse alone can navigate. That strip
-never hides: the URL bar, outline, find bar, and help all dismiss on `Esc`, but a rewrite
-notice has to be on screen *before* the request goes out, so the strip stays.
+the bottom carries back/forward, a clickable URL, and a circled `i` so a mouse alone can
+navigate. That strip never hides: the URL bar, outline, find bar, and help all dismiss on
+`Esc`, but a rewrite notice has to be on screen *before* the request goes out, so the strip
+stays.
 
-Everything the reader reports about a page is a notice: a band across the full width, outside
-the reading column, which no page can be, because the column is a fixed measure. Errors, a 4xx
-body shown anyway, and an extraction that came back thin are all notices, and none of them is
-ever dressed as prose.
+What the reader has to say about a page divides on whether it can wait. Anything that would be
+mis-read otherwise is a notice: a band across the full width, outside the reading column, which
+no page can be, because the column is a fixed measure. Errors, a 4xx body shown anyway, an
+extraction that came back thin, a body that arrived truncated, and a rewrite rule that landed
+on the wrong host are all notices, and none of them is ever dressed as prose.
+
+The rest is accounting, and it lives behind the circled `i` (or `p`): encoding, bytes
+downloaded against characters extracted, the redirect chain, cookies discarded, images loaded
+and their hosts. Facts worth being able to ask for, not worth a permanent ribbon of six-point
+text beside the URL.
 
 One centred reading column, measured in characters (`[` and `]`). Zoom is egui's own, so
 `Ctrl`+`+`/`-`/`0`, `Ctrl`+wheel, and trackpad pinch behave the way a browser does. Themes are
@@ -128,8 +135,8 @@ light, sepia, dark, and follow-the-system (`d`).
 
 **Images are placeholders that name their host** (`[image] load from cdn.example.net`), and
 load only on an explicit click. They are never loaded automatically, on hover, or in advance.
-Each load is counted in the status strip alongside cookie attempts, and nothing is written to
-disk. Image requests, and only image requests, carry an origin-only `Referer`; documents carry
+Each load is counted alongside cookie attempts in the page-info panel, and nothing is written
+to disk. Image requests, and only image requests, carry an origin-only `Referer`; documents carry
 none. See AGENTS.md for why that one header is worth its exception.
 
 ## Building a corpus

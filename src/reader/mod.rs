@@ -23,6 +23,9 @@ pub mod inline;
 pub mod notice;
 pub mod opts;
 pub mod outline;
+/// How a page arrived, as labelled rows for the page-info panel. No egui types, so the fast
+/// CI job tests it. `notice`'s quiet half: what does not rise to interrupting the column.
+pub mod pageinfo;
 pub mod settings;
 pub mod thread_tree;
 pub mod title;

@@ -39,7 +39,8 @@
 //! wording for the same eight cases; [`failure`] is compiled for the CLI too, whenever that is
 //! wired up.
 
-use crate::session::LoadError;
+use crate::fetch::Truncation;
+use crate::session::{LoadError, Provenance};
 use std::time::Duration;
 use url::Url;
 
@@ -121,14 +122,46 @@ impl Notice {
 /// Empty for a page that arrived clean, so the column costs nothing on the pages that are fine.
 /// Takes no fragment argument: an unresolved `#fragment` is a navigation event, not a fact
 /// about the page's content, and it is reported once in the status strip.
-pub fn about_page(status: u16, text_len: usize) -> Vec<Notice> {
+///
+/// The first two are here rather than in the status strip because neither is accounting. A
+/// dead rule means the article on screen may not be the article asked for, and a truncated
+/// body means it stops early with nothing to say so: both are things the reader would
+/// otherwise mis-read, which is what [`Severity::Caution`] is for. They were a dim fragment at
+/// the right-hand end of a truncated strip row and a twelve-second flash respectively, so the
+/// first was often not drawn at all and the second could not be recalled once it faded.
+pub fn about_page(prov: &Provenance, text_len: usize) -> Vec<Notice> {
     let mut out = Vec::new();
-    if status >= 400 {
+    if prov.rule_appears_dead {
+        // Not an error: the fetch succeeded. But it succeeded somewhere else, and no rewrite
+        // is ever retried, so this is the whole early-warning system.
+        let aimed = prov
+            .rewritten_to
+            .as_ref()
+            .and_then(Url::host_str)
+            .unwrap_or("the rewritten host");
+        let landed = prov.final_url.host_str().unwrap_or("somewhere else");
+        let mut n = Notice::new(
+            Severity::Caution,
+            format!(
+                "A rewrite rule sent this to {aimed}, which redirected to {landed}. \
+                 The rule appears dead, and this may not be the page you asked for."
+            ),
+        );
+        n.detail = vec![format!("asked for {}", prov.requested)];
+        out.push(n);
+    }
+    if let Some(body) = truncation_body(prov.truncation) {
+        out.push(Notice::new(Severity::Caution, body));
+    }
+    if prov.status >= 400 {
         // Many 404s are readable and many paywalls answer 403 with the article still in the
         // markup, so this is a remark *over* the content, never instead of it.
         out.push(Notice::new(
             Severity::Caution,
-            format!("The server answered {status}. Showing what it sent anyway."),
+            format!(
+                "The server answered {}. Showing what it sent anyway.",
+                prov.status
+            ),
         ));
     }
     if text_len < THIN_TEXT {
@@ -138,6 +171,33 @@ pub fn about_page(status: u16, text_len: usize) -> Vec<Notice> {
         ));
     }
     out
+}
+
+/// The band prose for a body that did not arrive whole.
+///
+/// One string per variant, hedging exactly where the evidence hedges: `len >= cap` alone
+/// cannot tell a body that was cut from one that happened to end on the boundary, so
+/// `MaybeAtCap` says "may" and `AtCap` does not. The terser phrasing for the page-info panel
+/// is [`crate::reader::pageinfo`]'s; this one is the alarm, that one is the record.
+fn truncation_body(t: Truncation) -> Option<String> {
+    Some(match t {
+        Truncation::Complete => return None,
+        Truncation::AtCap(n) => format!(
+            "Stopped at the {} MB body cap. The rest of this page was not fetched.",
+            n / 1_000_000
+        ),
+        Truncation::MaybeAtCap(n) => format!(
+            "The body reached the {} MB cap and may be cut short.",
+            n / 1_000_000
+        ),
+        Truncation::Timeout(d) => format!(
+            "The body was still arriving after {}s. This article is incomplete.",
+            d.as_secs()
+        ),
+        Truncation::Incomplete(_) => {
+            "The connection dropped partway. This article is incomplete.".to_owned()
+        }
+    })
 }
 
 /// The screen a failed navigation gets.
@@ -264,6 +324,36 @@ mod tests {
         Url::parse(s).unwrap()
     }
 
+    /// The shape `session` builds when a rewrite lands somewhere the rule did not aim at.
+    fn dead_rule() -> Provenance {
+        let mut p = Provenance::fixture("https://example.com/a");
+        p.rewritten_to = Some(url("https://alt.example.net/a"));
+        p.rule_appears_dead = true;
+        p.final_url = url("https://www.example.org/a");
+        p
+    }
+
+    /// Every way a body can fail to arrive whole. `Complete` is deliberately absent: it is the
+    /// one variant that must produce nothing, and it is asserted separately.
+    fn every_truncation() -> Vec<Truncation> {
+        vec![
+            Truncation::AtCap(5_000_000),
+            Truncation::MaybeAtCap(5_000_000),
+            Truncation::Timeout(Duration::from_secs(15)),
+            Truncation::Incomplete(812_345),
+        ]
+    }
+
+    /// A clean 200 for `about_page` to vary one field of at a time.
+    ///
+    /// Shared with `session`'s own tests via `Provenance::fixture` rather than restated: an
+    /// eleven-field literal copied per module is one the fetcher can outgrow silently.
+    fn page(status: u16) -> Provenance {
+        let mut p = Provenance::fixture("https://example.com/a");
+        p.status = status;
+        p
+    }
+
     /// Every failure that can be built without a live `reqwest::Error`.
     ///
     /// `FetchError::Transport` wraps one and cannot be constructed here, so the fallback arm
@@ -297,8 +387,14 @@ mod tests {
             &url("https://example.com/"),
             Duration::from_secs(3),
         ));
-        all.extend(about_page(404, 10));
-        all.extend(about_page(503, 9_000));
+        all.extend(about_page(&page(404), 10));
+        all.extend(about_page(&page(503), 9_000));
+        all.extend(about_page(&dead_rule(), 9_000));
+        for t in every_truncation() {
+            let mut p = page(200);
+            p.truncation = t;
+            all.extend(about_page(&p, 9_000));
+        }
         all
     }
 
@@ -387,14 +483,14 @@ mod tests {
     /// The column is free on the pages that are fine, which is nearly all of them.
     #[test]
     fn a_healthy_page_says_nothing() {
-        assert!(about_page(200, 5_000).is_empty());
+        assert!(about_page(&page(200), 5_000).is_empty());
     }
 
     /// A readable 404 is not a failure. Many paywalls answer 403 with the article intact, and
     /// replacing that with an error screen would throw away a page the reader can read.
     #[test]
     fn a_readable_404_is_a_caution_not_a_failure() {
-        let notices = about_page(404, 5_000);
+        let notices = about_page(&page(404), 5_000);
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].severity, Severity::Caution);
         assert!(
@@ -413,18 +509,93 @@ mod tests {
     /// where the warning starts.
     #[test]
     fn the_thin_extraction_threshold_matches_the_extractor() {
-        assert_eq!(about_page(200, THIN_TEXT).len(), 0);
-        assert_eq!(about_page(200, THIN_TEXT - 1).len(), 1);
+        assert_eq!(about_page(&page(200), THIN_TEXT).len(), 0);
+        assert_eq!(about_page(&page(200), THIN_TEXT - 1).len(), 1);
     }
 
     /// Loudest first: the remark most likely to change how the page is read sits nearest the
     /// top, where it is read before the prose it is about.
     #[test]
     fn a_page_that_is_both_broken_and_empty_leads_with_the_status() {
-        let notices = about_page(500, 10);
+        let notices = about_page(&page(500), 10);
         assert_eq!(notices.len(), 2);
         assert!(notices[0].body.contains("500"));
         assert!(notices[1].body.contains("JavaScript"));
+    }
+
+    /// The early warning that stands in for a retry, in the one place it cannot expire.
+    ///
+    /// It used to be a twelve-second `flash` in the status strip. A reader who looked away had
+    /// no way to learn that the page in front of them came from a host the rule did not aim
+    /// at, and no way to ask.
+    #[test]
+    fn a_dead_rule_is_a_band_naming_both_hosts() {
+        let notices = about_page(&dead_rule(), 9_000);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].severity, Severity::Caution);
+        assert!(
+            !notices[0].severity.fills_the_viewport(),
+            "the page under it is readable"
+        );
+        assert!(
+            notices[0].body.contains("alt.example.net"),
+            "the host aimed at"
+        );
+        assert!(
+            notices[0].body.contains("www.example.org"),
+            "the host that answered"
+        );
+        assert!(
+            notices[0].detail[0].contains("example.com/a"),
+            "what was asked for"
+        );
+    }
+
+    /// A truncated body ends mid-article with nothing on screen to say so, which is the exact
+    /// definition of something the reader would otherwise mis-read.
+    #[test]
+    fn every_truncation_is_a_band_and_a_whole_body_is_not() {
+        let mut clean = page(200);
+        clean.truncation = Truncation::Complete;
+        assert!(about_page(&clean, 9_000).is_empty());
+
+        for t in every_truncation() {
+            let mut p = page(200);
+            p.truncation = t;
+            let notices = about_page(&p, 9_000);
+            assert_eq!(notices.len(), 1, "{t:?} produced {} bands", notices.len());
+            assert_eq!(notices[0].severity, Severity::Caution);
+            assert!(!notices[0].body.is_empty());
+        }
+    }
+
+    /// `len >= cap` cannot tell a body that was cut from one that ended on the boundary, so the
+    /// two caps must not claim the same certainty. Losing this distinction is how a reader comes
+    /// to distrust the warning on the pages where it is right.
+    #[test]
+    fn the_two_caps_hedge_differently() {
+        let mut certain = page(200);
+        certain.truncation = Truncation::AtCap(5_000_000);
+        let mut hedged = page(200);
+        hedged.truncation = Truncation::MaybeAtCap(5_000_000);
+
+        assert!(!about_page(&certain, 9_000)[0].body.contains("may"));
+        assert!(about_page(&hedged, 9_000)[0].body.contains("may"));
+    }
+
+    /// Loudest first, across all four. A dead rule outranks everything because it is the only
+    /// one that says the article may be the wrong article.
+    #[test]
+    fn the_bands_are_ordered_loudest_first() {
+        let mut p = dead_rule();
+        p.status = 500;
+        p.truncation = Truncation::Incomplete(812_345);
+        let notices = about_page(&p, 10);
+        assert_eq!(notices.len(), 4);
+        assert!(notices[0].body.contains("rule appears dead"));
+        assert!(notices[1].body.contains("incomplete"));
+        assert!(notices[2].body.contains("500"));
+        assert!(notices[3].body.contains("JavaScript"));
     }
 
     /// Moved out of `ui/app.rs`, where it had no test.
