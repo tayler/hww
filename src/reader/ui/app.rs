@@ -76,11 +76,36 @@ pub fn run(launch: Launch) -> eframe::Result {
 }
 
 enum Page {
-    /// Nothing asked for yet: the URL bar is open and focused.
+    /// Nothing asked for yet, so there is nothing to draw and nothing in flight.
+    ///
+    /// `ReaderApp::new` opens the URL bar over it when the session starts with no page; it is
+    /// also what `take_shown` leaves behind for the length of one render, which is why the bar
+    /// is not part of the state itself.
     Idle,
     Loading {
         url: Url,
         started: Instant,
+        /// The page still on screen while this one is fetched, and the whole of what makes a
+        /// navigation stop being a screen change.
+        ///
+        /// A click used to blank the reading column on the frame it happened: `Page::Loading`
+        /// replaced the page, and `notice::loading` is a `Quiet` band, which fills the viewport.
+        /// On a fast host that flashes for two frames and cannot be read; on a slow one it is a
+        /// blank screen, so following a link reads as arriving somewhere empty and then being
+        /// moved again. Keeping the outgoing page is the browser model and the one readers
+        /// already have: the column does not change until a new document commits.
+        ///
+        /// `None` when there is genuinely nothing to keep: the session's first navigation, or a
+        /// retry from a failure. Only then is the loading band drawn.
+        from: Option<Box<Ready>>,
+        /// Whether this navigation added the history entry now at the cursor.
+        ///
+        /// Only then may the next navigation overwrite that entry instead of appending, because
+        /// only then does it belong to a page that was never rendered. A reload, a Back, and a
+        /// Forward all reach `navigate` with `push: false` and leave a `Loading` standing over an
+        /// entry that is somebody's real history, so overwriting on "a fetch is in flight" alone
+        /// deletes it: `[A]`, press `r`, click a link before it answers, and A is gone.
+        pushed: bool,
     },
     Ready(Box<Ready>),
     Failed {
@@ -92,11 +117,71 @@ enum Page {
     },
 }
 
+impl Page {
+    /// Take the visible page out for the length of one render, leaving the rest of the state
+    /// intact.
+    ///
+    /// `ready_screen` needs the page and the image store at once and both sit behind one
+    /// `&mut self`, so it borrows the page by moving it and putting it back. The placeholder left
+    /// behind has to be the **same variant**: swapping `Idle` into a `Loading` would drop the
+    /// `url` and `started` that the status strip and the progress rule read on that very frame.
+    ///
+    /// A method on `Page` rather than on `ReaderApp` because it is a pure transition over this
+    /// enum and nothing else, which is what makes it reachable by a test. `ReaderApp` needs a
+    /// window.
+    fn take_shown(&mut self) -> Option<Box<Ready>> {
+        match self {
+            Page::Loading { from, .. } => from.take(),
+            Page::Ready(_) => match std::mem::replace(self, Page::Idle) {
+                Page::Ready(r) => Some(r),
+                _ => unreachable!("just matched"),
+            },
+            Page::Idle | Page::Failed { .. } => None,
+        }
+    }
+
+    /// Whether a new navigation should overwrite the history entry at the cursor rather than
+    /// append after it.
+    ///
+    /// True only for a navigation that is still in flight *and* put that entry there itself, so
+    /// the entry belongs to a page that was never rendered. Clicking a second link before the
+    /// first answers is the case it exists for. The near-miss is testing only that a fetch is in
+    /// flight: `reload`, `go_back`, and `go_forward` all reach `navigate` with `push: false` and
+    /// leave a `Loading` standing over an entry that is real history, and overwriting that
+    /// deletes a page the reader actually visited.
+    fn supersedes_its_history_entry(&self) -> bool {
+        matches!(self, Page::Loading { pushed: true, .. })
+    }
+
+    /// Put back what [`Page::take_shown`] took.
+    ///
+    /// Must run before any deferred action: `apply` can reach `navigate`, which writes the page,
+    /// and restoring after that would clobber the navigation with the page it replaced.
+    fn restore_shown(&mut self, ready: Box<Ready>) {
+        match self {
+            Page::Loading { from, .. } => *from = Some(ready),
+            // `take_shown` left `Idle` behind, and nothing since has set a page.
+            _ => *self = Page::Ready(ready),
+        }
+    }
+}
+
 struct Ready {
     loaded: Loaded,
     outline: Vec<OutlineEntry>,
     /// `Some(i)` => `blocks[i]` repeats `doc.title` and is skipped.
     skip_block: Option<usize>,
+    /// The navigation this page arrived on, and the id every image request made *from* it
+    /// carries.
+    ///
+    /// Not `ReaderApp::current`, which is the navigation in flight: those are the same id only
+    /// while nothing is loading. Once the outgoing page stays on screen it also stays clickable,
+    /// so an image placeholder can be clicked on a page that is already being replaced. Stamping
+    /// the job with `current` would hand that reply to whatever committed next, and if the two
+    /// pages share an image `src`, which a logo, a sprite, or a CDN path routinely does on the
+    /// same site, the new page would display a picture nobody clicked on it. Nothing is ever auto-loaded is
+    /// the first line of the images charter; this field is what keeps it true.
+    req: ReqId,
 }
 
 #[derive(Default)]
@@ -169,6 +254,14 @@ pub struct ReaderApp {
     focused_href: Option<String>,
     focused_image: Option<String>,
     focused_comment: Option<CommentKey>,
+    /// The link a click has been dispatched for, marked in place until the navigation ends.
+    ///
+    /// A widget id rather than an href: `html::link_block` copies one block-level anchor's href
+    /// onto every inline in the block, and a front page repeats the same href in nav, headline,
+    /// and footer, so matching on the string marks every occurrence instead of the one that was
+    /// clicked. The id is stable across the mark being appended, because a new widget only
+    /// shifts the ids of widgets after it.
+    pending_link: Option<egui::Id>,
     /// One-shot: give the URL bar keyboard focus on the next frame, after it exists.
     focus_url_bar: bool,
     /// One-shot: the same for the find field. Focusing it from the keymap instead would hand
@@ -230,6 +323,7 @@ impl ReaderApp {
             focused_href: None,
             focused_image: None,
             focused_comment: None,
+            pending_link: None,
             focus_url_bar: false,
             focus_find: false,
         };
@@ -243,23 +337,45 @@ impl ReaderApp {
 
     // ---------------------------------------------------------------- navigation
 
+    /// Dispatch a navigation. **Nothing on screen changes here except the chrome.**
+    ///
+    /// The resets that belong to the page being *fetched* are not done here; they are
+    /// [`ReaderApp::commit`]'s, and they run when a document actually takes the column. Doing
+    /// them at dispatch is what used to clear the textures, collapse state, and scroll offset of
+    /// the page the reader was still looking at.
     fn navigate(&mut self, url: Url, rewrite: bool, push: bool) {
         let req = self.net.mint();
+        // The page on screen stays on screen. Taken rather than borrowed so a chain of
+        // abandoned loads, Back pressed twice inside one slow fetch, carries the same page
+        // forward instead of falling to blank on the second hop.
+        // Whether the navigation being replaced owns the entry at the cursor: still in flight,
+        // and it put that entry there itself. Read before the `take`, which leaves `Idle` behind.
+        let superseding = self.page.supersedes_its_history_entry();
+        let from = match std::mem::replace(&mut self.page, Page::Idle) {
+            Page::Ready(r) => Some(r),
+            Page::Loading { from, .. } => from,
+            // A failure owns the viewport already; there is nothing under it to keep.
+            Page::Idle | Page::Failed { .. } => None,
+        };
         self.last_rewrite = rewrite;
         self.current = Some(req);
         self.rewrite_notice = None;
-        // Textures die with the page they were loaded for; the disclosure counters do not.
-        self.images.clear_textures();
-        self.collapsed.clear();
-        self.find_current = 0;
-        self.find_total = 0;
-        self.scroll_offset = Some(0.0);
+        self.pending_link = None;
         if push {
-            self.history.push(url.clone());
+            // A navigation that never committed gets no entry of its own. Clicking a second link
+            // before the first has answered is ordinary now that the page stays clickable, and
+            // `push` on both would leave a middle entry for a page that was never rendered.
+            if superseding {
+                self.history.replace(url.clone());
+            } else {
+                self.history.push(url.clone());
+            }
         }
         self.page = Page::Loading {
             url: url.clone(),
             started: Instant::now(),
+            from,
+            pushed: push,
         };
         self.net.submit(Job::Load {
             req,
@@ -292,8 +408,14 @@ impl ReaderApp {
         }
     }
 
+    /// Whether `url` addresses the page already on screen, fragment aside.
+    ///
+    /// The visible page, not the one being fetched. Against `Page::Ready` alone this returns
+    /// `false` all through a navigation, and `follow` then treats a `#fragment` link on the page
+    /// the reader is looking at as a fresh document fetch, superseding the navigation in flight
+    /// to re-download the article already on screen.
     fn same_page(&self, url: &Url) -> bool {
-        let Page::Ready(ready) = &self.page else {
+        let Some(ready) = self.shown() else {
             return false;
         };
         let mut a = url.clone();
@@ -304,7 +426,7 @@ impl ReaderApp {
     }
 
     fn jump_to_fragment(&mut self, fragment: &str) {
-        let Page::Ready(ready) = &self.page else {
+        let Some(ready) = self.shown() else {
             return;
         };
         match outline::find_fragment(&ready.outline, fragment) {
@@ -340,9 +462,11 @@ impl ReaderApp {
     // ---------------------------------------------------------------- images
 
     fn load_image(&mut self, ctx: &egui::Context, src: &str) {
-        let (Page::Ready(ready), Some(page_req)) = (&self.page, self.current) else {
+        // The visible page, and *its* request id rather than `self.current`: see `Ready::req`.
+        let Some(ready) = self.shown() else {
             return;
         };
+        let page_req = ready.req;
         if self.images.is_pending(src) {
             return;
         }
@@ -374,7 +498,7 @@ impl ReaderApp {
     }
 
     fn load_all_images(&mut self, ctx: &egui::Context) {
-        let Page::Ready(ready) = &self.page else {
+        let Some(ready) = self.shown() else {
             return;
         };
         let srcs = collect_image_srcs(&ready.loaded.doc);
@@ -431,6 +555,8 @@ impl ReaderApp {
                     let url = self.loading_url().unwrap_or_else(|| {
                         Url::parse("about:blank").expect("a literal URL parses")
                     });
+                    // A failure replaces the page it was fetched over, so this is a commit too.
+                    self.commit();
                     self.page = Page::Failed {
                         url,
                         error,
@@ -444,7 +570,10 @@ impl ReaderApp {
                     result,
                     ..
                 } => {
-                    if self.current != Some(page) {
+                    // Against the page the request was made *from*, not the navigation in
+                    // flight: see `Ready::req`. A picture whose page has been replaced is
+                    // dropped, which is the whole reason the id is stamped there.
+                    if self.shown().map(|r| r.req) != Some(page) {
                         continue;
                     }
                     // Counted before the result is looked at: a cookie the CDN tried to set is
@@ -455,9 +584,31 @@ impl ReaderApp {
                         Err(e) => self.images.fail(&src, e.to_string()),
                     }
                 }
-                Msg::Panicked { page, .. } => {
-                    if self.current == Some(page) {
-                        self.flash("a worker failed while handling that request".to_owned());
+                Msg::Panicked { req, page } => {
+                    if self.current != Some(page) {
+                        continue;
+                    }
+                    self.flash("a worker failed while handling that request".to_owned());
+                    // `req == page` only for a document load; see `Job::page`. Nothing is coming
+                    // for it and nothing will time out either, because no worker still holds the
+                    // job, so a `Page::Loading` left standing here spins the repaint floor at
+                    // 10 fps for the rest of the session behind a progress rule pegged at the far
+                    // edge, which `notice_ui` documents as meaning the request is at its deadline.
+                    // An image panic is not this: its placeholder states its own case and the
+                    // page is fine.
+                    if req == page {
+                        self.commit();
+                        self.page = Page::Failed {
+                            url: self.loading_url().unwrap_or_else(|| {
+                                Url::parse("about:blank").expect("a literal URL parses")
+                            }),
+                            error: LoadError::Fetch(crate::fetch::FetchError::Io(
+                                std::io::Error::other(
+                                    "a worker failed while handling this request",
+                                ),
+                            )),
+                            rewrite: self.last_rewrite,
+                        };
                     }
                 }
             }
@@ -474,10 +625,15 @@ impl ReaderApp {
             .history
             .current()
             .and_then(|u| u.fragment().map(str::to_owned));
+        let req = self.current.unwrap_or_else(|| self.net.mint());
+        // Before the page is installed, so `jump_to_fragment` below overrides the reset rather
+        // than being overridden by it.
+        self.commit();
         self.page = Page::Ready(Box::new(Ready {
             loaded,
             outline,
             skip_block,
+            req,
         }));
         if let Some(f) = fragment {
             self.jump_to_fragment(&f);
@@ -492,10 +648,11 @@ impl ReaderApp {
     /// runs the same `settle`, so a scene cannot drift into a page shape the pipeline cannot
     /// produce: everything downstream of here is the code a real navigation runs.
     ///
-    /// The resets are `navigate`'s, minus the dispatch, plus the history: a photographed page
-    /// has to stand alone. Pushing onto whatever came before would put the back arrow in the
-    /// status strip in a different state depending on how many scenes ran ahead of this one,
-    /// which is a picture that changes without the page changing.
+    /// The page-scoped resets are [`ReaderApp::commit`]'s, which both arms below reach; what is
+    /// left here is the dispatch state a real navigation would have set, plus the history. A
+    /// photographed page has to stand alone: pushing onto whatever came before would put the
+    /// back arrow in the status strip in a different state depending on how many scenes ran
+    /// ahead of this one, which is a picture that changes without the page changing.
     pub fn present(
         &mut self,
         url: Url,
@@ -504,22 +661,58 @@ impl ReaderApp {
     ) {
         self.current = Some(self.net.mint());
         self.rewrite_notice = rewrite_notice;
-        self.images.clear_textures();
-        self.collapsed.clear();
-        self.find_current = 0;
-        self.find_total = 0;
-        self.scroll_offset = Some(0.0);
         self.history = History::new();
         self.history.push(url.clone());
         match result {
             Ok(loaded) => self.settle(loaded),
             Err(error) => {
+                self.commit();
                 self.page = Page::Failed {
                     url,
                     error,
                     rewrite: self.last_rewrite,
                 }
             }
+        }
+    }
+
+    /// Everything a new page takes over from the one it replaces.
+    ///
+    /// These used to run in `navigate`, on the frame of the click. That was correct while a
+    /// navigation blanked the column and wrong the moment it stopped: the outgoing page is still
+    /// being read, and it still needs its textures, its collapsed threads, its find position, and
+    /// above all its scroll offset. Resetting the offset at dispatch is what made a click jolt
+    /// the page to the top before anything had arrived.
+    ///
+    /// Called from both places a page actually takes the column, `settle` and the `Msg::Failed`
+    /// arm of `drain`, and from `present`, so the screenshot tool cannot drift from the
+    /// navigation path.
+    fn commit(&mut self) {
+        // Textures die with the page they were loaded for; the disclosure counters do not.
+        self.images.clear_textures();
+        self.collapsed.clear();
+        self.find_current = 0;
+        self.find_total = 0;
+        self.pending_link = None;
+        self.scroll_offset = Some(0.0);
+        // The other two scroll one-shots, or a `Shift+G` pressed on the very frame a page
+        // commits is applied against the *outgoing* page's `max_scroll` and opens the new one
+        // at an arbitrary offset.
+        self.scroll_delta = 0.0;
+        self.scroll_to_block = None;
+    }
+
+    /// The page the reading column is drawing, which during a navigation is the outgoing one.
+    ///
+    /// Everything that describes what is *on screen* goes through this: the outline, the info
+    /// panel, find, image loads, `y`, and the cautions in `notices`. The handful of things that
+    /// describe the navigation instead, the strip's URL, the progress rule, and the repaint
+    /// floor, match on `self.page` directly and are meant to.
+    fn shown(&self) -> Option<&Ready> {
+        match &self.page {
+            Page::Ready(r) => Some(r),
+            Page::Loading { from, .. } => from.as_deref(),
+            Page::Idle | Page::Failed { .. } => None,
         }
     }
 
@@ -671,8 +864,15 @@ impl ReaderApp {
                     .flash("no image focused; Tab to a placeholder, or Shift+I for all".to_owned()),
             }
         }
+        // The page on screen, not `history.current()`. Two reasons: during a navigation the
+        // history tip is the destination while the reader is still looking at the old article,
+        // and even at rest the tip is the URL that was *requested* rather than the one the
+        // redirects landed on. `HELP` calls this "copy page URL", so it should be the page's.
         if k(Modifiers::NONE, Key::Y)
-            && let Some(u) = self.history.current().cloned()
+            && let Some(u) = self
+                .shown()
+                .map(|r| r.loaded.prov.final_url.clone())
+                .or_else(|| self.history.current().cloned())
         {
             self.copy(u.as_str());
             self.flash("page URL copied".to_owned());
@@ -723,7 +923,7 @@ impl ReaderApp {
     }
 
     fn collapse_all(&mut self) {
-        let Page::Ready(ready) = &self.page else {
+        let Some(ready) = self.shown() else {
             return;
         };
         let mut keys = Vec::new();
@@ -835,7 +1035,14 @@ impl eframe::App for ReaderApp {
         // While anything is in flight, keep repainting so the elapsed-time indicator animates
         // without a busy loop. Workers also repaint on every message, so this is the *floor*
         // on responsiveness, not the mechanism.
-        if matches!(self.page, Page::Loading { .. }) || self.images.any_pending() {
+        // 100 ms while a document is in flight, 250 for images. The bar is why: at 4 fps a 15 s
+        // rule on a wide window advances fifteen pixels a frame and visibly jumps, and "is it
+        // stuck?" is the one question the indicator exists to answer. Bounded by the fetch
+        // timeout, so there is no busy loop to worry about; an image has a placeholder that says
+        // its own state and needs no such rate.
+        if matches!(self.page, Page::Loading { .. }) {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        } else if self.images.any_pending() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
@@ -967,6 +1174,16 @@ impl ReaderApp {
             });
         panel_edge(ui, strip.response.rect, Side::Top, pal);
         self.strip_height = strip.response.rect.height();
+        // After the panel, so the rule is not clipped by its inner margin, and only while a
+        // document is in flight. Images have their own placeholders and do not get a bar.
+        if let Page::Loading { started, .. } = &self.page {
+            notice_ui::progress_rule(
+                ui.ctx(),
+                pal,
+                strip.response.rect,
+                notice::elapsed_fraction(started.elapsed()),
+            );
+        }
         match action {
             Some(StripAction::Back) => self.go_back(),
             Some(StripAction::Forward) => self.go_forward(),
@@ -1031,7 +1248,8 @@ impl ReaderApp {
 
     fn status_url(&self) -> String {
         match &self.page {
-            Page::Loading { url, started } => {
+            // The address bar, so it names the destination rather than what is still on screen.
+            Page::Loading { url, started, .. } => {
                 format!(
                     "loading {} ({:.1}s)",
                     notice::host_and_path(url),
@@ -1161,7 +1379,7 @@ impl ReaderApp {
         if !self.chrome.outline_open {
             return;
         }
-        let Page::Ready(ready) = &self.page else {
+        let Some(ready) = self.shown() else {
             return;
         };
         let entries: Vec<OutlineEntry> = ready.outline.clone();
@@ -1216,9 +1434,13 @@ impl ReaderApp {
         if !self.chrome.info_open {
             return;
         }
-        let rows = match &self.page {
-            Page::Ready(r) => pageinfo::rows(&r.loaded.prov, &self.images.counts()),
-            _ => Vec::new(),
+        // The page on screen, which during a navigation is the outgoing one. Its rows are all
+        // true of what is being read, and its first row is the address, the reader's one route
+        // to that while the status strip is showing the destination instead. "No page loaded."
+        // over a plainly visible article is the lie here, not the rows.
+        let rows = match self.shown() {
+            Some(r) => pageinfo::rows(&r.loaded.prov, &self.images.counts()),
+            None => Vec::new(),
         };
         let mut open = true;
         pageinfo_ui::panel(
@@ -1311,7 +1533,7 @@ impl ReaderApp {
                     // Everything above this line is the reader. Below it is the page.
                     self.notices(ui, pal, column);
 
-                    if matches!(self.page, Page::Ready(_)) {
+                    if self.shown().is_some() {
                         ui.horizontal_top(|ui| {
                             ui.add_space(column.gutter);
                             ui.vertical(|ui| {
@@ -1351,17 +1573,31 @@ impl ReaderApp {
         self.scroll_delta += ctx.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y));
     }
 
-    /// Every notice for the current page, in the one place they are drawn.
+    /// Every notice for the page on screen, in the one place they are drawn.
     ///
     /// What this replaces is each screen drawing its own banner where it happened, which put
     /// the reader's words inside the reading column at the prose's own left edge and left
     /// colour as the only thing telling them apart.
+    ///
+    /// "On screen" rather than "current" is load-bearing during a navigation: the cautions belong
+    /// to the article being read, so a truncated body or a dead rewrite rule must not blink out
+    /// the moment a link is clicked and reappear when the next page lands.
     fn notices(&mut self, ui: &mut Ui, pal: &theme::Palette, column: notice_ui::Column) {
         // Owned, so the borrow of `self.page` ends here rather than running through the draw
         // loop and colliding with the `&mut self` that acting on a button needs.
         let notices: Vec<Notice> = match &self.page {
             Page::Idle => vec![notice::idle()],
-            Page::Loading { url, started } => vec![notice::loading(url, started.elapsed())],
+            // The cautions belong to the page on screen and must not blink out under it: a
+            // truncated body or a dead rewrite rule is still true of the article being read.
+            // `notice::loading` returns `None` when there is one, so the two cannot both appear.
+            Page::Loading {
+                url, started, from, ..
+            } => match from {
+                Some(r) => notice::about_page(&r.loaded.prov, r.loaded.doc.text_len()),
+                None => notice::loading(url, started.elapsed(), false)
+                    .into_iter()
+                    .collect(),
+            },
             Page::Failed { url, error, .. } => vec![notice::failure(error, url)],
             Page::Ready(r) => notice::about_page(&r.loaded.prov, r.loaded.doc.text_len()),
         };
@@ -1392,10 +1628,12 @@ impl ReaderApp {
         }
     }
 
+    /// Draw the page the reading column is showing, which during a navigation is the outgoing
+    /// one rather than the one being fetched.
     fn ready_screen(&mut self, ui: &mut Ui) {
         // The page is behind `&mut self`, and rendering needs both it and the image store, so
         // take it for the duration and put it back. Cheaper than cloning a document.
-        let Page::Ready(ready) = std::mem::replace(&mut self.page, Page::Idle) else {
+        let Some(ready) = self.page.take_shown() else {
             unreachable!("checked by the caller")
         };
         let base = ready.loaded.prov.final_url.clone();
@@ -1414,6 +1652,7 @@ impl ReaderApp {
             .unwrap_or_default();
         ctx.find_current = self.find_current;
         ctx.find_scroll = self.find_scroll;
+        ctx.pending = self.pending_link;
 
         let doc = &ready.loaded.doc;
         blocks::document_header(ui, doc, &mut ctx);
@@ -1440,9 +1679,21 @@ impl ReaderApp {
         self.focused_comment = ctx.focus_comment.clone();
         self.hover_href = ctx.hover_href.clone();
         let action = ctx.action.take();
-        self.page = Page::Ready(ready);
+        let clicked = ctx.clicked_link;
+        self.page.restore_shown(ready);
+        // `current` changes only in `navigate`, so comparing it across `apply` is what says a
+        // *new* fetch started. `matches!(self.page, Page::Loading { .. })` does not: with an
+        // earlier navigation still in flight that is true whatever the click did, so a
+        // `#fragment` link that only scrolled, or a `mailto:` that was copied and refused, would
+        // drag the mark off the link actually loading and onto one that is not.
+        let before = self.current;
         if let Some(a) = action {
             self.apply(ui.ctx(), a);
+        }
+        // After `apply`, because `navigate` clears `pending_link` and would otherwise wipe this
+        // on the same line of control flow.
+        if clicked.is_some() && self.current != before {
+            self.pending_link = clicked;
         }
     }
 
@@ -1532,3 +1783,123 @@ const HELP: &[(&str, &str)] = &[
     ("d", "cycle theme"),
     ("? / Esc / q", "this help · dismiss chrome · quit"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The third test under `ui/`, and the argument is made again rather than the precedent
+    /// cited, as AGENTS.md requires.
+    ///
+    /// [`Page::take_shown`] and [`Page::restore_shown`] take no `egui::Context`: they are a pure
+    /// transition over one enum, which is why they are methods on `Page` and not on `ReaderApp`.
+    /// And the failure they can have is invisible to everything else that guards this directory.
+    /// Losing the page in the round trip compiles, and `hww-shot` catches it only if a scene
+    /// happens to photograph the one frame it occurs on. The render borrows the page and puts it
+    /// back inside a single frame, so a picture taken before or after looks perfect.
+    fn ready(url: &str, req: u64) -> Box<Ready> {
+        let url = Url::parse(url).expect("a fixture URL parses");
+        // Through the real extractor rather than hand-built, so this cannot drift into a page
+        // shape the pipeline could not produce.
+        let doc = crate::html::extract("<article><h1>Title</h1><p>Words.</p></article>", &url);
+        Box::new(Ready {
+            skip_block: title::dedupe(&doc),
+            outline: outline::build(&doc.blocks),
+            loaded: Loaded {
+                doc,
+                prov: crate::session::Provenance::fixture(url.as_str()),
+            },
+            req: ReqId::for_test(req),
+        })
+    }
+
+    fn loading_pushed(from: Option<Box<Ready>>, pushed: bool) -> Page {
+        Page::Loading {
+            url: Url::parse("https://example.com/next").expect("a fixture URL parses"),
+            started: Instant::now(),
+            from,
+            pushed,
+        }
+    }
+
+    fn loading(from: Option<Box<Ready>>) -> Page {
+        Page::Loading {
+            url: Url::parse("https://example.com/next").expect("a fixture URL parses"),
+            started: Instant::now(),
+            from,
+            pushed: true,
+        }
+    }
+
+    #[test]
+    fn taking_and_restoring_a_ready_page_is_the_identity() {
+        let mut page = Page::Ready(ready("https://example.com/a", 1));
+        let taken = page.take_shown().expect("a page to take");
+        assert!(matches!(page, Page::Idle), "the placeholder is Idle");
+        page.restore_shown(taken);
+        let Page::Ready(r) = &page else {
+            panic!("expected Ready back");
+        };
+        assert_eq!(r.req, ReqId::for_test(1));
+    }
+
+    /// The placeholder must keep the variant. Swapping `Idle` in would drop `url` and `started`,
+    /// which the status strip and the progress rule read on the same frame the page is out.
+    #[test]
+    fn taking_the_page_out_of_a_load_keeps_the_load() {
+        let mut page = loading(Some(ready("https://example.com/a", 1)));
+        let started = match &page {
+            Page::Loading { started, .. } => *started,
+            _ => unreachable!(),
+        };
+        let taken = page.take_shown().expect("the outgoing page");
+        match &page {
+            Page::Loading {
+                url,
+                started: s,
+                from,
+                ..
+            } => {
+                assert_eq!(url.as_str(), "https://example.com/next");
+                assert_eq!(*s, started);
+                assert!(from.is_none());
+            }
+            _ => panic!("the load must survive its page being borrowed"),
+        }
+        page.restore_shown(taken);
+        assert_eq!(
+            page.take_shown().map(|r| r.req),
+            Some(ReqId::for_test(1)),
+            "restore must put it back where it came from"
+        );
+    }
+
+    /// A reload, a Back, and a Forward leave a `Loading` over an entry they did not add. Only
+    /// the in-flight navigation that added the entry may overwrite it; anything looser deletes a
+    /// page the reader really visited.
+    #[test]
+    fn only_a_navigation_that_added_its_own_entry_may_overwrite_it() {
+        assert!(loading_pushed(None, true).supersedes_its_history_entry());
+        assert!(
+            !loading_pushed(None, false).supersedes_its_history_entry(),
+            "a reload or a Back is in flight over somebody else's entry"
+        );
+        assert!(!Page::Idle.supersedes_its_history_entry());
+        assert!(
+            !Page::Ready(ready("https://example.com/a", 1)).supersedes_its_history_entry(),
+            "a settled page owns its entry and the next click appends after it"
+        );
+    }
+
+    #[test]
+    fn the_three_empty_states_have_nothing_to_show() {
+        assert!(Page::Idle.take_shown().is_none());
+        assert!(loading(None).take_shown().is_none());
+        let mut failed = Page::Failed {
+            url: Url::parse("https://example.com/a").expect("a fixture URL parses"),
+            error: LoadError::Fetch(crate::fetch::FetchError::LikelyBlocked),
+            rewrite: false,
+        };
+        assert!(failed.take_shown().is_none());
+    }
+}

@@ -34,6 +34,24 @@ impl History {
         self.cursor = self.entries.len() - 1;
     }
 
+    /// Replace the current entry rather than adding one.
+    ///
+    /// A navigation that never committed does not deserve a history entry. Once the outgoing
+    /// page stays on screen during a fetch it also stays clickable, so following a link and then
+    /// following a second one before the first has answered is ordinary rather than impossible;
+    /// `push` on both leaves a middle entry for a page that was never rendered, and Back lands on
+    /// it. No browser does that, and the reason is this method.
+    ///
+    /// Falls back to `push` when there is nothing to replace.
+    pub fn replace(&mut self, url: Url) {
+        if self.entries.is_empty() {
+            self.push(url);
+            return;
+        }
+        self.entries.truncate(self.cursor + 1);
+        self.entries[self.cursor] = url;
+    }
+
     pub fn current(&self) -> Option<&Url> {
         self.entries.get(self.cursor)
     }
@@ -135,5 +153,40 @@ mod tests {
         h.push(u("https://a/"));
         assert_eq!(h.len(), 2);
         assert!(h.can_go_forward());
+    }
+
+    /// The reason [`History::replace`] exists. Following a second link before the first has
+    /// answered must not leave an entry for a page that was never on screen.
+    #[test]
+    fn a_navigation_that_never_committed_leaves_no_entry() {
+        let mut h = History::new();
+        h.push(u("https://x/"));
+        h.push(u("https://a/"));
+        h.replace(u("https://b/"));
+        assert_eq!(h.len(), 2);
+        assert_eq!(h.current(), Some(&u("https://b/")));
+        assert_eq!(h.back(), Some(&u("https://x/")));
+    }
+
+    #[test]
+    fn replacing_an_empty_history_is_a_push() {
+        let mut h = History::new();
+        h.replace(u("https://a/"));
+        assert_eq!(h.len(), 1);
+        assert_eq!(h.current(), Some(&u("https://a/")));
+    }
+
+    /// `replace` truncates forward for the same reason `push` does: the branch ahead belonged
+    /// to the entry being overwritten.
+    #[test]
+    fn replacing_after_going_back_discards_the_forward_branch() {
+        let mut h = History::new();
+        h.push(u("https://a/"));
+        h.push(u("https://b/"));
+        h.back();
+        h.replace(u("https://c/"));
+        assert!(!h.can_go_forward());
+        assert_eq!(h.len(), 1);
+        assert_eq!(h.current(), Some(&u("https://c/")));
     }
 }

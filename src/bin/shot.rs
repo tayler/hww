@@ -462,8 +462,34 @@ fn catalog(port: u16) -> Vec<Scene> {
             volatile: true,
             ..scene(
                 "loading",
-                "a navigation in flight against a host that never answers",
-                vec![Step::Nav(stall)],
+                "a navigation in flight with nothing on screen under it",
+                // The `fail` is not decoration. Every scene shares one `ReaderApp` and nothing
+                // resets it between them, and a navigation now keeps the page it is replacing,
+                // so a bare `Nav` here photographs whichever article ran before it. A failure
+                // owns the viewport, so navigating from one is how this state is reached without
+                // a hook the reader would otherwise not have to give up.
+                vec![
+                    fail(ARTICLE_URL, LoadError::Fetch(FetchError::LikelyBlocked)),
+                    Step::Nav(stall.clone()),
+                ],
+            )
+        },
+        Scene {
+            settle_ms: 400,
+            volatile: true,
+            ..scene(
+                "loading-over-page",
+                "a navigation in flight while the outgoing page is still being read",
+                // The picture the commit-on-arrival change exists for: the article still
+                // readable, the strip counting, and the progress rule crossing the strip.
+                //
+                // Driven from the URL bar rather than by following a link, which would be the
+                // truer scenario and would also catch `notice::PENDING` in the same frame. A
+                // link needs Tab and Enter, and synthetic Tab focus does not reliably land in
+                // this harness: `focus-link` photographs the article with no focus ring on the
+                // same machines this does. Worth revisiting with a pointer-click step, which
+                // would be a better way to drive both scenes.
+                vec![page(ARTICLE_URL, ARTICLE), Step::Nav(stall)],
             )
         },
         Scene {
@@ -479,10 +505,16 @@ fn catalog(port: u16) -> Vec<Scene> {
     scenes
 }
 
-/// The three scenes that use the network run last: a stalled document fetch holds a worker
-/// until the 15 s timeout, and everything after it would queue behind that.
+/// The scenes that use the network run last: a stalled document fetch holds a worker until the
+/// 15 s timeout, and everything after it would queue behind that.
+///
+/// Three of them now hold one each, against `net::WORKERS`, which is four. There is room for
+/// exactly no more.
 fn network_last(name: &str) -> u8 {
-    u8::from(matches!(name, "loading" | "fail-transport"))
+    u8::from(matches!(
+        name,
+        "loading" | "loading-over-page" | "fail-transport"
+    ))
 }
 
 fn url(s: &str) -> Url {

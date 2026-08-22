@@ -54,6 +54,23 @@ pub const MARK: &str = "[hww]";
 /// number here would let the two drift silently, with the reader quietly ceasing to warn.
 pub use crate::ir::THIN_TEXT;
 
+/// The deadline a document fetch is held to.
+///
+/// Re-exported for the same reason as [`THIN_TEXT`] just above: it is the denominator of
+/// [`elapsed_fraction`], and a copy of the number here would let the progress rule go on
+/// measuring against 15 seconds after `fetch` had moved to something else.
+pub use crate::fetch::TIMEOUT;
+
+/// The mark on a link whose page is being fetched.
+///
+/// A bracket, not a colour or a second underline. Everything the reader says *inside* the reading
+/// column carries this convention already (`[image]`, `[hww]`, "(N replies hidden)") because a
+/// bracket survives a screenshot, a monochrome eye, and a theme nobody has designed yet, and
+/// because a coloured underline on a link would be the reader borrowing the page's own idiom to
+/// speak in, which is the one thing the column rule forbids. It is positional, which is what
+/// admits it inline at all: it marks one link at one place, and a full-bleed band cannot point.
+pub const PENDING: &str = "[loading]";
+
 /// How loud a notice is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -309,15 +326,47 @@ pub fn idle() -> Notice {
     )
 }
 
-/// A navigation in flight.
+/// A navigation in flight, when there is nothing on screen to read while it runs.
+///
+/// **`None` when a page is still up.** A fetch used to replace the article the moment the link
+/// was clicked, which on a fast connection is a band that flashes for two frames and cannot be
+/// read, and on a slow one is a blank screen that reads as having arrived somewhere empty rather
+/// than as waiting. The outgoing page stays now, and while it does the reader reports the errand
+/// from the chrome instead: the strip counts the seconds and `ui::notice_ui::progress_rule` draws
+/// what is left of the budget. A band over a readable page would be the same mistake one size
+/// smaller.
+///
+/// This returns the `Option` rather than letting the caller decide, because the caller is
+/// `app.rs`: the fast CI job never compiles egui, so a decision made there is a decision no test
+/// reads. `fills_the_viewport` was already carrying this rule; it stays here beside it.
 ///
 /// `elapsed` is shown because a 15 s bot-block hang and a slow CDN look identical for the
 /// first ten seconds, and a number that keeps moving is the difference between waiting and
 /// wondering whether it is stuck.
-pub fn loading(url: &Url, elapsed: Duration) -> Notice {
+pub fn loading(url: &Url, elapsed: Duration, over_a_page: bool) -> Option<Notice> {
+    if over_a_page {
+        return None;
+    }
     let mut notice = Notice::new(Severity::Quiet, format!("Loading {}…", host_and_path(url)));
     notice.detail = vec![format!("{:.1}s", elapsed.as_secs_f32())];
-    notice
+    Some(notice)
+}
+
+/// How much of the fetch deadline a navigation has spent, as `0.0..=1.0`.
+///
+/// The number behind the progress rule on the status strip. Determinate rather than an
+/// indeterminate sweep, and the denominator is honest: [`TIMEOUT`] bounds the *whole* fetch
+/// including every redirect hop, which `fetch::the_timeout_bounds_the_whole_fetch_not_each_hop`
+/// is what pins. So the far edge means the request is at its deadline, rather than meaning
+/// nothing at all.
+///
+/// Approximate at both ends, and clamped for it. `Page::Loading::started` is stamped when the job
+/// is dispatched, while the fetcher's own deadline starts when a worker picks it up, and
+/// `session::load` rewrites and extracts *after* the body is in. Neither gap is worth a second
+/// clock; a bar that saturates a little early on a page that was always going to time out costs
+/// nothing.
+pub fn elapsed_fraction(elapsed: Duration) -> f32 {
+    (elapsed.as_secs_f32() / TIMEOUT.as_secs_f32()).clamp(0.0, 1.0)
 }
 
 /// `example.com/a/b`, or bare `example.com` for a root path.
@@ -401,9 +450,16 @@ mod tests {
     fn every_notice() -> Vec<Notice> {
         let mut all = every_failure();
         all.push(idle());
-        all.push(loading(
+        all.extend(loading(
             &url("https://example.com/"),
             Duration::from_secs(3),
+            false,
+        ));
+        // `true` yields nothing, which is the point of it; extend covers both arms either way.
+        all.extend(loading(
+            &url("https://example.com/"),
+            Duration::from_secs(3),
+            true,
         ));
         all.extend(about_page(&page(404), 10));
         all.extend(about_page(&page(503), 9_000));
@@ -515,6 +571,42 @@ mod tests {
         );
         assert!(notice.detail[1].contains("a.example/1"));
         assert!(notice.detail[2].contains("b.example/2"));
+    }
+
+    /// The whole point of the third argument: a page still on screen gets no band, because the
+    /// strip and the progress rule are reporting instead.
+    #[test]
+    fn a_load_over_a_readable_page_draws_no_band() {
+        let u = url("https://example.com/a");
+        assert!(loading(&u, Duration::from_secs(3), true).is_none());
+        let notice = loading(&u, Duration::from_secs(3), false).expect("no page under it");
+        assert!(notice.severity.fills_the_viewport());
+        assert!(notice.body.contains("example.com/a"));
+    }
+
+    /// Pinned against `TIMEOUT`, never the literal 15: the whole reason it is re-exported is so
+    /// that moving the deadline moves the bar with it.
+    #[test]
+    fn the_progress_fraction_spans_the_fetch_deadline() {
+        assert_eq!(elapsed_fraction(Duration::ZERO), 0.0);
+        assert_eq!(elapsed_fraction(TIMEOUT), 1.0);
+        let half = elapsed_fraction(TIMEOUT / 2);
+        assert!((half - 0.5).abs() < 1e-6, "{half}");
+    }
+
+    /// `started` covers rewrite and extraction as well as the fetch, so it outruns the deadline
+    /// on a slow page. A bar wider than its track is a panic in egui, not a cosmetic problem.
+    #[test]
+    fn the_progress_fraction_never_exceeds_its_track() {
+        assert_eq!(elapsed_fraction(TIMEOUT * 4), 1.0);
+    }
+
+    /// The inline marks all carry it, and this is the newest of them.
+    #[test]
+    fn the_pending_mark_carries_the_bracket_convention() {
+        assert!(PENDING.starts_with('['));
+        assert!(PENDING.ends_with(']'));
+        assert!(!PENDING.contains(char::is_whitespace));
     }
 
     /// The column is free on the pages that are fine, which is nearly all of them.

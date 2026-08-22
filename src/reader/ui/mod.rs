@@ -17,6 +17,7 @@ use crate::reader::opts::ReadOpts;
 use crate::reader::settings::Settings;
 use crate::reader::thread_tree::CommentKey;
 use crate::reader::ui::theme::Palette;
+use eframe::egui;
 use std::collections::HashSet;
 use url::Url;
 
@@ -67,6 +68,15 @@ pub struct RenderCtx<'a> {
     pub find_scroll: bool,
 
     pub action: Option<Action>,
+    /// The link whose page is being fetched, marked in place by `inline_ui::link_ui`.
+    ///
+    /// An id, not an href: `html::link_block` copies a block-level anchor's href onto every
+    /// inline in the block, and a front page repeats one href in nav, headline, and footer, so
+    /// matching the string marks every occurrence rather than the one that was clicked.
+    pub pending: Option<egui::Id>,
+    /// Which link the click this frame came from, read back by `app` once the action it queued
+    /// has been applied. The counterpart to [`RenderCtx::pending`], one navigation earlier.
+    pub clicked_link: Option<egui::Id>,
     pub hover_href: Option<String>,
     /// What Tab landed on this frame. Links and comment toggles are the only focusable things
     /// on the page; if plain text were focusable, Tab would walk every label.
@@ -98,6 +108,8 @@ impl RenderCtx<'_> {
             job_has_current_match: false,
             find_scroll: false,
             action: None,
+            pending: None,
+            clicked_link: None,
             hover_href: None,
             focus_href: None,
             focus_image: None,

@@ -51,6 +51,13 @@ static DECODE_LOCK: Mutex<()> = Mutex::new(());
 pub struct ReqId(u64);
 
 impl ReqId {
+    /// An id without a [`Net`], which needs an `egui::Context` and therefore a window. Only the
+    /// ordering and the equality matter to anything that takes one.
+    #[cfg(test)]
+    pub(crate) fn for_test(n: u64) -> Self {
+        ReqId(n)
+    }
+
     fn next() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         ReqId(NEXT.fetch_add(1, Ordering::Relaxed))

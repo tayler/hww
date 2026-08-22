@@ -107,7 +107,8 @@ and `session::Loaded` and touches no extractor.
     reader/settings.rs     the config-path triple, atomic write, never fatal
     reader/image_decode.rs sniff, ceilings, partial handling, downscale. &[u8] -> pixels
     reader/ui/             everything that needs an egui::Context, and nothing else
-    reader/ui/notice_ui.rs the one place the reader draws its own text: Notice -> a band
+    reader/ui/notice_ui.rs the one place the reader draws about itself: a band, and the
+                           progress rule the status strip wears during a fetch
     reader/ui/pageinfo_ui.rs  the strip's circled i, and the panel behind it
 
 `image_decode` is the sharp case: it is the only module in the project that parses untrusted
@@ -155,10 +156,31 @@ support, and `theme::every_notice_ink_is_legible_on_its_own_ground` holds the fl
 `body_font`, not the quote rule, not the code frame. Only `Caution` has a ground of its own:
 `Quiet` and `Failure` fill the viewport, so they have no page underneath to be a different
 surface *from*, and a notice that is the whole viewport needs no mark to be told apart from a
-page that is not there. The three inline
-exceptions (`[image]`, `Block::Embed`, "(N replies hidden)") are *positional*, marking one thing
-at one place, which a full-bleed band cannot do; they carry the bracket convention instead.
+page that is not there. The four inline
+exceptions (`[image]`, `Block::Embed`, "(N replies hidden)", `notice::PENDING`) are *positional*,
+marking one thing at one place, which a full-bleed band cannot do; they carry the bracket
+convention instead. `notice::PENDING` is the newest and shows what the rule buys: the obvious mark
+for "this link's page is being fetched" is a coloured underline, which is the reader speaking
+inside the column, in a notice colour, in the page's own link idiom, and painted on the baseline
+the hover rule already uses. `[loading]` says the same thing and borrows nothing.
 Wording lives in `src/reader/notice.rs`, outside `ui/`, so the fast CI job tests it.
+
+**A navigation does not blank the reading column.** The outgoing page stays, readable and
+scrollable, until a new document commits; `Page::Loading::from` is where it lives and
+`Page::take_shown` is how it is drawn. The loading band is therefore emitted only when there is no
+page under it, which is `notice::loading` returning `None` on its third argument: the decision is
+in `notice.rs` and not in `ui/` for the usual reason, that the fast job is the only thing that
+reads it. Everything else the reader has to say about a fetch in flight goes in the chrome
+instead. The strip counts the seconds, and `notice_ui::progress_rule` draws what is left of the
+`fetch::TIMEOUT` budget. This is the column rule reaching the case where the honest answer is to
+say nothing in the column at all, and it is why `notice_ui` owns two functions rather than one.
+
+The corollary is that `navigate` sets up a *request* and `ReaderApp::commit` sets up a *page*. Any
+reset belonging to the arriving document (textures, collapsed threads, find position, and above
+all the scroll offset) goes in `commit`, because the outgoing page is still on screen and still
+needs its own. `ReaderApp::shown` is what every site describing the visible page goes through;
+`self.page` is for the few that describe the navigation, which are the strip's URL, the progress
+rule, and the repaint floor.
 
 **The form carries no colour, and a palette carries nothing else.** Layout and type change on a
 different clock from colour, and mixing them meant adding a theme required reading layout code
@@ -344,6 +366,15 @@ upload are merely compiled. Tests worth keeping named:
   rule. `a_failed_image_still_reports_what_its_request_disclosed` (`src/reader/ui/images.rs`,
   where `counts` and `fail` take no `Context` but `insert` uploads a texture) is admitted the same
   way. A further one needs the argument made again, not this paragraph cited.
+- `taking_the_page_out_of_a_load_keeps_the_load` (`src/reader/ui/app.rs`), and here is that
+  argument made again. `Page::take_shown` and `Page::restore_shown` take no `egui::Context`: they
+  are a pure transition over one enum, which is why they are methods on `Page` rather than on
+  `ReaderApp`, which needs a window. And their failure mode is invisible to everything else that
+  guards this directory. Losing the page in the round trip compiles, and `hww-shot` catches it
+  only if a scene happens to photograph the single frame it occurs on, because the render borrows
+  the page and puts it back inside one frame, so a picture taken before or after looks perfect. What
+  is pinned is that the placeholder keeps the variant: swapping `Idle` into a `Loading` drops the
+  `url` and `started` that the status strip and the progress rule read on that very frame.
 - `a_pathologically_deep_thread_builds_and_traverses_completely`
   (`src/reader/thread_tree.rs`): a hostile thread is untrusted input, so the traversal is
   iterative.
@@ -410,6 +441,21 @@ everywhere else. Back and forward are the one place the platforms genuinely disa
 ## Known gaps
 
 Real, and worth knowing before re-discovering them:
+
+- **The pending-link mark covers inline links only.** `notice::PENDING` is appended by
+  `inline_ui::link_ui`, which is every link in prose, in a heading, and in a comment body,
+  including the block-level anchors `html::link_block` flattens into inlines. It is not on the
+  outline, the back and forward arrows, or the URL bar, because none of those is a place the eye
+  is already resting when the click lands, and the status strip is directly under all three. A
+  navigation started from the keyboard or from chrome has the strip and the progress rule and no
+  third cue, which is the weakest case in the design and is known.
+
+  It also has **no scene**, and that is the gap worth knowing. Photographing it needs a link
+  followed, which needs Tab and then Enter, and synthetic Tab focus does not reliably land in the
+  shot harness: `focus-link` comes back byte-identical to `article`, with no focus ring, on the
+  same machines where every other scene is stable. So the mark is compiled and not photographed,
+  which is exactly the hole `hww-shot` exists to close. A pointer-click step would fix both
+  scenes at once and is the obvious next thing to build.
 
 - **Arrows are a family gap, not a build gap.** All four arrows and the prime marks are in Hack,
   and none is in Ubuntu-Light, NotoEmoji, or emoji-icon-font; `Proportional` resolves to the

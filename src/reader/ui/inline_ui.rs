@@ -32,11 +32,12 @@
 
 use crate::ir;
 use crate::reader::inline::{Run, Style};
+use crate::reader::notice;
 use crate::reader::opts::ReadOpts;
 use crate::reader::ui::theme::Palette;
 use crate::reader::ui::{Action, RenderCtx, theme};
 use eframe::egui::{
-    self, Align, Color32, FontId, Label, Sense, Stroke, TextFormat, TextWrapMode, Ui,
+    self, Align, Color32, FontId, Label, RichText, Sense, Stroke, TextFormat, TextWrapMode, Ui,
     text::LayoutJob,
 };
 
@@ -303,6 +304,25 @@ fn link_ui(
     }
     if resp.clicked() {
         ctx.act(Action::Follow(href.to_owned()));
+        // Which link, so the mark below lands on the one that was clicked rather than on every
+        // inline that happens to share its href. `app` reads it back once the action is applied.
+        ctx.clicked_link = Some(resp.id);
+    }
+    // The page this link points at is being fetched. A bracket, in the page's own flow, because
+    // the reading column admits the reader's words only as a positional mark carrying that
+    // convention: `[image]` two modules over is the same shape, and it is set the same way.
+    // Not a colour or a second underline: the hover rule is already painted at this exact
+    // baseline, and the pointer is still on the link in the moment this matters most.
+    if ctx.pending == Some(resp.id) {
+        // The leading space is not cosmetic. `runs_ui` sets `item_spacing.x = 0.0`, because word
+        // spacing on a wrapped line comes from the text itself, so a bare label here renders as
+        // `the quiet web[loading]`. The `[image]` placeholder gets away with no space only
+        // because it is an `egui::Button` and carries `button_padding`.
+        ui.label(
+            RichText::new(format!(" {}", notice::PENDING))
+                .color(ctx.pal.dim)
+                .font(theme::chrome_font(ctx.opts)),
+        );
     }
     // Two items, both of which already exist as keyboard actions. A second route to them, not
     // new capability.
