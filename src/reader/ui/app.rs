@@ -132,6 +132,13 @@ pub struct ReaderApp {
     collapsed: HashSet<CommentKey>,
     find_current: usize,
     find_total: usize,
+    /// One-shot: bring the current match into view on the next frame.
+    ///
+    /// Set by the steps that *move* the match (`n`, `N`, Enter, a changed query) and by
+    /// nothing else, so scrolling away from a highlight leaves it where the reader put it.
+    /// Re-centring every frame the match is on screen would make the page unscrollable while
+    /// find is open.
+    find_scroll: bool,
     /// Whether the *default* for this session applies rewrites. `--no-rewrite` clears it.
     rewrite: bool,
     /// Whether the navigation in flight applied them, which `R` makes differ from the default.
@@ -211,6 +218,7 @@ impl ReaderApp {
             collapsed: HashSet::new(),
             find_current: 0,
             find_total: 0,
+            find_scroll: false,
             rewrite: launch.rewrite,
             last_rewrite: launch.rewrite,
             scroll_to_block: None,
@@ -599,6 +607,7 @@ impl ReaderApp {
         }
         if self.find_total > 0 && k(Modifiers::SHIFT, Key::N) {
             self.find_current = (self.find_current + self.find_total - 1) % self.find_total;
+            self.find_scroll = true;
         }
         if k(Modifiers::SHIFT, Key::Space) || k(Modifiers::NONE, Key::PageUp) {
             self.scroll_delta += page;
@@ -653,6 +662,7 @@ impl ReaderApp {
         }
         if self.find_total > 0 && k(Modifiers::NONE, Key::N) {
             self.find_current = (self.find_current + 1) % self.find_total;
+            self.find_scroll = true;
         }
         if k(Modifiers::NONE, Key::I) {
             match self.focused_image.clone() {
@@ -1118,6 +1128,7 @@ impl ReaderApp {
             });
         if let Some(n) = next {
             self.find_current = n;
+            self.find_scroll = true;
         }
         self.chrome.find = Some(query);
     }
@@ -1352,6 +1363,7 @@ impl ReaderApp {
             .map(str::to_lowercase)
             .unwrap_or_default();
         ctx.find_current = self.find_current;
+        ctx.find_scroll = self.find_scroll;
 
         let doc = &ready.loaded.doc;
         blocks::document_header(ui, doc, &mut ctx);
@@ -1372,6 +1384,7 @@ impl ReaderApp {
         ));
 
         self.find_total = ctx.find_seen;
+        self.find_scroll = false;
         self.focused_href = ctx.focus_href.clone();
         self.focused_image = ctx.focus_image.clone();
         self.focused_comment = ctx.focus_comment.clone();

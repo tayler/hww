@@ -132,7 +132,7 @@ fn flush(ui: &mut Ui, job: &mut LayoutJob, ctx: &mut RenderCtx<'_>) {
         return;
     }
     let job = std::mem::replace(job, new_job());
-    let carries_current_match = ctx.job_has_current_match;
+    let carries_current_match = ctx.job_has_current_match && ctx.find_scroll;
     ctx.job_has_current_match = false;
     let resp = ui.add(Label::new(job).wrap());
     if carries_current_match {
@@ -256,7 +256,7 @@ fn link_ui(
         return;
     }
 
-    let carries_current_match = ctx.job_has_current_match;
+    let carries_current_match = ctx.job_has_current_match && ctx.find_scroll;
     ctx.job_has_current_match = false;
     let resp = ui.add(Label::new(job).wrap().sense(Sense::click()));
 

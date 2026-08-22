@@ -62,6 +62,9 @@ pub struct RenderCtx<'a> {
     /// Set when the current match lands in the job being built; consumed by the flush that
     /// emits it, which is the widget `n`/`N` scrolls to.
     pub job_has_current_match: bool,
+    /// Whether this frame should bring the current match into view. True only on the frame
+    /// after the match moved; the highlight itself never steers the scroll.
+    pub find_scroll: bool,
 
     pub action: Option<Action>,
     pub hover_href: Option<String>,
@@ -93,6 +96,7 @@ impl RenderCtx<'_> {
             find_ranges: Vec::new(),
             find_base: 0,
             job_has_current_match: false,
+            find_scroll: false,
             action: None,
             hover_href: None,
             focus_href: None,
