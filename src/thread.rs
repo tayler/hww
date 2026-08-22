@@ -18,6 +18,9 @@ use url::Url;
 const MIN_SIBLINGS: usize = 3;
 /// Minimum median text per post, to reject navigation and tag-cloud repetition.
 const MIN_MEDIAN_TEXT: usize = 40;
+/// A post whose text is mostly inside anchors is a story card, not a comment. Measured: a
+/// comment's links are a username and a "reply"; a card's headline and dek are both links.
+const MAX_LINK_DENSITY: f64 = 0.5;
 
 const AUTHOR_HINT: &[&str] = &[
     "hnuser",
@@ -166,10 +169,18 @@ fn best_group<'a>(html: &'a Html) -> (Option<Vec<ElementRef<'a>>>, Verdict) {
                     find_hint(e, AUTHOR_HINT).is_some() || find_hint(e, TIME_HINT).is_some()
                 })
                 .count();
+            // Comments are prose and cards are links. A front page's story cards carry a
+            // byline and a date exactly as a post does, and the one thing that tells the
+            // two apart is that a card's text is mostly inside its anchors.
+            let mut densities: Vec<f64> = g.iter().map(link_density).collect();
+            densities.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median_links = densities[densities.len() / 2];
             let rejected = if median < MIN_MEDIAN_TEXT {
                 Some("median text too short")
             } else if attributed * 2 < g.len() {
                 Some("attribution under a majority")
+            } else if median_links > MAX_LINK_DENSITY {
+                Some("mostly links: a card list, not a thread")
             } else {
                 None
             };
@@ -244,9 +255,9 @@ fn find_hint(el: &ElementRef, hints: &[&str]) -> Option<String> {
             e.value().attr("class").unwrap_or(""),
             e.value().id().unwrap_or(""),
             e.value().name()
-        )
-        .to_lowercase();
-        if hints.iter().any(|h| attrs.contains(h)) {
+        );
+        // Token match, not substring: `age` is not in `image`. See `hint`.
+        if crate::hint::matches(&attrs, hints) {
             let t = text_of(node);
             if !t.is_empty() && t.len() < 120 {
                 return Some(t);
@@ -262,11 +273,7 @@ fn body_of(el: &ElementRef, base: &Url) -> Vec<Block> {
         let Some(e) = ElementRef::wrap(node) else {
             continue;
         };
-        let class = e.value().attr("class").unwrap_or("").to_lowercase();
-        if BODY_HINT
-            .iter()
-            .any(|h| class.split_whitespace().any(|c| c == *h))
-        {
+        if crate::hint::matches(e.value().attr("class").unwrap_or(""), BODY_HINT) {
             return crate::html::blocks_from_public(e, base);
         }
     }
@@ -282,6 +289,22 @@ fn text_of(node: NodeRef<'_, Node>) -> String {
 
 fn text_len(node: NodeRef<'_, Node>) -> usize {
     text_of(node).len()
+}
+
+/// Share of an element's text that sits inside its anchors.
+fn link_density(el: &ElementRef) -> f64 {
+    let total = text_len(**el);
+    if total == 0 {
+        return 0.0;
+    }
+    // A card that *is* an anchor (`<a class="card">` around a headline and a dek) has no
+    // anchor descendants and is all link.
+    if el.value().name() == "a" {
+        return 1.0;
+    }
+    let a = scraper::Selector::parse("a").unwrap();
+    let linked: usize = el.select(&a).map(|l| text_len(*l)).sum();
+    (linked as f64 / total as f64).min(1.0)
 }
 
 /// Iterative: a comment page is untrusted input, and one stack frame per DOM level is an
@@ -304,4 +327,85 @@ fn collect(node: NodeRef<'_, Node>, out: &mut String) {
 /// it measured.
 pub fn comments_text_len(cs: &[Comment]) -> usize {
     cs.iter().map(|c| ir::blocks_text_len(&c.blocks)).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(body: &str) -> Html {
+        Html::parse_document(&format!("<html><body>{body}</body></html>"))
+    }
+    fn base() -> Url {
+        Url::parse("https://example.test/a").unwrap()
+    }
+
+    /// Regression: every article on the top-ten US news sites grew a "discussion" of three
+    /// to nine `anon` posts at its tail, because the caption containers were classed
+    /// `image_large`, `image-ct`, `wp-block-image`, and `age` is a substring of `image`.
+    #[test]
+    fn image_captions_are_not_attributed_posts() {
+        let figs = (0..5)
+            .map(|i| {
+                format!(
+                    "<div class=\"image_large image_large__hide-placeholder\"><p>Caption {i}: \
+                     a person stands at a lectern in a courtroom on a weekday afternoon.</p></div>"
+                )
+            })
+            .collect::<String>();
+        let html = parse(&format!("<article>{figs}</article>"));
+        let (thread, verdict) = extract_thread_traced(&html, &base());
+        assert!(thread.is_none(), "captions became a thread: {verdict:?}");
+        let g = verdict
+            .groups
+            .iter()
+            .find(|g| g.signature.starts_with("div.image"))
+            .expect("the caption group was weighed");
+        assert_eq!(g.attributed, 0, "{g:?}");
+        assert_eq!(g.rejected, Some("attribution under a majority"));
+    }
+
+    /// Regression: a front page's story cards carry a byline and a date like any post, and
+    /// two front pages rendered as a four-post thread. A card is mostly links; a comment is not.
+    #[test]
+    fn a_list_of_bylined_cards_is_not_a_thread() {
+        let cards = (0..6)
+            .map(|i| {
+                format!(
+                    "<a class=\"card\" href=\"/story-{i}\"><h3>Headline number {i} about a thing \
+                     that happened somewhere today</h3><span class=\"byline\">By Reporter {i}</span> \
+                     <span class=\"date\">2 hours ago</span><p>A dek long enough to clear the \
+                     median floor with a sentence of summary.</p></a>"
+                )
+            })
+            .collect::<String>();
+        let html = parse(&format!("<main>{cards}</main>"));
+        let (thread, verdict) = extract_thread_traced(&html, &base());
+        assert!(thread.is_none(), "cards became a thread: {verdict:?}");
+        let g = &verdict.groups[0];
+        assert_eq!(g.attributed, 6, "{g:?}");
+        assert_eq!(g.rejected, Some("mostly links: a card list, not a thread"));
+    }
+
+    /// The control: a prose thread with a username and a reply link per post still passes
+    /// both guards.
+    #[test]
+    fn a_prose_thread_with_reply_links_still_passes() {
+        let posts = (0..4)
+            .map(|i| {
+                format!(
+                    "<div class=\"comment\"><span class=\"user-name\">user{i}</span> \
+                     <span class=\"age\">3 hours ago</span><div class=\"comment-body\">A \
+                     comment with enough words in it to clear the median text floor and be \
+                     counted as a post in its own right, twice over.</div> \
+                     <a href=\"/reply/{i}\">reply</a></div>"
+                )
+            })
+            .collect::<String>();
+        let html = parse(&format!("<div class=\"comments\">{posts}</div>"));
+        let (thread, verdict) = extract_thread_traced(&html, &base());
+        let thread = thread.unwrap_or_else(|| panic!("no thread: {verdict:?}"));
+        assert_eq!(thread.len(), 4);
+        assert_eq!(thread[0].author.as_deref(), Some("user0"));
+    }
 }

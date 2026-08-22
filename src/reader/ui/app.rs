@@ -172,8 +172,8 @@ impl Page {
 struct Ready {
     loaded: Loaded,
     outline: Vec<OutlineEntry>,
-    /// `Some(i)` => `blocks[i]` repeats `doc.title` and is skipped.
-    skip_block: Option<usize>,
+    /// Which leading blocks the masthead already says, and so are skipped.
+    masthead: title::Masthead,
     /// The navigation this page arrived on, and the id every image request made *from* it
     /// carries.
     ///
@@ -671,7 +671,7 @@ impl ReaderApp {
         // It is a band now (`notice::about_page`), which lasts as long as the page it is about:
         // "this may not be the page you asked for" is not a thing to say once and withdraw.
         let outline = outline::build(&loaded.doc.blocks);
-        let skip_block = title::dedupe(&loaded.doc);
+        let masthead = title::masthead(&loaded.doc);
         let fragment = self
             .history
             .current()
@@ -683,7 +683,7 @@ impl ReaderApp {
         self.page = Page::Ready(Box::new(Ready {
             loaded,
             outline,
-            skip_block,
+            masthead,
             req,
         }));
         if let Some(f) = fragment {
@@ -1780,9 +1780,9 @@ impl ReaderApp {
         let scroll_to = self.scroll_to_block.take();
         let band = measure::Band::around(ui.clip_rect().top(), ui.clip_rect().bottom());
         for (i, b) in doc.blocks.iter().enumerate() {
-            // The article's <h1> is usually also its <title>; rendering both shows the
-            // headline twice.
-            if ready.skip_block == Some(i) {
+            // The article's <h1> is usually also its <title>, and its "By Name" is already
+            // in the strip; rendering both shows each twice.
+            if ready.masthead.skips(i) {
                 continue;
             }
             // Empty space of the height this block measured last time, for as long as it is
@@ -1937,7 +1937,7 @@ mod tests {
         // shape the pipeline could not produce.
         let doc = crate::html::extract("<article><h1>Title</h1><p>Words.</p></article>", &url);
         Box::new(Ready {
-            skip_block: title::dedupe(&doc),
+            masthead: title::masthead(&doc),
             outline: outline::build(&doc.blocks),
             loaded: Loaded {
                 doc,

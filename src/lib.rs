@@ -7,6 +7,7 @@
 //! only that. See `docs/phase0-findings.md` for the measurements this design rests on.
 
 pub mod fetch;
+pub mod hint;
 pub mod html;
 pub mod ir;
 pub mod reader;

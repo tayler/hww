@@ -8,24 +8,119 @@
 //! Handled here and never in the extractor. `html::extract` reports what the page contains,
 //! and "these two strings are the same headline" is a reading decision; a different renderer
 //! is entitled to a different answer, and a lossy extractor is not recoverable.
+//!
+//! The same argument covers the rest of the masthead, which is why [`display`], [`masthead`],
+//! and [`short_date`] are here too: the ` | Site` tail on a `<title>`, the "By Name" paragraph
+//! the page prints under a headline the reader has already set in the strip, and the
+//! `2026-08-22T11:30:29.264Z` a publisher puts in `article:published_time`, are all things the
+//! page contains and the reader chooses not to repeat. Measured on the top-ten US news sites,
+//! 2026-08-22: four of eight titles carried the site, three of eight repeated the byline.
 
 use crate::ir;
 
-/// `Some(i)` => skip `blocks[i]` when rendering, because `doc.title` already says it.
-///
-/// Only ever block 0: a heading further down that happens to match the title is a section of
-/// the article, not its masthead.
-pub fn dedupe(doc: &ir::Document) -> Option<usize> {
-    let title = doc.title.as_deref()?;
-    let ir::Block::Heading { level, inlines } = doc.blocks.first()? else {
-        return None;
-    };
-    if *level > 2 {
+/// The title as the reader shows it: whitespace collapsed and a trailing ` | Site`, ` - Site`,
+/// ` — Site` dropped when it names the site. `None` when the document has no title.
+pub fn display(doc: &ir::Document) -> Option<String> {
+    let t = doc.title.as_deref()?;
+    let t = strip_site(t, doc.site_name.as_deref());
+    (!t.is_empty()).then_some(t)
+}
+
+/// A date as the strip shows it: the calendar date of an ISO 8601 timestamp, and anything
+/// else verbatim. `2026-08-22T11:30:29.264Z` is a machine's idea of a byline.
+pub fn short_date(s: &str) -> String {
+    let t = s.trim();
+    let b = t.as_bytes();
+    let is_iso_date = b.len() >= 10
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
+        && (b.len() == 10 || b[10] == b'T' || b[10] == b' ');
+    if is_iso_date {
+        t[..10].to_owned()
+    } else {
+        t.to_owned()
+    }
+}
+
+/// Which leading blocks the masthead already says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Masthead {
+    /// `blocks[i]` is the headline `doc.title` already shows. See [`dedupe`].
+    pub title_block: Option<usize>,
+    /// `blocks[i]` is "By Name" for the `doc.byline` already in the strip.
+    pub byline_block: Option<usize>,
+}
+
+impl Masthead {
+    pub fn skips(&self, i: usize) -> bool {
+        self.title_block == Some(i) || self.byline_block == Some(i)
+    }
+}
+
+/// How far into the document a masthead can reach: a kicker, the headline, the byline, and
+/// a dateline, before the first paragraph of the article. A matching block beyond this is
+/// the article quoting its own headline, which is the article's business.
+const MASTHEAD_REACH: usize = 4;
+
+pub fn masthead(doc: &ir::Document) -> Masthead {
+    Masthead {
+        title_block: dedupe(doc),
+        byline_block: byline_block(doc),
+    }
+}
+
+fn byline_block(doc: &ir::Document) -> Option<usize> {
+    let byline = doc.byline.as_deref()?;
+    let want = normalize(byline, None);
+    if want.is_empty() {
         return None;
     }
+    doc.blocks
+        .iter()
+        .take(MASTHEAD_REACH)
+        .position(|b| match b {
+            ir::Block::Paragraph(inlines) => {
+                let t = ir::plain_text(inlines);
+                let t = t.trim();
+                let t = t
+                    .strip_prefix("By ")
+                    .or_else(|| t.strip_prefix("by "))
+                    .or_else(|| t.strip_prefix("BY "))
+                    .unwrap_or(t);
+                normalize(t, None) == want
+            }
+            _ => false,
+        })
+}
+
+/// `Some(i)` => skip `blocks[i]` when rendering, because `doc.title` already says it.
+///
+/// The headline is the first heading within [`MASTHEAD_REACH`] blocks, and only before any
+/// paragraph of body length: a kicker ("HEALTH AND WELLNESS") or a dateline may precede it,
+/// which is why this is not "block 0", and a heading further down that happens to match the
+/// title is a section of the article, not its masthead, which is why the reach is short.
+pub fn dedupe(doc: &ir::Document) -> Option<usize> {
+    let title = doc.title.as_deref()?;
     let a = normalize(title, doc.site_name.as_deref());
-    let b = normalize(&ir::plain_text(inlines), doc.site_name.as_deref());
-    (!a.is_empty() && matches(&a, &b)).then_some(0)
+    if a.is_empty() {
+        return None;
+    }
+    for (i, b) in doc.blocks.iter().take(MASTHEAD_REACH).enumerate() {
+        match b {
+            ir::Block::Heading { level, inlines } if *level <= 2 => {
+                let b = normalize(&ir::plain_text(inlines), doc.site_name.as_deref());
+                return matches(&a, &b).then_some(i);
+            }
+            ir::Block::Paragraph(inlines) if ir::plain_text(inlines).len() >= 200 => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Equal after normalization, or one contains the other with ≥90% length overlap.
@@ -40,9 +135,8 @@ fn matches(a: &str, b: &str) -> bool {
     long.starts_with(short) && short.len() * 10 >= long.len() * 9
 }
 
-/// Trim, collapse whitespace, casefold, drop a trailing ` — Site` / ` | Site` suffix when it
-/// names the site, then drop trailing punctuation.
-fn normalize(s: &str, site_name: Option<&str>) -> String {
+/// Collapse whitespace and drop a trailing ` — Site` / ` | Site` suffix when it names the site.
+fn strip_site(s: &str, site_name: Option<&str>) -> String {
     let mut t: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if let Some(site) = site_name {
         let site = site.trim().to_lowercase();
@@ -57,7 +151,13 @@ fn normalize(s: &str, site_name: Option<&str>) -> String {
             }
         }
     }
-    t.to_lowercase()
+    t
+}
+
+/// [`strip_site`], casefolded, trailing punctuation dropped: the comparison form.
+fn normalize(s: &str, site_name: Option<&str>) -> String {
+    strip_site(s, site_name)
+        .to_lowercase()
         .trim_end_matches(['.', ',', ':', ';', '!', '?', '…', '—', '–', '-', '|'])
         .trim()
         .to_owned()
@@ -167,5 +267,73 @@ mod tests {
         );
         assert_eq!(dedupe(&doc(Some("The Headline"), None, None)), None);
         assert_eq!(dedupe(&doc(None, None, Some((1, "Introduction")))), None);
+    }
+
+    #[test]
+    fn a_kicker_before_the_headline_does_not_hide_it() {
+        let mut d = doc(Some("The Headline"), None, Some((1, "The Headline")));
+        d.blocks.insert(
+            0,
+            ir::Block::Paragraph(vec![ir::Inline::Text("HEALTH AND WELLNESS".into())]),
+        );
+        assert_eq!(dedupe(&d), Some(1));
+    }
+
+    #[test]
+    fn a_matching_heading_after_body_text_is_a_section() {
+        let mut d = doc(Some("The Headline"), None, Some((1, "The Headline")));
+        d.blocks.insert(
+            0,
+            ir::Block::Paragraph(vec![ir::Inline::Text("x".repeat(300))]),
+        );
+        assert_eq!(dedupe(&d), None);
+    }
+
+    #[test]
+    fn display_drops_the_site_and_keeps_the_case() {
+        let d = doc(
+            Some("  The Headline  | Example News"),
+            Some("Example News"),
+            None,
+        );
+        assert_eq!(display(&d).as_deref(), Some("The Headline"));
+        let d = doc(Some("The Headline | Other"), Some("Example News"), None);
+        assert_eq!(display(&d).as_deref(), Some("The Headline | Other"));
+    }
+
+    /// Three of eight news articles printed "By Name" under a headline whose byline the
+    /// strip already shows.
+    #[test]
+    fn a_by_line_paragraph_repeating_the_byline_is_masthead() {
+        let mut d = doc(Some("The Headline"), None, Some((1, "The Headline")));
+        d.byline = Some("Jane Writer".into());
+        d.blocks.push(ir::Block::Paragraph(vec![
+            ir::Inline::Text("By ".into()),
+            ir::Inline::Link {
+                href: "https://example.com/jane".into(),
+                inlines: vec![ir::Inline::Text("Jane Writer".into())],
+            },
+        ]));
+        d.blocks.push(ir::Block::Paragraph(vec![ir::Inline::Text(
+            "By Jane Writer, the article opens, and goes on at length.".into(),
+        )]));
+        let m = masthead(&d);
+        assert_eq!(
+            m,
+            Masthead {
+                title_block: Some(0),
+                byline_block: Some(1)
+            }
+        );
+        assert!(m.skips(0) && m.skips(1) && !m.skips(2));
+    }
+
+    #[test]
+    fn short_date_keeps_the_calendar_date_of_a_timestamp_and_nothing_else_changes() {
+        assert_eq!(short_date("2026-08-22T11:30:29.264Z"), "2026-08-22");
+        assert_eq!(short_date("2026-08-21 04:01:35"), "2026-08-21");
+        assert_eq!(short_date("2026-08-22"), "2026-08-22");
+        assert_eq!(short_date("21 hours ago"), "21 hours ago");
+        assert_eq!(short_date("20260822"), "20260822");
     }
 }

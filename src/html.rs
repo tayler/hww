@@ -119,6 +119,9 @@ pub struct Candidate {
     pub score: f64,
     /// Text of the blocks the walker actually emits from it: the ranking that decides.
     pub emitted: usize,
+    /// The chrome hints were switched off for this root because they were eating it; see
+    /// `root_candidates`. `emitted` is then the hint-free figure.
+    pub hints_off: bool,
 }
 
 /// What the extractor did to one page and why. Built by the same pass that builds the
@@ -138,6 +141,11 @@ pub struct Explanation {
     pub meta: Vec<(&'static str, &'static str, Option<String>)>,
     /// The `<body>` fallback ran and its blocks replaced the result.
     pub body_fallback: bool,
+    /// What walking `<body>` whole would emit, when that was measured (it is, whenever the
+    /// root came out under [`SLIVER_TEXT`]); `None` when it was not needed.
+    pub body_emitted: Option<usize>,
+    /// The body walk, too, had to drop the chrome hints to say anything; see `blocks_guarded`.
+    pub body_hints_off: bool,
     pub blocks: usize,
     pub text_len: usize,
 }
@@ -162,9 +170,14 @@ impl std::fmt::Display for Explanation {
                 .as_deref()
                 .map(|s| format!(".{}", s.split_whitespace().collect::<Vec<_>>().join(".")))
                 .unwrap_or_default();
+            let note = if c.hints_off {
+                " (chrome hints off)"
+            } else {
+                ""
+            };
             writeln!(
                 f,
-                "  {mark} {:<11} <{}{id}{class}> raw={} links={:.2} score={:.0} emitted={}",
+                "  {mark} {:<11} <{}{id}{class}> raw={} links={:.2} score={:.0} emitted={}{note}",
                 c.origin, c.tag, c.raw_text, c.link_density, c.score, c.emitted
             )?;
         }
@@ -184,9 +197,20 @@ impl std::fmt::Display for Explanation {
                 None => writeln!(f, "    {field:<9} <- {source}")?,
             }
         }
+        let body = self
+            .body_emitted
+            .map(|n| {
+                let note = if self.body_hints_off {
+                    ", chrome hints off"
+                } else {
+                    ""
+                };
+                format!(" (body would emit {n}{note})")
+            })
+            .unwrap_or_default();
         writeln!(
             f,
-            "body fallback: {}",
+            "body fallback: {}{body}",
             if self.body_fallback {
                 "fired"
             } else {
@@ -210,11 +234,17 @@ fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
         ("<title>", title_element(&html)),
     ]);
     let (byline, byline_src) = first_of([
-        ("meta[name=author]", meta_attr(&html, "author")),
+        (
+            "meta[name=author]",
+            meta_attr(&html, "author").filter(|s| is_name(s)),
+        ),
         (
             "meta[property=article:author]",
-            meta_prop(&html, "article:author"),
+            meta_prop(&html, "article:author").filter(|s| is_name(s)),
         ),
+        ("[rel=author]", visible_byline(&html, "[rel=author]")),
+        ("[class~=byline]", visible_byline(&html, "[class~=byline]")),
+        ("[class~=author]", visible_byline(&html, "[class~=author]")),
     ]);
     let (published, published_src) = first_of([
         (
@@ -244,6 +274,8 @@ fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
             ("published", published_src, doc.published.clone()),
         ],
         body_fallback: false,
+        body_emitted: None,
+        body_hints_off: false,
         blocks: 0,
         text_len: 0,
     };
@@ -251,7 +283,12 @@ fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
     why.winner = choose_root(&ranked);
     why.candidates = ranked.iter().map(|(_, c)| c.clone()).collect();
     if let Some(i) = why.winner {
-        doc.blocks = blocks_from(ranked[i].0, url);
+        let walk = if ranked[i].1.hints_off {
+            Walk::without_hints(url)
+        } else {
+            Walk::bare(url)
+        };
+        doc.blocks = blocks_from(ranked[i].0, &walk);
     }
     // A discussion is not a subtree, so it gets its own algorithm. When the thread dominates
     // the page it *is* the document; when it merely accompanies an article, it is appended.
@@ -273,12 +310,21 @@ fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
     // Scoring finds nothing on pages built entirely from unlabelled divs (product grids,
     // listing pages). Falling back to <body> bleeds navigation, but a thin page beats a
     // blank one, and the renderer can still be read.
-    if doc.text_len() < crate::ir::THIN_TEXT
+    //
+    // A root that is a sliver of the page gets the same treatment: on two front pages the
+    // scorer's best was a 240-char text box and a 471-char legal block, each clearing the
+    // floor and each a fraction of the page. Until front pages have a shape of their own, the
+    // body with its navigation beats a legal notice with nothing.
+    if doc.text_len() < SLIVER_TEXT
         && let Ok(sel) = Selector::parse("body")
         && let Some(body) = html.select(&sel).next()
     {
-        let fallback = blocks_from(body, url);
-        if block_text(&fallback) > doc.text_len() {
+        let (fallback, hints_off) = blocks_guarded(body, url);
+        let have = doc.text_len();
+        let got = block_text(&fallback);
+        why.body_emitted = Some(got);
+        why.body_hints_off = hints_off;
+        if got > have && (have < crate::ir::THIN_TEXT || got > SLIVER_RATIO * have) {
             doc.blocks = fallback;
             why.body_fallback = true;
         }
@@ -287,6 +333,37 @@ fn extract_traced(source: &str, url: &Url) -> (Document, Explanation) {
     why.text_len = doc.text_len();
     (doc, why)
 }
+
+/// A byline names a person. Two of the top-ten US news sites put a URL in
+/// `article:author` (a Facebook page, an author index), which is a link and not a name.
+fn is_name(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty() && t.len() < 120 && !t.starts_with("http://") && !t.starts_with("https://")
+}
+
+/// The text of the first element matching `sel`, as a byline: short, non-empty, the leading
+/// "By" dropped. The visible fallback behind the meta tags.
+fn visible_byline(html: &Html, sel: &str) -> Option<String> {
+    let selector = Selector::parse(sel).ok()?;
+    html.select(&selector)
+        .map(|e| inner_text(*e))
+        .map(|t| {
+            let t = t.trim();
+            let t = t
+                .strip_prefix("By ")
+                .or_else(|| t.strip_prefix("by "))
+                .or_else(|| t.strip_prefix("BY "))
+                .unwrap_or(t);
+            t.to_owned()
+        })
+        .find(|t| is_name(t))
+}
+
+/// A root under this many characters that the `<body>` out-emits [`SLIVER_RATIO`] to one is a
+/// sliver of its page, and the page is taken instead. Measured: 236 and 471 on two front pages
+/// whose bodies held five and eleven thousand.
+const SLIVER_TEXT: usize = 1000;
+const SLIVER_RATIO: usize = 5;
 
 /// The first source that produced a value, and its name; `"none"` when nothing did.
 fn first_of<const N: usize>(
@@ -349,6 +426,9 @@ fn own_text_into(node: NodeRef<'_, Node>, out: &mut String, root: bool) {
 /// The content-root candidates, ranked by first-pass score with the floor applied, each
 /// carrying the emitted length that [`choose_root`] decides on.
 fn root_candidates(html: &Html) -> Vec<(ElementRef<'_>, Candidate)> {
+    // Emitted length is measured against a dummy base: hrefs do not change how much text a
+    // root yields, and the real base is not known here.
+    let base = Url::parse("https://x.invalid/").unwrap();
     let mut candidates: Vec<(ElementRef<'_>, &'static str)> = Vec::new();
     for sel in ["article", "main", "[role=main]"] {
         let Ok(selector) = Selector::parse(sel) else {
@@ -356,7 +436,7 @@ fn root_candidates(html: &Html) -> Vec<(ElementRef<'_>, Candidate)> {
         };
         candidates.extend(html.select(&selector).map(|el| (el, sel)));
     }
-    candidates.extend(score_best(html).map(|el| (el, "scored")));
+    candidates.extend(score_best(html, &Walk::bare(&base)).map(|el| (el, "scored")));
     let mut ranked: Vec<(ElementRef<'_>, Candidate)> = candidates
         .into_iter()
         .map(|(el, origin)| {
@@ -372,6 +452,7 @@ fn root_candidates(html: &Html) -> Vec<(ElementRef<'_>, Candidate)> {
                 link_density,
                 score: raw_text as f64 * (1.0 - link_density),
                 emitted: 0,
+                hints_off: false,
             };
             (el, c)
         })
@@ -387,25 +468,50 @@ fn root_candidates(html: &Html) -> Vec<(ElementRef<'_>, Candidate)> {
     // Rank by what the block walker actually *emits*, not by raw text. A container can be
     // dense with text yet yield almost nothing once chrome and empty wrappers are dropped,
     // which is how a newsletter post lost 90% of its body to a higher-scoring ancestor.
-    let base = Url::parse("https://x.invalid/").unwrap();
     for (el, c) in &mut ranked {
-        c.emitted = block_text(&blocks_from(*el, &base));
+        let (blocks, hints_off) = blocks_guarded(*el, &base);
+        c.emitted = block_text(&blocks);
+        c.hints_off = hints_off;
     }
     ranked
+}
+
+/// Walk `root` with the chrome hints in force, and without them if that is what it takes.
+///
+/// A hint that deletes most of a root is not describing chrome. One wire service names every
+/// story card `PagePromo`, and `promo` is a hint: its front page emitted 2,371 of 16,673
+/// chars. Another wraps its whole main column in `region-content-sidebar-secondary`, and
+/// `sidebar` is a hint: its `<body>` emitted 283 chars. When the hinted subtrees are more than
+/// half the root's text, the root is walked without them, and the Explanation says so.
+fn blocks_guarded(root: ElementRef<'_>, base: &Url) -> (Vec<Block>, bool) {
+    let with = blocks_from(root, &Walk::bare(base));
+    let without = blocks_from(root, &Walk::without_hints(base));
+    if block_text(&without) > 2 * block_text(&with) {
+        (without, true)
+    } else {
+        (with, false)
+    }
 }
 
 /// Index of the candidate with the most emitted text. Ties go to the later one, which is what
 /// `max_by_key` did when this was inline.
 fn choose_root(ranked: &[(ElementRef<'_>, Candidate)]) -> Option<usize> {
+    // Equal emitted text, prefer the tighter container: when `<main>` and the article body
+    // inside it yield the same blocks, the body is the one without the video card and the
+    // app-download banner that sit beside it in `<main>` and get flattened into its run.
     ranked
         .iter()
         .enumerate()
-        .max_by_key(|(_, (_, c))| c.emitted)
+        .max_by(|(_, (_, a)), (_, (_, b))| {
+            a.emitted
+                .cmp(&b.emitted)
+                .then_with(|| b.raw_text.cmp(&a.raw_text))
+        })
         .map(|(i, _)| i)
 }
 
 /// Readability-style: score leaf text blocks, propagate to ancestors, and discount link density.
-fn score_best(html: &Html) -> Option<ElementRef<'_>> {
+fn score_best<'h>(html: &'h Html, walk: &Walk<'_>) -> Option<ElementRef<'h>> {
     let mut scores: HashMap<ego_tree::NodeId, f64> = HashMap::new();
     // `div`/`section` are included because most modern pages never emit a `<p>`. A container
     // only counts when the prose is its *own* (see `own_text`).
@@ -424,7 +530,7 @@ fn score_best(html: &Html) -> Option<ElementRef<'_>> {
         for _ in 0..3 {
             let Some(n) = node else { break };
             if let Some(e) = ElementRef::wrap(n)
-                && !is_noise(&e)
+                && !is_noise(&e, walk)
             {
                 *scores.entry(n.id()).or_insert(0.0) += base * decay;
             }
@@ -445,13 +551,30 @@ fn score_best(html: &Html) -> Option<ElementRef<'_>> {
         .map(|(el, _)| el)
 }
 
-fn is_noise(el: &ElementRef) -> bool {
+fn is_noise(el: &ElementRef, walk: &Walk<'_>) -> bool {
     let v = el.value();
-    if NOISE.contains(&v.name()) {
+    let name = v.name();
+    // A page's `<header>` and `<footer>` are chrome. A card's or an article's are not: one
+    // front page sets every headline in `<article><header><h4>`, and dropping the tag there
+    // dropped the page. Inside an `<article>` or `<section>` the two are structure.
+    if matches!(name, "header" | "footer") {
+        return !el
+            .ancestors()
+            .filter_map(ElementRef::wrap)
+            .any(|a| matches!(a.value().name(), "article" | "section"));
+    }
+    if NOISE.contains(&name) {
         return true;
     }
-    let hint = format!("{} {}", v.id().unwrap_or(""), v.attr("class").unwrap_or("")).to_lowercase();
-    !hint.trim().is_empty() && NOISE_HINT.iter().any(|h| hint.contains(h))
+    if !walk.noise_hints {
+        return false;
+    }
+    let hint = format!("{} {}", v.id().unwrap_or(""), v.attr("class").unwrap_or(""));
+    // Token match, not substring, so `navigator`, `header-image`, and `shareholder` are no
+    // longer chrome. See `hint`. A token that *is* a hint on a content container (one wire
+    // service names its story cards `PagePromo`) is the ratio guard's job, in
+    // `root_candidates`.
+    crate::hint::matches(&hint, NOISE_HINT)
 }
 
 // ---------- text measurement ----------
@@ -512,12 +635,38 @@ const MAX_DEPTH: usize = 256;
 
 /// Public entry point for the thread extractor, which builds blocks for one post.
 pub fn blocks_from_public(root: ElementRef<'_>, base: &Url) -> Vec<Block> {
-    blocks_from(root, base)
+    blocks_from(root, &Walk::bare(base))
 }
 
-fn blocks_from(root: ElementRef<'_>, base: &Url) -> Vec<Block> {
+/// What every walker is handed, and all it is allowed to know: where hrefs resolve, and
+/// whether the class-name chrome hints are in force. Never a hostname.
+///
+/// `noise_hints` is off for a root whose hinted subtrees turned out to be most of its text
+/// (see `root_candidates`): a wire service names its story cards `PagePromo`, and a hint that
+/// deletes the page is not describing chrome.
+pub struct Walk<'a> {
+    pub base: &'a Url,
+    noise_hints: bool,
+}
+
+impl<'a> Walk<'a> {
+    pub fn bare(base: &'a Url) -> Self {
+        Self {
+            base,
+            noise_hints: true,
+        }
+    }
+    fn without_hints(base: &'a Url) -> Self {
+        Self {
+            base,
+            noise_hints: false,
+        }
+    }
+}
+
+fn blocks_from(root: ElementRef<'_>, walk: &Walk<'_>) -> Vec<Block> {
     let mut out = Vec::new();
-    walk_blocks(*root, base, &mut out, 0);
+    walk_blocks(*root, walk, &mut out, 0);
     out
 }
 
@@ -547,7 +696,7 @@ fn holds_blocks(el: &ElementRef) -> bool {
         .any(|d| BLOCK_LEVEL.contains(&d.value().name()))
 }
 
-fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth: usize) {
+fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, depth: usize) {
     if depth >= MAX_DEPTH {
         // Keep the text rather than the structure; see `MAX_DEPTH`.
         let text = inner_text(node);
@@ -564,11 +713,11 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth:
     for child in node.children() {
         let Some(el) = ElementRef::wrap(child) else {
             if matches!(child.value(), Node::Text(_)) {
-                inline_child(child, base, depth + 1, &mut pending);
+                inline_child(child, walk, depth + 1, &mut pending);
             }
             continue;
         };
-        if is_noise(&el) {
+        if is_noise(&el, walk) {
             continue;
         }
         let name = el.value().name();
@@ -576,7 +725,7 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth:
         match name {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 let level = name.as_bytes()[1] - b'0';
-                let inl = trim_inlines(inlines_from(child, base, depth + 1));
+                let inl = trim_inlines(inlines_from(child, walk, depth + 1));
                 if !inl.is_empty() {
                     made.push(Block::Heading {
                         level,
@@ -585,7 +734,7 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth:
                 }
             }
             "p" => {
-                let inl = trim_inlines(inlines_from(child, base, depth + 1));
+                let inl = trim_inlines(inlines_from(child, walk, depth + 1));
                 if !inl.is_empty() {
                     made.push(Block::Paragraph(inl));
                 }
@@ -598,9 +747,9 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth:
                     .filter(|l| l.parent().map(|p| p.id()) == Some(child.id()))
                     .map(|l| {
                         let mut b = Vec::new();
-                        walk_blocks(*l, base, &mut b, depth + 2);
+                        walk_blocks(*l, walk, &mut b, depth + 2);
                         if b.is_empty() {
-                            let inl = inlines_from(*l, base, depth + 2);
+                            let inl = inlines_from(*l, walk, depth + 2);
                             if !inl.is_empty() {
                                 b.push(Block::Paragraph(inl));
                             }
@@ -615,7 +764,7 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth:
             }
             "blockquote" => {
                 let mut b = Vec::new();
-                walk_blocks(child, base, &mut b, depth + 1);
+                walk_blocks(child, walk, &mut b, depth + 1);
                 if !b.is_empty() {
                     made.push(Block::Quote {
                         blocks: b,
@@ -634,7 +783,7 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth:
             }
             "hr" => made.push(Block::Rule),
             "img" => {
-                if let Some(img) = image_from(&el, base) {
+                if let Some(img) = image_from(&el, walk.base) {
                     made.push(Block::Figure {
                         image: img,
                         caption: None,
@@ -647,21 +796,27 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth:
                 if let Some(img) = el
                     .select(&img_sel)
                     .next()
-                    .and_then(|i| image_from(&i, base))
+                    .and_then(|i| image_from(&i, walk.base))
                 {
                     let caption = el
                         .select(&cap_sel)
                         .next()
-                        .map(|c| inlines_from(*c, base, depth + 2))
+                        .map(|c| inlines_from(*c, walk, depth + 2))
                         .filter(|c| !c.is_empty());
                     made.push(Block::Figure {
                         image: img,
                         caption,
                     });
+                } else {
+                    // A figure around a table, a code listing, or a quote is a container
+                    // like any other. Falling to the inline flatten here turned a hero
+                    // caption into a stray paragraph and a figure-wrapped table into a run
+                    // of words.
+                    walk_blocks(child, walk, &mut made, depth + 1);
                 }
             }
             "table" => {
-                if let Some(t) = table_from(&el, base, depth) {
+                if let Some(t) = table_from(&el, walk, depth) {
                     made.push(t);
                 }
             }
@@ -670,14 +825,14 @@ fn walk_blocks(node: NodeRef<'_, Node>, base: &Url, out: &mut Vec<Block>, depth:
             // becoming one of its own, which is what keeps `<a>headline</a> (<a>host</a>)`
             // one line instead of a linked headline and a discarded remainder.
             _ if !BLOCK_LEVEL.contains(&name) && !holds_blocks(&el) => {
-                inline_child(child, base, depth + 1, &mut pending);
+                inline_child(child, walk, depth + 1, &mut pending);
             }
             _ => {
-                walk_blocks(child, base, &mut made, depth + 1);
+                walk_blocks(child, walk, &mut made, depth + 1);
                 if made.is_empty() {
-                    inline_child(child, base, depth + 1, &mut pending);
+                    inline_child(child, walk, depth + 1, &mut pending);
                 } else if name == "a"
-                    && let Some(href) = el.value().attr("href").and_then(|h| base.join(h).ok())
+                    && let Some(href) = el.value().attr("href").and_then(|h| walk.base.join(h).ok())
                 {
                     // A card on a news front page is `<a href><div><h2>..</h2></div></a>`,
                     // and descending into it as a plain container left the headline as
@@ -810,7 +965,7 @@ fn inlines_len(v: &[Inline]) -> usize {
         .sum()
 }
 
-fn inlines_from(node: NodeRef<'_, Node>, base: &Url, depth: usize) -> Vec<Inline> {
+fn inlines_from(node: NodeRef<'_, Node>, walk: &Walk<'_>, depth: usize) -> Vec<Inline> {
     let mut out = Vec::new();
     if depth >= MAX_DEPTH {
         // Keep the text rather than the styling; see `MAX_DEPTH`.
@@ -821,7 +976,7 @@ fn inlines_from(node: NodeRef<'_, Node>, base: &Url, depth: usize) -> Vec<Inline
         return out;
     }
     for child in node.children() {
-        inline_child(child, base, depth, &mut out);
+        inline_child(child, walk, depth, &mut out);
     }
     out
 }
@@ -830,7 +985,7 @@ fn inlines_from(node: NodeRef<'_, Node>, base: &Url, depth: usize) -> Vec<Inline
 /// needs the same mapping for a single child: an element that turned out to hold no blocks
 /// is inline, and reaching it through `inlines_from` on its *parent* would re-walk siblings
 /// that have already been emitted.
-fn inline_child(child: NodeRef<'_, Node>, base: &Url, depth: usize, out: &mut Vec<Inline>) {
+fn inline_child(child: NodeRef<'_, Node>, walk: &Walk<'_>, depth: usize, out: &mut Vec<Inline>) {
     match child.value() {
         Node::Text(t) => {
             let s = squeeze(&t.replace(['\n', '\t'], " "));
@@ -850,22 +1005,22 @@ fn inline_child(child: NodeRef<'_, Node>, base: &Url, depth: usize, out: &mut Ve
             let Some(el) = ElementRef::wrap(child) else {
                 return;
             };
-            if is_noise(&el) {
+            if is_noise(&el, walk) {
                 return;
             }
             match e.name.local.as_ref() {
-                "em" | "i" => out.push(Inline::Emph(inlines_from(child, base, depth + 1))),
-                "strong" | "b" => out.push(Inline::Strong(inlines_from(child, base, depth + 1))),
+                "em" | "i" => out.push(Inline::Emph(inlines_from(child, walk, depth + 1))),
+                "strong" | "b" => out.push(Inline::Strong(inlines_from(child, walk, depth + 1))),
                 "code" | "kbd" | "samp" => out.push(Inline::Code(inner_text(child))),
                 "br" => out.push(Inline::Break),
                 "img" => {
-                    if let Some(i) = image_from(&el, base) {
+                    if let Some(i) = image_from(&el, walk.base) {
                         out.push(Inline::Image(i));
                     }
                 }
                 "a" => {
-                    let inl = inlines_from(child, base, depth + 1);
-                    match el.value().attr("href").and_then(|h| base.join(h).ok()) {
+                    let inl = inlines_from(child, walk, depth + 1);
+                    match el.value().attr("href").and_then(|h| walk.base.join(h).ok()) {
                         Some(href) if !inl.is_empty() => out.push(Inline::Link {
                             href: href.to_string(),
                             inlines: inl,
@@ -873,7 +1028,7 @@ fn inline_child(child: NodeRef<'_, Node>, base: &Url, depth: usize, out: &mut Ve
                         _ => out.extend(inl),
                     }
                 }
-                _ => out.extend(inlines_from(child, base, depth + 1)),
+                _ => out.extend(inlines_from(child, walk, depth + 1)),
             }
         }
         _ => {}
@@ -930,11 +1085,26 @@ fn code_lang(el: &ElementRef) -> Option<String> {
 }
 
 fn image_from(el: &ElementRef, base: &Url) -> Option<Image> {
-    let raw = el
-        .value()
+    let v = el.value();
+    let raw = v
         .attr("src")
-        .or_else(|| el.value().attr("data-src"))
-        .or_else(|| el.value().attr("data-original"))?;
+        .filter(|s| !s.starts_with("data:"))
+        .or_else(|| v.attr("data-src"))
+        .or_else(|| v.attr("data-original"))
+        .or_else(|| v.attr("srcset").and_then(first_of_srcset))
+        .or_else(|| v.attr("data-srcset").and_then(first_of_srcset))
+        .or_else(|| {
+            // `<picture><source srcset><img></picture>` with an `<img>` that carries nothing
+            // but a placeholder: the first source's first candidate is the image.
+            let parent = el.parent().and_then(ElementRef::wrap)?;
+            if parent.value().name() != "picture" {
+                return None;
+            }
+            let source = Selector::parse("source[srcset]").ok()?;
+            parent
+                .select(&source)
+                .find_map(|s| s.value().attr("srcset").and_then(first_of_srcset))
+        })?;
     let src = base.join(raw).ok()?;
     Some(Image {
         src: src.to_string(),
@@ -946,6 +1116,16 @@ fn image_from(el: &ElementRef, base: &Url) -> Option<Image> {
     })
 }
 
+/// The first URL in a `srcset`: `url 1x, url 2x` or `url 256w, url 512w`. The smallest
+/// candidate is listed first by convention, and this reader decodes at column width anyway.
+fn first_of_srcset(srcset: &str) -> Option<&str> {
+    srcset
+        .split(',')
+        .map(str::trim)
+        .filter_map(|c| c.split_whitespace().next())
+        .find(|u| !u.is_empty() && !u.starts_with("data:"))
+}
+
 /// A row is a *header* row only when every cell it owns is a `<th>`.
 ///
 /// Splitting on "does this row contain any `<th>`" instead loses data both ways on the
@@ -953,7 +1133,7 @@ fn image_from(el: &ElementRef, base: &Url) -> Option<Image> {
 /// `<tr><th>Name</th><td>Alice</td></tr>` contributed `Name` as the only header and dropped
 /// `Alice`, and every row after it contributed its `<td>`s and dropped its `<th>`. Cells are
 /// collected in document order with one selector so a mixed row keeps its shape.
-fn table_from(el: &ElementRef, base: &Url, depth: usize) -> Option<Block> {
+fn table_from(el: &ElementRef, walk: &Walk<'_>, depth: usize) -> Option<Block> {
     let tr = Selector::parse("tr").ok()?;
     let cell = Selector::parse("th, td").ok()?;
     let mut headers: Vec<Vec<Inline>> = Vec::new();
@@ -967,7 +1147,7 @@ fn table_from(el: &ElementRef, base: &Url, depth: usize) -> Option<Block> {
         let cells: Vec<(bool, Vec<Inline>)> = row
             .select(&cell)
             .filter(|c| owning_row(**c) == Some(row.id()))
-            .map(|c| (c.value().name() == "th", inlines_from(*c, base, depth + 1)))
+            .map(|c| (c.value().name() == "th", inlines_from(*c, walk, depth + 1)))
             .collect();
         if cells.is_empty() {
             continue;
@@ -1613,5 +1793,179 @@ mod tests {
         assert_eq!(why.thread_merge, "replaced the document");
         let text = why.to_string();
         assert!(text.contains("* tr.athing.comtr x4"), "{text}");
+    }
+
+    /// Regression: one wire service classes every story card `PagePromo`, `promo` is a
+    /// chrome hint, and its front page emitted 2,371 of 16,673 characters. A hint that
+    /// deletes most of a root is not describing chrome; the root is walked without hints and
+    /// the explanation says so.
+    #[test]
+    fn a_noise_hint_that_eats_the_root_is_ignored() {
+        let cards = (0..8)
+            .map(|i| {
+                format!(
+                    "<div class=\"PagePromo\"><h3 class=\"PagePromo-title\"><a href=\"/s{i}\">Headline \
+                     {i} about something that happened in the world today</a></h3><p class=\"PagePromo-description\">A \
+                     summary sentence for story {i}, long enough to be worth reading and scoring.</p></div>"
+                )
+            })
+            .collect::<String>();
+        let src = format!(
+            "<html><body><main><p>Top stories, a short intro.</p>{cards}</main></body></html>"
+        );
+        let url = Url::parse("https://example.test/").unwrap();
+        let why = explain(&src, &url);
+        let d = extract(&src, &url);
+        let w = why.winner.expect("a root");
+        assert!(why.candidates[w].hints_off, "{why}");
+        assert!(
+            d.text_len() > 600,
+            "cards were dropped as chrome: {} chars\n{why}",
+            d.text_len()
+        );
+        assert!(why.to_string().contains("(chrome hints off)"));
+    }
+
+    /// The control for the guard: a real sidebar under the root is still dropped, because it
+    /// is not most of the root's text.
+    #[test]
+    fn a_related_sidebar_is_still_chrome() {
+        let body = "Body prose long enough to clear the two-hundred-character floor on its own, \
+                    repeated so the article is the obvious root of this page and nothing else. "
+            .repeat(6);
+        let src = format!(
+            "<html><body><main><article><p>{body}</p></article>\
+             <div class=\"related\"><p>Related: a story you did not ask for, with a sentence.</p>\
+             <p>Related: another one, also with a sentence of its own.</p></div></main></body></html>"
+        );
+        let d = doc(&src);
+        let text = crate::render::to_text(&d, &crate::render::TextOpts::default());
+        assert!(!text.contains("Related:"), "sidebar bled in:\n{text}");
+    }
+
+    /// Regression: two of the top-ten US news sites put a URL in `article:author`. A link is
+    /// not a name; the visible byline is.
+    #[test]
+    fn a_url_is_not_a_byline_and_the_visible_one_is_used() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(4);
+        let src = format!(
+            "<html><head><meta property=\"article:author\" content=\"https://www.facebook.com/example\">\
+             </head><body><article><div class=\"byline\">By Jane Writer</div><p>{body}</p></article></body></html>"
+        );
+        let d = doc(&src);
+        assert_eq!(d.byline.as_deref(), Some("Jane Writer"));
+        let why = explain(&src, &Url::parse("https://example.test/a").unwrap());
+        assert_eq!(why.meta[1].1, "[class~=byline]");
+    }
+
+    /// Regression: `<main>` and `div.article-body` emitted the same 5,774 characters and the
+    /// tie went to `<main>`, which is the one with the "close" button and the app banner.
+    #[test]
+    fn an_emitted_tie_goes_to_the_tighter_container() {
+        let body = "Body prose long enough to clear the two-hundred-character floor on its own, \
+                    repeated so the article is the obvious root of this page and nothing else. "
+            .repeat(4);
+        let src = format!(
+            "<html><body><main><nav>a b c d e f g h i j k l m n o p q r s t u v w x y z</nav>\
+             <article><p>{body}</p><p>{body}</p></article></main></body></html>"
+        );
+        let why = explain(&src, &Url::parse("https://example.test/a").unwrap());
+        let w = why.winner.unwrap();
+        assert_eq!(why.candidates[w].tag, "article", "{why}");
+    }
+
+    /// Regression: a hero image served as `<picture><source srcset><img src="data:...">`
+    /// found no `src` worth the name, the figure arm emitted nothing, and the caption fell
+    /// through as a bare paragraph above the body.
+    #[test]
+    fn a_picture_element_and_a_srcset_are_images() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(4);
+        let src = format!(
+            "<html><body><article>\
+             <figure><picture><source srcset=\"/a-256.jpg 256w, /a-512.jpg 512w\">\
+             <img src=\"data:image/gif;base64,R0lGOD\" alt=\"A hero\"></picture>\
+             <figcaption>The hero, captioned.</figcaption></figure>\
+             <p>{body}</p><img srcset=\"/b-1x.jpg 1x, /b-2x.jpg 2x\" alt=\"Second\"></article></body></html>"
+        );
+        let d = doc(&src);
+        let figs: Vec<_> = d
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Figure { image, .. } => Some(image.src.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            figs,
+            vec![
+                "https://example.test/a-256.jpg",
+                "https://example.test/b-1x.jpg"
+            ],
+            "{:?}",
+            d.blocks
+        );
+    }
+
+    /// A `<figure>` around a table is a container, not a run of words.
+    #[test]
+    fn a_figure_without_an_image_keeps_its_content() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(4);
+        let src = format!(
+            "<html><body><article><p>{body}</p>\
+             <figure><table><tr><th>Year</th><th>Value</th></tr><tr><td>2024</td><td>1</td></tr></table>\
+             <figcaption>Values by year.</figcaption></figure></article></body></html>"
+        );
+        let d = doc(&src);
+        assert!(
+            d.blocks.iter().any(|b| matches!(b, Block::Table { .. })),
+            "table lost: {:?}",
+            d.blocks
+        );
+    }
+
+    /// Regression: two front pages' best root was a 240-char text box and a 471-char legal
+    /// block, each clearing the 200 floor and each a sliver of the page.
+    #[test]
+    fn a_root_that_is_a_sliver_of_the_page_yields_to_the_body() {
+        // Cards too short for the scorer to credit (`own_text` under 25), so the legal
+        // block is the only candidate, as on the measured pages.
+        let cards = (0..80)
+            .map(|i| {
+                format!("<div class=\"zz\"><a href=\"/s{i}\">Story {i} headline text</a></div>")
+            })
+            .collect::<String>();
+        let legal = "Legal notice text, long enough to clear the two hundred character floor \
+                     on its own and be chosen as the best-scoring prose on the page. "
+            .repeat(2);
+        let src = format!(
+            "<html><body><div>{cards}</div><div class=\"legal\"><p>{legal}</p></div></body></html>"
+        );
+        let url = Url::parse("https://example.test/").unwrap();
+        let why = explain(&src, &url);
+        assert!(why.body_fallback, "{why}");
+        assert!(why.text_len > 500, "{why}");
+    }
+
+    /// Regression: a front page set every headline in `<article><header><h4>`, and `header`
+    /// is a chrome tag, so the body emitted 2,337 of 11,600 characters. A header inside an
+    /// article is the article's, not the page's; the page's own stays chrome.
+    #[test]
+    fn a_header_inside_an_article_is_content_and_the_page_header_is_not() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(4);
+        let src = format!(
+            "<html><body><header><a href=\"/\">Site Name</a> <a href=\"/x\">Section</a></header>\
+             <article><header><h1>The Headline</h1><p>By A Writer</p></header><p>{body}</p>\
+             <footer><p>Filed under things.</p></footer></article></body></html>"
+        );
+        let d = doc(&src);
+        let text = crate::render::to_text(&d, &crate::render::TextOpts::default());
+        assert!(text.contains("The Headline"), "{text}");
+        assert!(text.contains("Filed under"), "{text}");
+        assert!(!text.contains("Site Name"), "{text}");
     }
 }

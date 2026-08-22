@@ -241,18 +241,20 @@ fn embed_ui(ui: &mut Ui, kind: ir::EmbedKind, url: &str, ctx: &mut RenderCtx<'_>
 /// The document's own header: title, byline, and date. Not a `Block`: `doc.title` is metadata,
 /// and rendering it as an H1 is the reader's decision.
 pub fn document_header(ui: &mut Ui, doc: &ir::Document, ctx: &mut RenderCtx<'_>) {
-    if let Some(t) = &doc.title {
+    if let Some(t) = crate::reader::title::display(doc) {
         let set = Setting::heading(ctx.opts, &ctx.pal, 1);
         let flat = vec![Run::Text {
             text: t.clone(),
             style: Default::default(),
         }];
-        ctx.begin_list(t);
+        ctx.begin_list(&t);
         inline_ui::runs_ui(ui, &flat, &set, ctx);
     }
     let meta: Vec<String> = [
         doc.byline.clone(),
-        doc.published.clone(),
+        doc.published
+            .as_deref()
+            .map(crate::reader::title::short_date),
         doc.site_name.clone(),
     ]
     .into_iter()

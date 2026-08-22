@@ -44,8 +44,8 @@ impl TextOpts {
 
 pub fn to_text(doc: &Document, opts: &TextOpts) -> String {
     let mut out = String::new();
-    if let Some(t) = &doc.title {
-        out.push_str(t);
+    if let Some(t) = crate::reader::title::display(doc) {
+        out.push_str(&t);
         out.push('\n');
         out.push_str(&"=".repeat(t.chars().count().min(opts.width)));
         out.push_str("\n\n");
@@ -53,7 +53,17 @@ pub fn to_text(doc: &Document, opts: &TextOpts) -> String {
     if let Some(b) = &doc.byline {
         out.push_str(&format!("by {b}\n\n"));
     }
-    render_blocks(&doc.blocks, opts, 0, &mut out);
+    // The same masthead skip the reader applies: the headline the title line already shows,
+    // and the "By Name" the byline line already shows. `reader::title` owns the decision.
+    let masthead = crate::reader::title::masthead(doc);
+    let body: Vec<Block> = doc
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !masthead.skips(*i))
+        .map(|(_, b)| b.clone())
+        .collect();
+    render_blocks(&body, opts, 0, &mut out);
     out
 }
 
@@ -426,5 +436,22 @@ mod tests {
         // Capped, not dropped: the reply is still indented as deeply as the cap allows.
         let o = TextOpts::default();
         assert!(out.contains(&" ".repeat(o.indent_for(o.max_thread_indent))));
+    }
+
+    /// The text renderer shares the reader's masthead: a headline the title line already
+    /// shows and a "By Name" the byline line already shows are not printed again.
+    #[test]
+    fn the_masthead_is_not_printed_twice() {
+        let doc = crate::html::extract(
+            "<html><head><title>The Headline</title><meta name=\"author\" content=\"Jane Writer\"></head>\
+             <body><article><h1>The Headline</h1><p class=\"byline\">By Jane Writer</p>\
+             <p>Body prose long enough to be a paragraph in its own right, and then some more.</p>\
+             </article></body></html>",
+            &url::Url::parse("https://example.test/a").unwrap(),
+        );
+        let text = to_text(&doc, &TextOpts::default());
+        assert_eq!(text.matches("The Headline").count(), 1, "{text}");
+        assert_eq!(text.matches("Jane Writer").count(), 1, "{text}");
+        assert!(text.contains("Body prose"));
     }
 }
