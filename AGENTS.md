@@ -77,16 +77,22 @@ and `session::Loaded` and touches no extractor.
     reader/history.rs      back/forward over a cursor
     reader/thread_tree.rs  flat Vec<Comment> + depth -> tree; CommentKey
     reader/title.rs        title / blocks[0] de-duplication
+    reader/notice.rs       what the reader reports about a page, and how loud. No egui types
     reader/settings.rs     the config-path triple, atomic write, never fatal
     reader/image_decode.rs sniff, ceilings, partial handling, downscale. &[u8] -> pixels
     reader/ui/             everything that needs an egui::Context, and nothing else
+    reader/ui/notice_ui.rs the one place the reader draws its own text: Notice -> a band
 
 `image_decode` is the sharp case: it is the only module in the project that parses untrusted
 binary input, and putting it under `ui/` would have made the highest-risk code the one code no
 test ever runs.
 
 Text length is the shared scoring currency: `Document::text_len`, `ir::blocks_text_len`, and
-`thread::comments_text_len`. Reuse these rather than adding a fourth counter. The same rule now
+`thread::comments_text_len`. Reuse these rather than adding a fourth counter. `ir::THIN_TEXT`
+is the one threshold on that currency, and it has consumers at both ends of the pipeline:
+`html::extract` falls back to `<body>` below it, `reader::notice` warns about a page that came
+out under it. Same event, two ends; a second copy of the number lets the reader stop warning
+about exactly the pages the extractor gave up on. The same rule now
 covers *text itself*: `ir::plain_text` is the one presentation-neutral flatten, and
 `reader::inline::flatten` is the one styled one, with `render::inline_text` built on top of it.
 Four walkers disagreeing about where an emphasis boundary falls is a bug nobody finds.
@@ -109,6 +115,20 @@ crate where a `Color32` appears, and that is a property worth keeping greppable.
 `Block::Table`: simple grid only, no colspan/rowspan, because layout tables are precisely what
 this client refuses to reproduce. And no dimensions on `ir::Image`: the extractor does not
 capture them, so the reader reserves layout from what it has actually decoded instead.
+
+**The reading column contains page content and nothing else, and a notice shares no colour role
+or layout idiom with the page.** This is the no-styling rule one layer out. Everything the
+reader reports *about* a page is a band drawn by `reader::ui::notice_ui::band`, full-bleed across
+the central panel, which is the one property an `ir::Block` cannot have: the column is a fixed
+measure and a band is not. That is the load-bearing signal, because it survives a screenshot, a
+monochrome eye, and a theme nobody has designed yet; `notice::MARK` is the second. Colour is
+support, and `theme::notice_fill_clears_every_page_colour` holds the floor, because exact
+inequality means nothing when two roles sit five units apart, which is what `chrome_bg` and
+`code_bg` do. A band borrows no page idiom: not `heading_font`, not `body_font`, not the quote
+rule, not the code frame. The three inline exceptions (`[image]`, `Block::Embed`, "(N replies
+hidden)") are *positional*, marking one thing at one place, which a full-bleed band cannot do;
+they carry the bracket convention instead. Wording lives in `src/reader/notice.rs`, outside
+`ui/`, so the fast CI job tests it.
 
 **Privacy is compile-time absence, not policy.** `reqwest` is built with
 `default-features = false`, so no cookie jar exists: the capability is absent, not merely
@@ -211,7 +231,8 @@ in for a retry until one is measured to be needed.
 ## Testing
 
 Regression cover is synthetic `#[cfg(test)]` fixtures inside each module (`src/html.rs`,
-`src/fetch.rs`, `src/rewrite.rs`, and every module under `src/reader/` that is not `ui/`): no
+`src/fetch.rs`, `src/rewrite.rs`, and every module under `src/reader/` that is not `ui/`, plus
+`ui/theme.rs`, whose `palette` takes no `egui::Context` and is therefore reachable): no
 network and no corpus, so CI can run them. The reader's split exists for this: everything
 decidable without an `egui::Context` is tested, and only chrome, widget dispatch, and texture
 upload are merely compiled. Tests worth keeping named:
@@ -236,6 +257,14 @@ upload are merely compiled. Tests worth keeping named:
 - `whitespace_between_inline_elements_is_a_word_boundary` (`src/html.rs`): markup indentation
   puts a whitespace-only text node between adjacent inline elements constantly, and dropping it
   welded two words into one.
+- `no_notice_contains_an_arrow` (`src/reader/notice.rs`): the executable form of the
+  embedded-font gap. The prose rule below existed the whole time and two strings shipped with
+  `→` anyway, one of them a heading, tofu from the day it was written. Prose does not fail a
+  build.
+- `notice_fill_clears_every_page_colour` (`src/reader/ui/theme.rs`): the executable form of the
+  notice/page separation, and **the one test under `ui/`**. Argued rather than assumed:
+  `theme::palette` takes no `egui::Context`, unlike `apply`, `measure_px`, and `system_is_dark`,
+  so it is reachable by the directory's own "split by what a test can reach" rule.
 - `a_pathologically_deep_thread_builds_and_traverses_completely`
   (`src/reader/thread_tree.rs`): a hostile thread is untrusted input, so the traversal is
   iterative.
@@ -280,7 +309,9 @@ Real, and worth knowing before re-discovering them:
 - **egui's embedded fonts have no arrows.** `→` renders as tofu, though `←`, `↑`, and `↓` do
   not, which is why the help table is asymmetric on purpose. Prime marks (`′ ″`) are missing
   too, so coordinates on some pages read as boxes. The fix is the same embedded-face work that
-  `Strong` needs, and until then no chrome string may contain `→`.
+  `Strong` needs, and until then no chrome string may contain `→`. That rule is now enforced by
+  `no_notice_contains_an_arrow` rather than remembered: it was stated here in prose while
+  two strings shipped with `→` in them, one of them a failure heading.
 - **`Strong` is colour, not weight.** `default_fonts` ship no bold face and egui synthesizes
   none. `theme::Palette::strong` is the whole implementation, and it is the one line that
   changes when a real face is embedded.

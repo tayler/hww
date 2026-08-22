@@ -32,13 +32,14 @@
 
 use crate::ir;
 use crate::reader::history::History;
+use crate::reader::notice::{self, Button, Notice};
 use crate::reader::outline::{self, OutlineEntry};
 use crate::reader::settings::{self, Settings};
 use crate::reader::thread_tree::CommentKey;
 use crate::reader::title;
 use crate::reader::ui::images::ImageStore;
-use crate::reader::ui::{Action, Launch, RenderCtx, blocks, net, theme};
-use crate::session::{self, LoadError, LoadOptions, Loaded, Notice, Target};
+use crate::reader::ui::{Action, Launch, RenderCtx, blocks, net, notice_ui, theme};
+use crate::session::{self, LoadError, LoadOptions, Loaded, Rewrite, Target};
 use eframe::egui::{self, Align, Key, Layout, Modifiers, RichText, Ui};
 use net::{Job, Msg, Net, ReqId};
 use std::collections::HashSet;
@@ -86,8 +87,6 @@ struct Ready {
     outline: Vec<OutlineEntry>,
     /// `Some(i)` => `blocks[i]` repeats `doc.title` and is skipped.
     skip_block: Option<usize>,
-    /// A `#fragment` that could not be resolved. Said out loud rather than silently ignored.
-    fragment_note: Option<String>,
 }
 
 #[derive(Default)]
@@ -114,6 +113,8 @@ pub struct ReaderApp {
     /// The link under the pointer right now. Its own slot rather than a status message, or a
     /// moment's hover would bury whatever the reader was actually told.
     hover_href: Option<String>,
+    /// Last frame's status-strip height, so the hover overlay can sit on its top edge.
+    strip_height: f32,
     chrome: Chrome,
     images: ImageStore,
     /// Toggles against the auto-collapse default (see `thread_ui::is_collapsed`).
@@ -140,6 +141,11 @@ pub struct ReaderApp {
     focused_comment: Option<CommentKey>,
     /// One-shot: give the URL bar keyboard focus on the next frame, after it exists.
     focus_url_bar: bool,
+    /// One-shot: the same for the find field. Focusing it from the keymap instead would hand
+    /// the field the `/` that opened it: `consume_key` takes the key event, but the text event
+    /// that arrives with it is a separate event, and a field focused earlier in the same frame
+    /// still reads it.
+    focus_find: bool,
 }
 
 /// Distance one wheel notch moves, in points.
@@ -174,6 +180,7 @@ impl ReaderApp {
             rewrite_notice: None,
             status: launch.settings_note.map(|n| (n, Instant::now())),
             hover_href: None,
+            strip_height: 0.0,
             chrome: Chrome::default(),
             images: ImageStore::default(),
             collapsed: HashSet::new(),
@@ -190,6 +197,7 @@ impl ReaderApp {
             focused_image: None,
             focused_comment: None,
             focus_url_bar: false,
+            focus_find: false,
         };
         match launch.start {
             Some(url) => app.navigate(url, app.rewrite, true),
@@ -242,10 +250,10 @@ impl ReaderApp {
             }
             Target::OfferCopy { url, note } => {
                 self.copy(&url);
-                self.say(format!("{url} is {note}, copied instead"));
+                self.flash(format!("{url} is {note}, copied instead"));
             }
             Target::Refuse { url, reason } => {
-                self.say(format!("{reason}: {url}"));
+                self.flash(format!("{reason}: {url}"));
             }
         }
     }
@@ -262,20 +270,17 @@ impl ReaderApp {
     }
 
     fn jump_to_fragment(&mut self, fragment: &str) {
-        let Page::Ready(ready) = &mut self.page else {
+        let Page::Ready(ready) = &self.page else {
             return;
         };
         match outline::find_fragment(&ready.outline, fragment) {
-            Some(entry) => {
-                let block = entry.block;
-                ready.fragment_note = None;
-                self.scroll_to_block = Some(block);
-            }
+            Some(entry) => self.scroll_to_block = Some(entry.block),
             None => {
                 // There are no block ids in the IR, so this cannot resolve exactly. Saying so
-                // is the difference between a heuristic and a lie.
-                ready.fragment_note = Some(format!("#{fragment}"));
-                self.say(format!("no section matching #{fragment} on this page"));
+                // is the difference between a heuristic and a lie. It goes to the status strip
+                // and nowhere else: an unresolved anchor is a navigation event, not a fact
+                // about the page's content, and saying it twice was saying it badly.
+                self.flash(format!("no section matching #{fragment} on this page"));
             }
         }
     }
@@ -331,7 +336,7 @@ impl ReaderApp {
             max_width,
             send_referer: self.settings.send_image_referer,
         });
-        self.say(format!("loading one image from {host}"));
+        self.flash(format!("loading one image from {host}"));
     }
 
     fn load_all_images(&mut self, ctx: &egui::Context) {
@@ -348,7 +353,7 @@ impl ReaderApp {
         hosts.sort();
         hosts.dedup();
         if srcs.is_empty() {
-            self.say("no images on this page".to_owned());
+            self.flash("no images on this page".to_owned());
             return;
         }
         // Naming the distinct hosts is the point: "load all" must not be the one place the
@@ -362,7 +367,7 @@ impl ReaderApp {
         // became the one place the reader does not say who it is about to contact. Nothing has
         // been drawn yet (these are queued jobs, not completed ones), so the disclosure still
         // precedes any pixels.
-        self.say(format!(
+        self.flash(format!(
             "loading {count} image(s) from {}",
             hosts.join(", ")
         ));
@@ -373,10 +378,10 @@ impl ReaderApp {
     fn drain(&mut self, ctx: &egui::Context) {
         while let Some(msg) = self.net.try_recv() {
             match msg {
-                Msg::Notice { req, notice } => {
+                Msg::Rewrote { req, rewrite } => {
                     if self.current == Some(req) {
-                        let Notice::Rewrote { .. } = &notice;
-                        self.rewrite_notice = Some(notice.to_string());
+                        let Rewrite::Applied { .. } = &rewrite;
+                        self.rewrite_notice = Some(rewrite.to_string());
                     }
                 }
                 Msg::Loaded { req, loaded } => {
@@ -411,7 +416,7 @@ impl ReaderApp {
                 }
                 Msg::Panicked { page, .. } => {
                     if self.current == Some(page) {
-                        self.say("a worker failed while handling that request".to_owned());
+                        self.flash("a worker failed while handling that request".to_owned());
                     }
                 }
             }
@@ -422,7 +427,7 @@ impl ReaderApp {
         // The rewrite landed somewhere other than the rule aimed at. Not an error, but the
         // rule is dead, and that is the whole early-warning system.
         if loaded.prov.rule_appears_dead {
-            self.say(format!(
+            self.flash(format!(
                 "{} redirected away; that rewrite rule appears dead",
                 loaded
                     .prov
@@ -442,7 +447,6 @@ impl ReaderApp {
             loaded,
             outline,
             skip_block,
-            fragment_note: None,
         }));
         if let Some(f) = fragment {
             self.jump_to_fragment(&f);
@@ -456,7 +460,7 @@ impl ReaderApp {
         }
     }
 
-    fn say(&mut self, text: String) {
+    fn flash(&mut self, text: String) {
         self.status = Some((text, Instant::now()));
     }
 
@@ -513,7 +517,7 @@ impl ReaderApp {
         }
         if k(Modifiers::SHIFT, Key::R) {
             self.reload(false);
-            self.say("reloaded without rewrite rules".to_owned());
+            self.flash("reloaded without rewrite rules".to_owned());
         }
         if k(Modifiers::SHIFT, Key::I) {
             self.load_all_images(ctx);
@@ -522,9 +526,9 @@ impl ReaderApp {
             match self.focused_href.clone() {
                 Some(h) => {
                     self.copy(&h);
-                    self.say(format!("copied {h}"));
+                    self.flash(format!("copied {h}"));
                 }
-                None => self.say("no link focused; Tab to one first".to_owned()),
+                None => self.flash("no link focused; Tab to one first".to_owned()),
             }
         }
         if k(Modifiers::SHIFT, Key::Z) {
@@ -579,7 +583,7 @@ impl ReaderApp {
         }
         if k(Modifiers::NONE, Key::Slash) {
             self.chrome.find = Some(self.chrome.find.take().unwrap_or_default());
-            ctx.memory_mut(|m| m.request_focus(egui::Id::new(FIND_ID)));
+            self.focus_find = true;
         }
         if self.find_total > 0 && k(Modifiers::NONE, Key::N) {
             self.find_current = (self.find_current + 1) % self.find_total;
@@ -588,14 +592,14 @@ impl ReaderApp {
             match self.focused_image.clone() {
                 Some(src) => self.load_image(ctx, &src),
                 None => self
-                    .say("no image focused; Tab to a placeholder, or Shift+I for all".to_owned()),
+                    .flash("no image focused; Tab to a placeholder, or Shift+I for all".to_owned()),
             }
         }
         if k(Modifiers::NONE, Key::Y)
             && let Some(u) = self.history.current().cloned()
         {
             self.copy(u.as_str());
-            self.say("page URL copied".to_owned());
+            self.flash("page URL copied".to_owned());
         }
         if k(Modifiers::NONE, Key::OpenBracket) {
             self.settings.read.narrow();
@@ -608,7 +612,7 @@ impl ReaderApp {
         if k(Modifiers::NONE, Key::D) {
             self.settings.read.theme = self.settings.read.theme.next();
             self.settings_dirty = true;
-            self.say(format!("theme: {:?}", self.settings.read.theme));
+            self.flash(format!("theme: {:?}", self.settings.read.theme));
         }
         if k(Modifiers::NONE, Key::Z) {
             self.collapse_focused();
@@ -638,7 +642,7 @@ impl ReaderApp {
     fn collapse_focused(&mut self) {
         match self.focused_comment.clone() {
             Some(key) => toggle(&mut self.collapsed, key),
-            None => self.say("no comment focused".to_owned()),
+            None => self.flash("no comment focused".to_owned()),
         }
     }
 
@@ -658,7 +662,7 @@ impl ReaderApp {
             }
         }
         if keys.is_empty() {
-            self.say("nothing to collapse".to_owned());
+            self.flash("nothing to collapse".to_owned());
             return;
         }
         for k in keys {
@@ -724,18 +728,26 @@ impl eframe::App for ReaderApp {
         self.drain(&ctx);
         self.handle_keys(&ctx);
 
-        // Focus is discovered during render; start each frame not knowing.
+        // Focus and hover are discovered during render; start each frame not knowing. Hover
+        // matters most: `ready_screen` is the only writer, so a value left standing survives
+        // into `Loading` and onto the failure screen, where it pins the previous page's link
+        // over hww's own words for as long as the fetch takes.
         self.focused_href = None;
         self.focused_image = None;
         self.focused_comment = None;
+        self.hover_href = None;
 
         // Order matters: the strip is laid out first so it keeps its line at the bottom no
         // matter what the rest of the chrome does. It is the one thing that never hides.
         self.status_strip(ui, &pal);
-        self.url_bar(ui);
-        self.find_bar(ui);
+        self.url_bar(ui, &pal);
+        self.find_bar(ui, &pal);
         self.outline_panel(ui, &pal);
         self.central(ui, &pal);
+        // *After* the page, because the page is what discovers the hover. An overlay takes no
+        // space from anything, so nothing above depends on it having been drawn. See
+        // `hover_strip`.
+        self.hover_strip(ui, &pal);
         self.help_overlay(&ctx, &pal);
 
         if let Some(text) = self.pending_copy.take() {
@@ -791,7 +803,7 @@ impl ReaderApp {
         self.settings_dirty = false;
         self.last_saved = Instant::now();
         if let Err(e) = settings::save(&self.settings) {
-            self.say(format!("could not save settings: {e}"));
+            self.flash(format!("could not save settings: {e}"));
         }
     }
 
@@ -800,7 +812,7 @@ impl ReaderApp {
     /// The one piece of chrome that never hides. See the module doc.
     fn status_strip(&mut self, ui: &mut Ui, pal: &theme::Palette) {
         let mut action: Option<StripAction> = None;
-        egui::Panel::bottom("hww-status")
+        let strip = egui::Panel::bottom("hww-status")
             .frame(
                 egui::Frame::new()
                     .fill(pal.chrome_bg)
@@ -846,14 +858,12 @@ impl ReaderApp {
                     // Charter point 4: this line is on screen from before the request is sent
                     // until the navigation ends, whatever the fetch does.
                     if let Some(n) = &self.rewrite_notice {
-                        ui.label(RichText::new(n).color(pal.accent).strong());
+                        ui.label(RichText::new(n).color(pal.notice_fg));
                     }
-                    if let Some(h) = &self.hover_href {
-                        ui.label(RichText::new(h).color(pal.link));
-                    } else if let Some((text, at)) = &self.status
+                    if let Some((text, at)) = &self.status
                         && at.elapsed() < Duration::from_secs(12)
                     {
-                        ui.label(RichText::new(text).color(pal.accent));
+                        ui.label(RichText::new(text).color(pal.notice_fg));
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -868,6 +878,7 @@ impl ReaderApp {
                     });
                 });
             });
+        self.strip_height = strip.response.rect.height();
         match action {
             Some(StripAction::Back) => self.go_back(),
             Some(StripAction::Forward) => self.go_forward(),
@@ -876,17 +887,68 @@ impl ReaderApp {
         }
     }
 
+    /// The link under the pointer, on its own line *above* the strip.
+    ///
+    /// A URL is the one string in the chrome that has to be readable in full before the reader
+    /// acts on it: a truncated host is exactly what a lookalike domain needs to pass. So it
+    /// gets a line of its own, wrapping to as many rows as the address takes, instead of
+    /// competing for the strip's single truncated row with the status message it used to bury.
+    ///
+    /// It is a **floating overlay, not a panel**, and that is load-bearing rather than
+    /// stylistic. A panel takes its height out of the reading column, so the column reflows the
+    /// instant the pointer touches a link. The link then moves out from under the pointer, the
+    /// hover ends, the panel goes away, the column reflows back, and the pointer is over the
+    /// link again: the URL strobes at frame rate for as long as the pointer is on the link.
+    /// An overlay changes no other rect, and `interactable(false)` keeps it out of the hit test
+    /// as well, so it cannot take the hover it exists to report.
+    fn hover_strip(&mut self, ui: &mut Ui, pal: &theme::Palette) {
+        let Some(href) = &self.hover_href else {
+            return;
+        };
+        // A page can hand us an arbitrarily long `data:` href, and the overlay grows upward
+        // without bound. Real addresses are nowhere near this; only a pathological one is cut.
+        const MAX: usize = 2000;
+        let shown = if href.chars().count() > MAX {
+            let head: String = href.chars().take(MAX).collect();
+            format!("{head}…")
+        } else {
+            href.clone()
+        };
+        let ctx = ui.ctx().clone();
+        // Sits on the strip's top edge. `status_strip` runs earlier in the same frame, so
+        // `strip_height` is this frame's measurement, not the previous one's.
+        let width = (ctx.content_rect().width() - 16.0).max(64.0);
+        egui::Area::new(egui::Id::new("hww-hover"))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .anchor(
+                egui::Align2::LEFT_BOTTOM,
+                egui::vec2(0.0, -self.strip_height),
+            )
+            .show(&ctx, |ui| {
+                egui::Frame::new()
+                    .fill(pal.chrome_bg)
+                    .inner_margin(egui::Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        // An `Area` offers unbounded width, so wrapping needs an explicit one.
+                        ui.set_max_width(width);
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                        ui.label(RichText::new(shown).color(pal.link));
+                    });
+            });
+    }
+
     fn status_url(&self) -> String {
         match &self.page {
             Page::Loading { url, started } => {
                 format!(
                     "loading {} ({:.1}s)",
-                    host_and_path(url),
+                    notice::host_and_path(url),
                     started.elapsed().as_secs_f32()
                 )
             }
-            Page::Ready(r) => host_and_path(&r.loaded.prov.final_url),
-            Page::Failed { url, .. } => host_and_path(url),
+            Page::Ready(r) => notice::host_and_path(&r.loaded.prov.final_url),
+            Page::Failed { url, .. } => notice::host_and_path(url),
             Page::Idle => "hww: press Ctrl+L for a URL, ? for help".to_owned(),
         }
     }
@@ -926,31 +988,37 @@ impl ReaderApp {
         parts.join(" · ")
     }
 
-    fn url_bar(&mut self, ui: &mut Ui) {
+    fn url_bar(&mut self, ui: &mut Ui, pal: &theme::Palette) {
         let Some(mut text) = self.chrome.url_bar.take() else {
             return;
         };
         let mut go = false;
         let mut keep = true;
-        egui::Panel::top("hww-url").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("URL");
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut text)
-                        .id(egui::Id::new(URL_BAR_ID))
-                        .desired_width(f32::INFINITY)
-                        .hint_text("https://…"),
-                );
-                if self.focus_url_bar {
-                    resp.request_focus();
-                    self.focus_url_bar = false;
-                }
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    go = true;
-                    keep = false;
-                }
+        egui::Panel::top("hww-url")
+            .frame(
+                egui::Frame::new()
+                    .fill(pal.chrome_bg)
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("URL");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut text)
+                            .id(egui::Id::new(URL_BAR_ID))
+                            .desired_width(f32::INFINITY)
+                            .hint_text("https://…"),
+                    );
+                    if self.focus_url_bar {
+                        resp.request_focus();
+                        self.focus_url_bar = false;
+                    }
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        go = true;
+                        keep = false;
+                    }
+                });
             });
-        });
         if go {
             let typed = text.trim().to_owned();
             // A bare host is what people type. Assuming https is the only assumption that does
@@ -963,7 +1031,7 @@ impl ReaderApp {
             match Url::parse(&candidate) {
                 Ok(url) => self.navigate(url, self.rewrite, true),
                 Err(e) => {
-                    self.say(format!("{typed} is not a usable address ({e})"));
+                    self.flash(format!("{typed} is not a usable address ({e})"));
                     keep = true;
                 }
             }
@@ -973,39 +1041,49 @@ impl ReaderApp {
         }
     }
 
-    fn find_bar(&mut self, ui: &mut Ui) {
+    fn find_bar(&mut self, ui: &mut Ui, pal: &theme::Palette) {
         let Some(mut query) = self.chrome.find.take() else {
             return;
         };
         let total = self.find_total;
         let current = self.find_current;
         let mut next = None;
-        egui::Panel::top("hww-find").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Find");
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut query)
-                        .id(egui::Id::new(FIND_ID))
-                        .desired_width(240.0),
-                );
-                if resp.changed() {
-                    next = Some(0);
-                }
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && total > 0 {
-                    next = Some((current + 1) % total);
-                    resp.request_focus();
-                }
-                let shown = if query.is_empty() {
-                    String::new()
-                } else if total == 0 {
-                    "no matches".to_owned()
-                } else {
-                    format!("{} of {total}", current + 1)
-                };
-                ui.label(shown);
-                ui.label(RichText::new("n / N to step · Esc to dismiss").small());
+        egui::Panel::top("hww-find")
+            .frame(
+                egui::Frame::new()
+                    .fill(pal.chrome_bg)
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Find");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut query)
+                            .id(egui::Id::new(FIND_ID))
+                            .desired_width(240.0),
+                    );
+                    if self.focus_find {
+                        resp.request_focus();
+                        self.focus_find = false;
+                    }
+                    if resp.changed() {
+                        next = Some(0);
+                    }
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && total > 0 {
+                        next = Some((current + 1) % total);
+                        resp.request_focus();
+                    }
+                    let shown = if query.is_empty() {
+                        String::new()
+                    } else if total == 0 {
+                        "no matches".to_owned()
+                    } else {
+                        format!("{} of {total}", current + 1)
+                    };
+                    ui.label(shown);
+                    ui.label(RichText::new("n / N to step · Esc to dismiss").small());
+                });
             });
-        });
         if let Some(n) = next {
             self.find_current = n;
         }
@@ -1024,6 +1102,11 @@ impl ReaderApp {
         egui::Panel::left("hww-outline")
             .resizable(true)
             .default_size(240.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(pal.chrome_bg)
+                    .inner_margin(egui::Margin::symmetric(8, 6)),
+            )
             .show(ui, |ui| {
                 ui.label(RichText::new("Outline").color(pal.dim).small());
                 ui.separator();
@@ -1082,8 +1165,7 @@ impl ReaderApp {
         // Rounded to whole *pixels*, not points: at a fractional zoom a column on a half-pixel
         // boundary makes every glyph in it resample, which reads as soft text rather than as a
         // bug, and egui's debug build paints an "Unaligned" warning over the page to say so.
-        let to_pixel = theme::snap;
-        let measure = to_pixel(theme::measure_px(ui.ctx(), &self.settings.read));
+        let wanted = theme::measure_px(ui.ctx(), &self.settings.read);
         let mut scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             // Drag-to-select depends on a mouse drag never being taken by the scroll area, so
@@ -1105,54 +1187,68 @@ impl ReaderApp {
                         ui.scroll_with_delta(egui::vec2(0.0, self.scroll_delta));
                         self.scroll_delta = 0.0;
                     }
-                    // Rounded to whole points: a column on a half-pixel boundary makes every
-                    // glyph in it resample, which reads as soft text rather than as a bug.
-                    // The outline panel takes width from the column, so the measure is a
-                    // ceiling rather than a promise; without the clamp the text is simply cut
+                    // One geometry, two consumers. Computing the measure twice is how a band
+                    // and the column would come to disagree about a left edge. The outline
+                    // panel takes width from the column, so the measure is a ceiling rather
+                    // than a promise; without the clamp inside `Column` the text is simply cut
                     // off on the right when the panel opens.
-                    let measure = to_pixel(measure.min(ui.available_width()));
-                    let margin = to_pixel(((ui.available_width() - measure) * 0.5).max(0.0));
-                    ui.horizontal_top(|ui| {
-                        ui.add_space(margin);
-                        ui.vertical(|ui| {
-                            ui.set_max_width(measure);
-                            ui.set_min_width(measure);
-                            ui.add_space(to_pixel(
-                                theme::line_height_px(&self.settings.read) * 1.5,
-                            ));
-                            self.body(ui, pal);
+                    let column = notice_ui::Column::new(ui, wanted);
+
+                    // Everything above this line is the reader. Below it is the page.
+                    self.notices(ui, pal, column);
+
+                    if matches!(self.page, Page::Ready(_)) {
+                        ui.horizontal_top(|ui| {
+                            ui.add_space(column.gutter);
+                            ui.vertical(|ui| {
+                                ui.set_max_width(column.measure);
+                                ui.set_min_width(column.measure);
+                                ui.add_space(theme::snap(
+                                    theme::line_height_px(&self.settings.read) * 1.5,
+                                ));
+                                self.ready_screen(ui);
+                            });
                         });
-                    });
+                    }
                 });
                 self.viewport_height = out.inner_rect.height().max(1.0);
             });
     }
 
-    fn body(&mut self, ui: &mut Ui, pal: &theme::Palette) {
-        match &self.page {
-            Page::Idle => {
-                ui.label(RichText::new("hww").font(theme::heading_font(&self.settings.read, 1)));
-                ui.label(
-                    RichText::new(
-                        "A reading client for the quiet web. Ctrl+L for a URL, ? for keys.",
-                    )
-                    .color(pal.dim),
-                );
+    /// Every notice for the current page, in the one place they are drawn.
+    ///
+    /// What this replaces is each screen drawing its own banner where it happened, which put
+    /// the reader's words inside the reading column at the prose's own left edge and left
+    /// colour as the only thing telling them apart.
+    fn notices(&mut self, ui: &mut Ui, pal: &theme::Palette, column: notice_ui::Column) {
+        // Owned, so the borrow of `self.page` ends here rather than running through the draw
+        // loop and colliding with the `&mut self` that acting on a button needs.
+        let notices: Vec<Notice> = match &self.page {
+            Page::Idle => vec![notice::idle()],
+            Page::Loading { url, started } => vec![notice::loading(url, started.elapsed())],
+            Page::Failed { url, error, .. } => vec![notice::failure(error, url)],
+            Page::Ready(r) => notice::about_page(r.loaded.prov.status, r.loaded.doc.text_len()),
+        };
+        let mut pressed = None;
+        for notice in &notices {
+            if let Some(b) = notice_ui::band(ui, pal, &self.settings.read, column, notice) {
+                pressed = Some(b);
             }
-            Page::Loading { url, started } => {
-                ui.label(
-                    RichText::new(format!("Loading {}…", host_and_path(url)))
-                        .color(pal.dim)
-                        .font(theme::body_font(&self.settings.read)),
-                );
-                ui.label(
-                    RichText::new(format!("{:.1}s", started.elapsed().as_secs_f32()))
-                        .color(pal.dim)
-                        .small(),
-                );
+        }
+
+        // Acting is deferred past the borrow, the same shape `status_strip` uses for
+        // `StripAction`: widgets record an intent, `app` acts on it once per frame.
+        let (Some(b), Page::Failed { url, rewrite, .. }) = (pressed, &self.page) else {
+            return;
+        };
+        let (url, rewrite) = (url.to_string(), *rewrite);
+        match b {
+            Button::Retry => self.reload(rewrite),
+            Button::RetryWithoutRewrite => self.reload(false),
+            Button::CopyUrl => {
+                self.copy(&url);
+                self.flash("URL copied".to_owned());
             }
-            Page::Failed { .. } => self.failure_screen(ui, pal),
-            Page::Ready(_) => self.ready_screen(ui),
         }
     }
 
@@ -1179,35 +1275,6 @@ impl ReaderApp {
         ctx.find_current = self.find_current;
 
         let doc = &ready.loaded.doc;
-        if ready.loaded.prov.status >= 400 {
-            // Many 404s are readable and many paywalls return 403 with the article still in
-            // the markup, so this is a banner over the content, not instead of it.
-            ui.label(
-                RichText::new(format!(
-                    "The server answered {}. Showing what it sent anyway.",
-                    ready.loaded.prov.status
-                ))
-                .color(ctx.pal.accent),
-            );
-            ui.add_space(8.0);
-        }
-        if doc.text_len() < 200 {
-            ui.label(
-                RichText::new("Little content extracted. This page may require JavaScript.")
-                    .color(ctx.pal.accent),
-            );
-            ui.add_space(8.0);
-        }
-        if let Some(f) = &ready.fragment_note {
-            ui.label(
-                RichText::new(format!(
-                    "No section matching {f}. Showing the top of the page."
-                ))
-                .color(ctx.pal.dim)
-                .small(),
-            );
-        }
-
         blocks::document_header(ui, doc, &mut ctx);
         let scroll_to = self.scroll_to_block.take();
         for (i, b) in doc.blocks.iter().enumerate() {
@@ -1243,125 +1310,11 @@ impl ReaderApp {
             Action::FollowWithoutRewrite(href) => self.follow(&href, false),
             Action::Copy(text) => {
                 self.copy(&text);
-                self.say(format!("copied {text}"));
+                self.flash(format!("copied {text}"));
             }
             Action::LoadImage(src) => self.load_image(ctx, &src),
             Action::GoToBlock(b) => self.scroll_to_block = Some(b),
             Action::ToggleComment(key) => toggle(&mut self.collapsed, key),
-        }
-    }
-
-    /// Each `LoadError` gets a distinct screen and distinct actions. A wrong-but-confident
-    /// diagnosis is the worst kind, because it blames the site.
-    fn failure_screen(&mut self, ui: &mut Ui, pal: &theme::Palette) {
-        let Page::Failed {
-            url,
-            error,
-            rewrite: failed_with_rewrite,
-        } = &self.page
-        else {
-            return;
-        };
-        let failed_with_rewrite = *failed_with_rewrite;
-        let url_text = url.to_string();
-        // A redirect loop is usually a consent wall, and the chain is what shows it.
-        let hops: Vec<String> = match error {
-            LoadError::Fetch(crate::fetch::FetchError::TooManyRedirects(hops)) => {
-                hops.iter().map(Url::to_string).collect()
-            }
-            _ => Vec::new(),
-        };
-        let (heading, body, buttons): (&str, String, &[Button]) = match error {
-            LoadError::Fetch(crate::fetch::FetchError::LikelyBlocked) => (
-                "This site did not answer.",
-                // Phase 0 measured bot detection failing as a silent hang rather than a 403.
-                "The request timed out with no reply. On a document fetch that is usually bot \
-                 detection failing silently rather than a network fault."
-                    .to_owned(),
-                &[Button::Retry, Button::RetryNoRewrite, Button::CopyUrl],
-            ),
-            LoadError::Fetch(crate::fetch::FetchError::Timeout(d)) => (
-                "Timed out.",
-                format!(
-                    "No reply within {}s. That is bandwidth rather than a block.",
-                    d.as_secs()
-                ),
-                &[Button::Retry, Button::CopyUrl],
-            ),
-            LoadError::Fetch(crate::fetch::FetchError::SchemeDowngrade(to)) => (
-                "Refused an https → http downgrade.",
-                format!(
-                    "A redirect tried to send this request to {} without encryption. \
-                     hww does not follow that.",
-                    to.host_str().unwrap_or("an unnamed host")
-                ),
-                // No retry: refusing is correct, and a bypass would be a policy hole.
-                &[Button::CopyUrl],
-            ),
-            LoadError::Fetch(crate::fetch::FetchError::TooManyRedirects(_)) => (
-                "Too many redirects.",
-                "The request bounced past the redirect limit. A loop like this is usually a \
-                 consent wall."
-                    .to_owned(),
-                &[Button::Retry, Button::RetryNoRewrite, Button::CopyUrl],
-            ),
-            LoadError::Fetch(crate::fetch::FetchError::RedirectWithoutLocation(status)) => (
-                "The server sent a broken redirect.",
-                format!(
-                    "It answered {status}, which means \"go somewhere else\", but did not say \
-                     where. There is nothing to follow."
-                ),
-                &[Button::Retry, Button::CopyUrl],
-            ),
-            LoadError::NotWebPage { content_type } => (
-                "Not a web page.",
-                format!("The server sent {content_type}, which hww has no reader for."),
-                &[Button::CopyUrl],
-            ),
-            other => (
-                "The request failed.",
-                other.to_string(),
-                &[Button::Retry, Button::CopyUrl],
-            ),
-        };
-        self.error_screen(ui, pal, heading, &body, &url_text, &hops);
-        ui.add_space(12.0);
-        ui.horizontal_wrapped(|ui| {
-            for b in buttons {
-                if ui.button(b.label()).clicked() {
-                    match b {
-                        Button::Retry => self.reload(failed_with_rewrite),
-                        Button::RetryNoRewrite => self.reload(false),
-                        Button::CopyUrl => {
-                            self.pending_copy = Some(url_text.clone());
-                            self.status = Some(("URL copied".to_owned(), Instant::now()));
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    fn error_screen(
-        &mut self,
-        ui: &mut Ui,
-        pal: &theme::Palette,
-        heading: &str,
-        body: &str,
-        url: &str,
-        hops: &[String],
-    ) {
-        ui.label(
-            RichText::new(heading)
-                .font(theme::heading_font(&self.settings.read, 2))
-                .color(pal.accent),
-        );
-        ui.add_space(8.0);
-        ui.label(RichText::new(body).color(pal.fg));
-        ui.add_space(8.0);
-        ui.label(RichText::new(url).color(pal.dim).small());
-        for h in hops {
-            ui.label(RichText::new(format!("  → {h}")).color(pal.dim).small());
         }
     }
 }
@@ -1370,22 +1323,6 @@ enum StripAction {
     Back,
     Forward,
     OpenUrlBar,
-}
-
-enum Button {
-    Retry,
-    RetryNoRewrite,
-    CopyUrl,
-}
-
-impl Button {
-    fn label(&self) -> &'static str {
-        match self {
-            Button::Retry => "Retry",
-            Button::RetryNoRewrite => "Retry without rewrite",
-            Button::CopyUrl => "Copy URL",
-        }
-    }
 }
 
 /// Written with the glyphs egui's embedded fonts actually carry. `→` is not one of them; it
@@ -1409,16 +1346,6 @@ const HELP: &[(&str, &str)] = &[
     ("d", "cycle theme"),
     ("? / Esc / q", "this help · dismiss chrome · quit"),
 ];
-
-fn host_and_path(url: &Url) -> String {
-    let host = url.host_str().unwrap_or(url.scheme());
-    let path = url.path();
-    if path == "/" {
-        host.to_owned()
-    } else {
-        format!("{host}{path}")
-    }
-}
 
 fn human_bytes(n: usize) -> String {
     if n >= 1_000_000 {

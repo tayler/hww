@@ -31,7 +31,7 @@
 
 use crate::fetch::FetchError;
 use crate::reader::image_decode::{self, DecodeLimits, Decoded};
-use crate::session::{LoadError, LoadOptions, Loaded, Notice, Session};
+use crate::session::{LoadError, LoadOptions, Loaded, Rewrite, Session};
 use eframe::egui;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -101,9 +101,9 @@ impl Job {
 
 pub enum Msg {
     /// Emitted before the request is dispatched. Charter point 4.
-    Notice {
+    Rewrote {
         req: ReqId,
-        notice: Notice,
+        rewrite: Rewrite,
     },
     Loaded {
         req: ReqId,
@@ -294,12 +294,12 @@ impl Net {
 fn run_job(session: &Session, job: Job, tx: &mpsc::Sender<Msg>, ctx: &egui::Context) {
     match job {
         Job::Load { req, url, opts } => {
-            let mut notify = |n: &Notice| {
-                let _ = tx.send(Msg::Notice {
+            let mut notify = |n: &Rewrite| {
+                let _ = tx.send(Msg::Rewrote {
                     req,
-                    notice: n.clone(),
+                    rewrite: n.clone(),
                 });
-                // The notice travels the channel before the blocking fetch starts, so it is on
+                // It travels the channel before the blocking fetch starts, so it is on
                 // screen for the whole of a 15 s hang instead of arriving with the corpse.
                 ctx.request_repaint();
             };

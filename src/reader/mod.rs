@@ -18,6 +18,9 @@
 
 pub mod history;
 pub mod inline;
+/// What the reader has to say about a page, and how loud. No egui types, so the fast CI
+/// job tests it.
+pub mod notice;
 pub mod opts;
 pub mod outline;
 pub mod settings;

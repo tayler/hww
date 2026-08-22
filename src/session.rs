@@ -33,14 +33,14 @@ impl Default for LoadOptions {
 /// fails or hangs must not be able to swallow the fact that hww went somewhere the user did
 /// not type.
 #[derive(Debug, Clone)]
-pub enum Notice {
-    Rewrote { from: Url, to: Url },
+pub enum Rewrite {
+    Applied { from: Url, to: Url },
 }
 
-impl std::fmt::Display for Notice {
+impl std::fmt::Display for Rewrite {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Notice::Rewrote { from, to } => write!(
+            Rewrite::Applied { from, to } => write!(
                 f,
                 "[rewrote {} -> {}]",
                 from.host_str().unwrap_or("?"),
@@ -229,7 +229,7 @@ impl Session {
         &self,
         requested: &Url,
         opts: &LoadOptions,
-        notify: &mut dyn FnMut(&Notice),
+        notify: &mut dyn FnMut(&Rewrite),
     ) -> Result<Loaded, LoadError> {
         let url = if opts.rewrite {
             crate::rewrite::apply(requested)
@@ -238,7 +238,7 @@ impl Session {
         };
         let rewritten = url != *requested;
         if rewritten {
-            notify(&Notice::Rewrote {
+            notify(&Rewrite::Applied {
                 from: requested.clone(),
                 to: url.clone(),
             });
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn rewrite_notice_names_hosts_not_urls() {
-        let n = Notice::Rewrote {
+        let n = Rewrite::Applied {
             from: Url::parse("https://reddit.com/r/rust/x").unwrap(),
             to: Url::parse("https://old.reddit.com/r/rust/x").unwrap(),
         };

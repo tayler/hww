@@ -30,7 +30,7 @@ cargo run --features gui --bin hww-gui -- [--no-rewrite] <url> # the reader
 | `session` | The pipeline in one place; the rewrite notice reported before dispatch |
 | `render` | Plain text |
 | `ir` | Document / Block / Inline / Thread / Comment |
-| `reader` | Reading model: inline runs, outline, history, threads, image decoding |
+| `reader` | Reading model: inline runs, outline, history, threads, image decoding, notices |
 | GUI | egui reader: links, back/forward, outline, find, threads, images. **Linux verified**; macOS and Windows are believed to build and are not tested |
 | feeds, gemini, gopher, markdown | not started |
 | TUI, archive | not started |
@@ -116,6 +116,11 @@ Keyboard first, but nothing is keyboard-only: `?` lists the keys, and the status
 the bottom carries back/forward and a clickable URL so a mouse alone can navigate. That strip
 never hides: the URL bar, outline, find bar, and help all dismiss on `Esc`, but a rewrite
 notice has to be on screen *before* the request goes out, so the strip stays.
+
+Everything the reader reports about a page is a notice: a band across the full width, outside
+the reading column, which no page can be, because the column is a fixed measure. Errors, a 4xx
+body shown anyway, and an extraction that came back thin are all notices, and none of them is
+ever dressed as prose.
 
 One centred reading column, measured in characters (`[` and `]`). Zoom is egui's own, so
 `Ctrl`+`+`/`-`/`0`, `Ctrl`+wheel, and trackpad pinch behave the way a browser does. Themes are

@@ -131,7 +131,7 @@ pub fn extract(source: &str, url: &Url) -> Document {
         let tlen = crate::thread::comments_text_len(&comments);
         if tlen > doc.text_len() {
             doc.blocks = vec![Block::Thread(comments)];
-        } else if tlen > 200 {
+        } else if tlen > crate::ir::THIN_TEXT {
             doc.blocks.push(Block::Thread(comments));
         }
     }
@@ -139,7 +139,7 @@ pub fn extract(source: &str, url: &Url) -> Document {
     // Scoring finds nothing on pages built entirely from unlabelled divs (product grids,
     // listing pages). Falling back to <body> bleeds navigation, but a thin page beats a
     // blank one, and the renderer can still be read.
-    if doc.text_len() < 200
+    if doc.text_len() < crate::ir::THIN_TEXT
         && let Ok(sel) = Selector::parse("body")
         && let Some(body) = html.select(&sel).next()
     {

@@ -160,7 +160,7 @@ fn append(
         let mut fmt = base.clone();
         if let Some(is_current) = hit {
             fmt.background = if is_current {
-                ctx.pal.accent
+                ctx.pal.find_current_bg
             } else {
                 ctx.pal.find_bg
             };

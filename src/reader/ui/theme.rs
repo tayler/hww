@@ -3,6 +3,7 @@
 //! Everything here is a presentation decision, which is exactly why it is confined to one
 //! module that the IR cannot reach and that no extractor imports.
 
+use crate::reader::notice::Severity;
 use crate::reader::opts::{FontChoice, ReadOpts, Theme};
 use eframe::egui::{self, Color32, FontFamily, FontId, Stroke};
 
@@ -22,10 +23,23 @@ pub struct Palette {
     pub code_bg: Color32,
     /// Rules, thread indent guides, and block borders.
     pub rule: Color32,
-    /// Chrome that must be noticed: the rewrite notice, error headings, and the current find match.
-    pub accent: Color32,
+    /// A notice, where it must be seen: the rewrite report, a transient status, a caution
+    /// strip, a failure heading, an image that would not load.
+    ///
+    /// Was `accent`, which had quietly become five different jobs, one of which was not a
+    /// notice at all. See [`notice_ink`].
+    pub notice_fg: Color32,
+    /// The ground behind a band. **Not** `chrome_bg`: that sits about five units from
+    /// `code_bg` in every theme, so a band wearing it would be indistinguishable from a code
+    /// block. `notice_fill_clears_every_page_colour` is what holds this apart.
+    pub notice_bg: Color32,
+    /// The current find match. Its own role because find is the reader searching the page,
+    /// not the reader reporting on it, and the two must be free to move independently.
+    pub find_current_bg: Color32,
     /// The other find matches, visible at a glance without competing with the current one.
     pub find_bg: Color32,
+    /// Panel chrome: the status strip, the URL bar, the find bar, the outline. Bands do not
+    /// use it; a panel is separated from the page by position, which a band is not.
     pub chrome_bg: Color32,
     pub selection: Color32,
     pub dark_mode: bool,
@@ -48,7 +62,9 @@ pub fn palette(theme: Theme, system_dark: bool) -> Palette {
             strong: Color32::from_rgb(0x00, 0x00, 0x00),
             code_bg: Color32::from_rgb(0xEE, 0xEE, 0xE9),
             rule: Color32::from_rgb(0xD8, 0xD8, 0xD2),
-            accent: Color32::from_rgb(0x9A, 0x45, 0x0B),
+            notice_fg: Color32::from_rgb(0x9A, 0x45, 0x0B),
+            notice_bg: Color32::from_rgb(0xD8, 0xE2, 0xEE),
+            find_current_bg: Color32::from_rgb(0x9A, 0x45, 0x0B),
             find_bg: Color32::from_rgba_unmultiplied(0x9A, 0x45, 0x0B, 0x38),
             chrome_bg: Color32::from_rgb(0xF1, 0xF1, 0xEC),
             selection: Color32::from_rgba_unmultiplied(0x15, 0x4B, 0x9E, 0x40),
@@ -62,7 +78,9 @@ pub fn palette(theme: Theme, system_dark: bool) -> Palette {
             strong: Color32::from_rgb(0x1E, 0x18, 0x0F),
             code_bg: Color32::from_rgb(0xE7, 0xDD, 0xC4),
             rule: Color32::from_rgb(0xD5, 0xC8, 0xA9),
-            accent: Color32::from_rgb(0x8E, 0x3F, 0x12),
+            notice_fg: Color32::from_rgb(0x8E, 0x3F, 0x12),
+            notice_bg: Color32::from_rgb(0xD6, 0xDA, 0xE0),
+            find_current_bg: Color32::from_rgb(0x8E, 0x3F, 0x12),
             find_bg: Color32::from_rgba_unmultiplied(0x8E, 0x3F, 0x12, 0x40),
             chrome_bg: Color32::from_rgb(0xE9, 0xDF, 0xC8),
             selection: Color32::from_rgba_unmultiplied(0x1D, 0x4E, 0x77, 0x40),
@@ -76,7 +94,9 @@ pub fn palette(theme: Theme, system_dark: bool) -> Palette {
             strong: Color32::from_rgb(0xF3, 0xF1, 0xEC),
             code_bg: Color32::from_rgb(0x22, 0x25, 0x28),
             rule: Color32::from_rgb(0x33, 0x37, 0x3B),
-            accent: Color32::from_rgb(0xE0, 0x9B, 0x54),
+            notice_fg: Color32::from_rgb(0xE0, 0x9B, 0x54),
+            notice_bg: Color32::from_rgb(0x1B, 0x32, 0x42),
+            find_current_bg: Color32::from_rgb(0xE0, 0x9B, 0x54),
             find_bg: Color32::from_rgba_unmultiplied(0xE0, 0x9B, 0x54, 0x45),
             chrome_bg: Color32::from_rgb(0x1E, 0x21, 0x23),
             selection: Color32::from_rgba_unmultiplied(0x7F, 0xB4, 0xF5, 0x40),
@@ -168,6 +188,61 @@ pub fn system_is_dark(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.raw.system_theme) == Some(egui::Theme::Dark)
 }
 
+/// How one severity of notice is painted.
+///
+/// [`Severity`] lives outside `ui/`, where a test can reach it; this is the paint, and it lives
+/// here because this is the only file in the crate where a colour appears. Splitting them is
+/// what lets the wording be tested without a window and the palette be retuned without touching
+/// a call site.
+#[derive(Debug, Clone, Copy)]
+pub struct NoticeInk {
+    pub fill: Color32,
+    pub heading: Color32,
+    pub body: Color32,
+}
+
+/// Every severity shares `notice_bg`. They differ by what they carry (a heading, actions, a
+/// whole viewport) rather than by a fourth wash nobody could name, and a band is already
+/// unmistakable from being full-bleed: no `ir::Block` can escape the reading measure.
+pub fn notice_ink(pal: &Palette, severity: Severity) -> NoticeInk {
+    match severity {
+        Severity::Quiet => NoticeInk {
+            fill: pal.notice_bg,
+            heading: pal.dim,
+            body: pal.dim,
+        },
+        Severity::Caution => NoticeInk {
+            fill: pal.notice_bg,
+            heading: pal.notice_fg,
+            body: pal.notice_fg,
+        },
+        // A failure's body is prose meant to be read, so it is set in `fg`; only the heading
+        // carries the notice colour. That is what `error_screen` already did.
+        Severity::Failure => NoticeInk {
+            fill: pal.notice_bg,
+            heading: pal.notice_fg,
+            body: pal.fg,
+        },
+    }
+}
+
+/// A failure heading.
+///
+/// Deliberately **not** [`heading_font`]: hww never borrows the page's type scale, because a
+/// heading set exactly like an article's `<h2>` is the thing this whole column exists to stop.
+/// It is not a guarantee of a distinct size, because `chrome_font`'s 11 pt floor breaks the
+/// proportion at small reading sizes; size is a supporting signal and the full-bleed band is
+/// the load-bearing one.
+pub fn notice_heading_font(opts: &ReadOpts) -> FontId {
+    FontId::new(chrome_font(opts).size * 1.45, FontFamily::Proportional)
+}
+
+/// Vertical padding inside a band, in points. Integer because `egui::Margin` is `i8`, which is
+/// also why the band's horizontal gutter cannot be a margin and is an `add_space` instead.
+pub fn band_pad(opts: &ReadOpts) -> i8 {
+    (opts.base_size_pt * 0.55).round().clamp(6.0, 24.0) as i8
+}
+
 /// Install the palette and metrics. Called every frame; cheap, and it means a theme or
 /// measure change takes effect on the frame it happens rather than on the next navigation.
 pub fn apply(ctx: &egui::Context, opts: &ReadOpts) -> Palette {
@@ -215,4 +290,87 @@ pub fn apply(ctx: &egui::Context, opts: &ReadOpts) -> Palette {
     // which one egui would otherwise pick is not a decision that should reach the page.
     ctx.all_styles_mut(|s| *s = style.clone());
     pal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one test under `ui/`, and it needs its exception argued rather than assumed.
+    ///
+    /// The rule for this directory is that it holds what only a `Context` can run, so it is
+    /// compiled and never tested. [`palette`] is not that: it is a pure
+    /// `(Theme, bool) -> Palette`, unlike [`apply`], [`measure_px`], and [`system_is_dark`],
+    /// which all take one. The directory's real rule is "split by what a test can reach", and
+    /// this is reachable.
+    ///
+    /// What it pins is the governing rule of `reader::notice`: a notice shares no colour with
+    /// the page. Exact inequality would say nothing, because `chrome_bg` and `code_bg`
+    /// already differ and sit about five units apart, which no eye can see. So this asks for a
+    /// visible margin instead, and it is the reason a band is not filled with `chrome_bg`.
+    #[test]
+    fn notice_fill_clears_every_page_colour() {
+        /// Euclidean RGB. Crude next to a real perceptual metric, and sufficient: the failure
+        /// it has to catch is two roles a few units apart, not a subtle mismatch.
+        fn distance(a: Color32, b: Color32) -> f32 {
+            let d = |x: u8, y: u8| f32::from(x) - f32::from(y);
+            (d(a.r(), b.r()).powi(2) + d(a.g(), b.g()).powi(2) + d(a.b(), b.b()).powi(2)).sqrt()
+        }
+        // Chosen so that a band is plainly a different surface while still being calm. The
+        // `chrome_bg`/`code_bg` pair measures 5.2 in Light, which is what "too close" means.
+        const FLOOR: f32 = 24.0;
+
+        for theme in [Theme::Light, Theme::Sepia, Theme::Dark] {
+            let p = palette(theme, false);
+            // Every colour the reading column can put on screen.
+            let page = [
+                ("bg", p.bg),
+                ("fg", p.fg),
+                ("dim", p.dim),
+                ("link", p.link),
+                ("strong", p.strong),
+                ("code_bg", p.code_bg),
+                ("rule", p.rule),
+                ("find_current_bg", p.find_current_bg),
+            ];
+            for (name, c) in page {
+                let d = distance(p.notice_bg, c);
+                assert!(
+                    d >= FLOOR,
+                    "{theme:?}: notice_bg is {d:.1} from {name}; a band would read as page",
+                );
+            }
+            // A notice must not look like the page's own words. Compared against text roles
+            // only: `notice_fg` is a foreground, and asking it to clear `bg` would be asking it
+            // to be illegible on its own band.
+            for (name, c) in [
+                ("fg", p.fg),
+                ("dim", p.dim),
+                ("link", p.link),
+                ("strong", p.strong),
+            ] {
+                let d = distance(p.notice_fg, c);
+                assert!(
+                    d >= FLOOR,
+                    "{theme:?}: notice_fg is {d:.1} from {name}; a notice would read as prose",
+                );
+            }
+            // And it has to be legible where it is actually painted.
+            assert!(distance(p.notice_fg, p.notice_bg) >= FLOOR);
+        }
+    }
+
+    /// `Theme::System` is a redirect, not a palette. If it ever grew colours of its own they
+    /// would escape the check above, which walks the three real themes.
+    #[test]
+    fn system_theme_resolves_to_a_real_palette() {
+        assert_eq!(
+            palette(Theme::System, true).bg,
+            palette(Theme::Dark, true).bg
+        );
+        assert_eq!(
+            palette(Theme::System, false).bg,
+            palette(Theme::Light, false).bg
+        );
+    }
 }

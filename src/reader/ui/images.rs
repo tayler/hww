@@ -204,7 +204,7 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
         Snapshot::Failed(why) => {
             let mut retry = false;
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("[image] {why}: {host}")).color(pal.accent));
+                ui.label(RichText::new(format!("[image] {why}: {host}")).color(pal.notice_fg));
                 retry = ui.small_button("retry").clicked();
             });
             if retry {
@@ -271,7 +271,7 @@ fn show_ready(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     ui.label(
         RichText::new(note)
             .color(if partial.is_some() {
-                pal.accent
+                pal.notice_fg
             } else {
                 pal.dim
             })

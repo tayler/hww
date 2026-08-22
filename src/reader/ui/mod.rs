@@ -8,6 +8,7 @@ mod blocks;
 pub mod images;
 mod inline_ui;
 pub mod net;
+mod notice_ui;
 pub mod theme;
 mod thread_ui;
 

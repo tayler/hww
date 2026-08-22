@@ -103,6 +103,15 @@ impl Document {
     }
 }
 
+/// The text length below which a document is treated as having failed to extract.
+///
+/// One constant, two consumers on opposite sides of the pipeline: `html::extract` falls back
+/// to `<body>` below it, and `reader::notice` warns about a page that came out under it. Those
+/// are the same event seen from each end, so they cannot be allowed to drift; it lives here
+/// because text length is this crate's shared scoring currency and both sides already depend
+/// on the IR. It is a threshold, not a style, so the no-styling invariant is untouched.
+pub const THIN_TEXT: usize = 200;
+
 /// Visible text length of a block list. Text length is the shared scoring currency of this
 /// crate; reuse this rather than adding another counter.
 pub fn blocks_text_len(blocks: &[Block]) -> usize {
