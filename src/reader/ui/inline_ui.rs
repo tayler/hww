@@ -39,7 +39,7 @@ use crate::reader::ui::theme::Palette;
 use crate::reader::ui::{Action, RenderCtx, fonts, theme};
 use eframe::egui::{
     self, Align, Color32, FontId, Label, RichText, Sense, Stroke, TextFormat, TextWrapMode, Ui,
-    text::LayoutJob,
+    text::LayoutJob, text_selection::LabelSelectionState,
 };
 
 /// How one run list should be set. Headings, captions, and body prose differ only here.
@@ -277,7 +277,42 @@ fn link_ui(
 
     let carries_current_match = ctx.job_has_current_match && ctx.find_scroll;
     ctx.job_has_current_match = false;
-    let resp = ui.add(Label::new(job).wrap().sense(Sense::click()));
+
+    // `layout_in_ui` and not `ui.add`, because the hover rule below needs the galley and a
+    // `Response` cannot give one up. A wrapped `Label` allocates one rect per row and unions
+    // the responses, so `resp.rect` for a link that wraps is a *bounding box*: its bottom edge
+    // runs the full width of the widest row, out past the link's own words and under whatever
+    // text follows them on the last row. Everything after this call is what `Label::ui` does,
+    // less the elision tooltip (nothing here truncates) and the style-driven text colour (every
+    // section sets its own, so the fallback is never reached).
+    let (galley_pos, galley, resp) = Label::new(job)
+        .wrap()
+        .sense(Sense::click())
+        .layout_in_ui(ui);
+    // A link, not a label: this is the whole of what a screen reader is told about it.
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Link, ui.is_enabled(), galley.text())
+    });
+    if ui.is_rect_visible(resp.rect) {
+        // `Stroke::NONE`, because egui's own focus underline is not the mark this reader uses:
+        // the focus ring below is.
+        if ui.style().interaction.selectable_labels {
+            LabelSelectionState::label_text_selection(
+                ui,
+                &resp,
+                galley_pos,
+                galley.clone(),
+                ctx.pal.link,
+                Stroke::NONE,
+            );
+        } else {
+            ui.painter().add(egui::epaint::TextShape::new(
+                galley_pos,
+                galley.clone(),
+                ctx.pal.link,
+            ));
+        }
+    }
 
     // `Sense::click()` alone does not put a widget in egui's tab order; focusability is a
     // separate property. Only links ask for it; if plain text did, Tab would walk every label
@@ -288,11 +323,19 @@ fn link_ui(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         ctx.hover_href = Some(href.to_owned());
         // A second, heavier underline on hover: the link is already underlined, so the change
-        // has to be in weight rather than in presence.
-        ui.painter().line_segment(
-            [resp.rect.left_bottom(), resp.rect.right_bottom()],
-            Stroke::new(1.5, ctx.pal.link),
-        );
+        // has to be in weight rather than in presence. Per row, and bounded by the row's own
+        // glyphs, which is the one thing `resp.rect` cannot say: a link that wraps ends its
+        // last row after a word or two, and a rule drawn to the bounding box underlines the
+        // rest of that line as well.
+        for row in &galley.rows {
+            let r = row
+                .rect_without_leading_space()
+                .translate(galley_pos.to_vec2());
+            ui.painter().line_segment(
+                [r.left_bottom(), r.right_bottom()],
+                Stroke::new(1.5, ctx.pal.link),
+            );
+        }
     }
     if resp.has_focus() {
         ctx.focus_href = Some(href.to_owned());

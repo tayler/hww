@@ -369,8 +369,12 @@ impl ReaderApp {
         };
         match launch.start {
             Some(url) => app.navigate(url, app.rewrite, true),
-            // With nothing to read, the URL bar is the only sensible thing on screen.
-            None => app.chrome.url_bar = Some(String::new()),
+            // With nothing to read, the URL bar is the only sensible thing on screen, so it is
+            // also the only sensible thing to be typing into.
+            None => {
+                app.chrome.url_bar = Some(String::new());
+                app.focus_url_bar = true;
+            }
         }
         Ok(app)
     }
