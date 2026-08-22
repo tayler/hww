@@ -49,6 +49,11 @@ path = "src/bin/hww-gui.rs"
 required-features = ["gui"]
 
 [[bin]]
+name = "hww-shot"
+path = "src/bin/shot.rs"
+required-features = ["gui"]
+
+[[bin]]
 name = "corpus"
 path = "src/bin/corpus.rs"
 required-features = ["tools"]

@@ -46,6 +46,14 @@ Local-only tools. These need gitignored inputs and are **not** run by CI:
     cargo run --bin dbg -- <signals.jsonl> <cache-dir> <url-substring> [--text]
     cargo run --bin bench -- <signals.jsonl> <baseline.json> <cache-dir>
 
+`hww-shot` needs no gitignored input, only a display. It opens the reader in a named state,
+photographs it, and prints one line per scene (`--list` for the catalog, `src/bin/shot.rs` for
+why it is built the way it is):
+
+    cargo run --features gui --bin hww-shot -- --all      # every state, into ./shots
+    cargo run --features gui --bin hww-shot -- --check    # the same, compared, exit 1 on a change
+    cargo run --features gui --bin hww-shot -- help find  # two of them
+
 ## Architecture
 
 Everything funnels through the IR:
@@ -280,6 +288,32 @@ they keep testing the mechanism no matter what does or does not ship.
 
 `bench` is offline calibration against a *local* reference-extractor baseline that is
 deliberately absent from this repo. It is not a test and CI does not run it.
+
+**`hww-shot` is the cover `ui/` cannot have.** Everything decidable without a `Context` is
+tested; chrome, widget dispatch, and texture upload are merely compiled, and a band that stopped
+being drawn compiles perfectly. The tool photographs the reader in each of its states instead,
+and the states that are hard to arrange are built offline: fixture markup through the real
+`html::extract`, a hand-built `Provenance` carrying the one fact that makes the scene, and
+`ReaderApp::present` handing the pair to the same `settle` a navigation runs. That hook and
+`ReaderApp::new` being public are the whole of what the reader gives up for it. The scenes that
+are genuinely about the network keep it: `loading`, `fail-transport`, and the image scenes drive
+real requests against a fixture server on a loopback port, and they run last, because a stalled
+document fetch holds a worker until the 15 s timeout.
+
+It reports text and writes pixels: a hash per scene, and `same` / `changed` / `new` against the
+previous run, so a run where nothing moved costs nothing to read and a run where three scenes
+moved names those three. A changed scene also gets a `.diff.png`, the previous picture greyed
+with every changed pixel in red, which is the image worth opening rather than the screenshot.
+Two properties make the comparison mean anything, and both were bought the hard way: a scene
+resets the history, so the back arrow does not depend on how many scenes ran ahead of it, and
+the settle restarts whenever a frame arrives long after the one before it, because a compositor
+that freezes an unattended window resumes it mid-animation. CI does not run any of this: it
+needs a display, and no test may call `eframe::run_native`.
+
+A Wayland compositor stops sending frame callbacks to a surface it considers hidden, and eframe
+runs no egui pass without one, so the window is alive, the process spins, and nothing advances.
+Nothing inside the process can talk it round. `hww-shot` supervises a child process and restarts
+it on the scenes that did not land, which is why it is two processes and why `--child` exists.
 
 ## Portability
 

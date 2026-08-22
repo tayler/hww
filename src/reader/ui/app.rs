@@ -143,6 +143,18 @@ pub struct ReaderApp {
     /// One-shot: absolute offset, from `g`/`G`.
     scroll_offset: Option<f32>,
     viewport_height: f32,
+    /// Last frame's distance from the top of the page to the foot of it, which is where
+    /// `Shift+G` and `End` go.
+    ///
+    /// Measured rather than spelled `f32::INFINITY`, which is the obvious spelling and panics:
+    /// egui places the content at `inner_rect.min - offset` *before* it clamps the offset to
+    /// the content, so an infinite offset puts that corner at `-inf`, and `-inf` against an
+    /// unbounded content size is `NaN`. The reader then asks for a `NaN`-tall row and egui
+    /// rejects it. A merely large finite offset does not panic but loses the layout to f32
+    /// precision and lands somewhere in the middle of the document. The page has already been
+    /// through a frame by the time anyone can press a key, so last frame's measurement is the
+    /// answer, and it is the exact one.
+    max_scroll: f32,
     /// Deferred to the end of the frame: `ctx.copy_text` inside a closure that already borrows
     /// the app would be a second mutable borrow.
     pending_copy: Option<String>,
@@ -176,7 +188,9 @@ fn scroll_step(settings: &Settings) -> f32 {
 }
 
 impl ReaderApp {
-    fn new(cc: &eframe::CreationContext<'_>, launch: Launch) -> Result<Self, LoadError> {
+    /// Public so an embedder can own the app without owning `run`: `bin/shot.rs` wraps it to
+    /// drive scenes and work the shutter. Nothing else calls it.
+    pub fn new(cc: &eframe::CreationContext<'_>, launch: Launch) -> Result<Self, LoadError> {
         let net = Net::new(cc.egui_ctx.clone())?;
         cc.egui_ctx.set_zoom_factor(launch.settings.zoom_factor);
         apply_scroll_speed(&cc.egui_ctx, &launch.settings);
@@ -203,6 +217,7 @@ impl ReaderApp {
             scroll_delta: 0.0,
             scroll_offset: None,
             viewport_height: 600.0,
+            max_scroll: 0.0,
             pending_copy: None,
             focused_href: None,
             focused_image: None,
@@ -461,6 +476,45 @@ impl ReaderApp {
         }
     }
 
+    /// Put a page on screen that no fetch produced.
+    ///
+    /// The screenshot tool's one injection point, and the reason it can photograph a refused
+    /// downgrade, a dead rewrite rule, or a body cut at the cap without arranging for a server
+    /// that behaves that way. It takes the same `Loaded`/`LoadError` the worker sends back and
+    /// runs the same `settle`, so a scene cannot drift into a page shape the pipeline cannot
+    /// produce: everything downstream of here is the code a real navigation runs.
+    ///
+    /// The resets are `navigate`'s, minus the dispatch, plus the history: a photographed page
+    /// has to stand alone. Pushing onto whatever came before would put the back arrow in the
+    /// status strip in a different state depending on how many scenes ran ahead of this one,
+    /// which is a picture that changes without the page changing.
+    pub fn present(
+        &mut self,
+        url: Url,
+        rewrite_notice: Option<String>,
+        result: Result<Loaded, LoadError>,
+    ) {
+        self.current = Some(self.net.mint());
+        self.rewrite_notice = rewrite_notice;
+        self.images.clear_textures();
+        self.collapsed.clear();
+        self.find_current = 0;
+        self.find_total = 0;
+        self.scroll_offset = Some(0.0);
+        self.history = History::new();
+        self.history.push(url.clone());
+        match result {
+            Ok(loaded) => self.settle(loaded),
+            Err(error) => {
+                self.page = Page::Failed {
+                    url,
+                    error,
+                    rewrite: self.last_rewrite,
+                }
+            }
+        }
+    }
+
     fn loading_url(&self) -> Option<Url> {
         match &self.page {
             Page::Loading { url, .. } => Some(url.clone()),
@@ -522,7 +576,7 @@ impl ReaderApp {
 
         // --- shifted and modified bindings first
         if k(Modifiers::SHIFT, Key::G) || k(Modifiers::NONE, Key::End) {
-            self.scroll_offset = Some(f32::INFINITY);
+            self.scroll_offset = Some(self.max_scroll);
         }
         if k(Modifiers::SHIFT, Key::R) {
             self.reload(false);
@@ -1215,6 +1269,7 @@ impl ReaderApp {
                     }
                 });
                 self.viewport_height = out.inner_rect.height().max(1.0);
+                self.max_scroll = (out.content_size.y - out.inner_rect.height()).max(0.0);
             });
     }
 
