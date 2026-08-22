@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>hww</title>
+  <path d="M48 37 L54 32 H64" fill="none" stroke="#E09B54" stroke-width="4"/>
+  <path d="M0 18 L7 50 L14 14 L21 50 L28 18 L35 45 L42 27 L48 37 L54 32"
+        fill="none" stroke="#D4D1CB" stroke-width="4"/>
+</svg>
