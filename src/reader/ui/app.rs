@@ -274,6 +274,11 @@ pub struct ReaderApp {
     /// they were meant to be never fires. The snapshot is the value the guard wanted: focus was
     /// on a link when this frame began, so the widget carrying it has to be drawn again.
     focus_was_on_page: bool,
+    /// Which block the focused widget was found in this frame, and the frame before: the one
+    /// block that must be laid out for egui to keep the focus, which is what used to cost the
+    /// whole page for as long as a link had it.
+    focus_block: Option<usize>,
+    focus_block_was: Option<usize>,
     /// Frames that a Tab reaches into, counted down in `ui`.
     ///
     /// Two, not one. egui moves focus among the widgets of the frame the key arrived in, so
@@ -290,6 +295,9 @@ pub struct ReaderApp {
     /// clicked. The id is stable across the mark being appended, because a new widget only
     /// shifts the ids of widgets after it.
     pending_link: Option<egui::Id>,
+    /// The same for a navigation that began from the keyboard or the shot harness, where there
+    /// is no widget to remember: the href that was followed. See `RenderCtx::pending_href`.
+    pending_href: Option<String>,
     /// One-shot: give the URL bar keyboard focus on the next frame, after it exists.
     focus_url_bar: bool,
     /// One-shot: the same for the find field. Focusing it from the keymap instead would hand
@@ -370,8 +378,11 @@ impl ReaderApp {
             focused_comment: None,
             focused_other: false,
             focus_was_on_page: false,
+            focus_block: None,
+            focus_block_was: None,
             tab_frames: 0,
             pending_link: None,
+            pending_href: None,
             focus_url_bar: false,
             focus_find: false,
         };
@@ -413,6 +424,7 @@ impl ReaderApp {
         self.current = Some(req);
         self.rewrite_notice = None;
         self.pending_link = None;
+        self.pending_href = None;
         if push {
             // A navigation that never committed gets no entry of its own. Clicking a second link
             // before the first has answered is ordinary now that the page stays clickable, and
@@ -434,6 +446,17 @@ impl ReaderApp {
 
     /// Follow a link. The scheme gate runs here, before anything is dispatched: one place, so
     /// no widget can route around it.
+    /// Follow a link as Enter on it does: the navigation, and the pending mark on every inline
+    /// carrying the href, because there is no widget to pin it to. Public for `hww-shot`, which
+    /// is how the mark gets photographed; a synthetic Tab does not reliably land focus.
+    pub fn follow_link(&mut self, href: &str) {
+        let before = self.current;
+        self.follow(href, self.opts);
+        if self.current != before {
+            self.pending_href = Some(href.to_owned());
+        }
+    }
+
     fn follow(&mut self, href: &str, opts: LoadOptions) {
         match session::classify_link(href) {
             Target::Navigate(url) => {
@@ -743,6 +766,7 @@ impl ReaderApp {
         self.find_current = 0;
         self.find_total = 0;
         self.pending_link = None;
+        self.pending_href = None;
         self.scroll_offset = Some(0.0);
         // The other two scroll one-shots, or a `Shift+G` pressed on the very frame a page
         // commits is applied against the *outgoing* page's `max_scroll` and opens the new one
@@ -950,7 +974,7 @@ impl ReaderApp {
         if k(Modifiers::NONE, Key::Enter)
             && let Some(h) = self.focused_href.clone()
         {
-            self.follow(&h, self.opts);
+            self.follow_link(&h);
         }
     }
 
@@ -1070,6 +1094,7 @@ impl eframe::App for ReaderApp {
             || self.focused_image.is_some()
             || self.focused_comment.is_some()
             || self.focused_other;
+        self.focus_block_was = self.focus_block.take();
         self.focused_href = None;
         self.focused_image = None;
         self.focused_comment = None;
@@ -1668,13 +1693,21 @@ impl ReaderApp {
             Page::Loading {
                 url, started, from, ..
             } => match from {
-                Some(r) => notice::about_page(&r.loaded.prov, r.loaded.doc.text_len()),
+                Some(r) => {
+                    let mut n = notice::about_page(&r.loaded.prov, r.loaded.doc.text_len());
+                    n.extend(notice::rtl(&r.loaded.doc));
+                    n
+                }
                 None => notice::loading(url, started.elapsed(), false)
                     .into_iter()
                     .collect(),
             },
             Page::Failed { url, error, .. } => vec![notice::failure(error, url)],
-            Page::Ready(r) => notice::about_page(&r.loaded.prov, r.loaded.doc.text_len()),
+            Page::Ready(r) => {
+                let mut n = notice::about_page(&r.loaded.prov, r.loaded.doc.text_len());
+                n.extend(notice::rtl(&r.loaded.doc));
+                n
+            }
         };
         let mut pressed = None;
         // Consecutive notices of one severity are one band. `about_page` can return four
@@ -1736,7 +1769,10 @@ impl ReaderApp {
     fn lays_out_whole_page(&self, ui: &Ui) -> bool {
         self.find_open()
             || self.scroll_to_block.is_some()
-            || self.focus_was_on_page
+            // Focus on the page needs its block laid out, not the page: `focus_block_was`
+            // exempts that one from skipping below. Only a focus whose block is not known
+            // (a control outside the block loop) still costs the whole page.
+            || (self.focus_was_on_page && self.focus_block_was.is_none())
             || self.tab_frames > 0
             || ui
                 .ctx()
@@ -1781,6 +1817,8 @@ impl ReaderApp {
         ctx.find_current = self.find_current;
         ctx.find_scroll = self.find_scroll;
         ctx.pending = self.pending_link;
+        ctx.pending_href = self.pending_href.clone();
+        ctx.comment_heights = self.heights.take_comments();
 
         let doc = &ready.loaded.doc;
         blocks::document_header(ui, doc, &mut ctx);
@@ -1795,14 +1833,27 @@ impl ReaderApp {
             // Empty space of the height this block measured last time, for as long as it is
             // clear of the window. `allocate_space` and not `add_space`, so the item spacing
             // either side of it is the spacing the block itself would have had.
-            if !whole
+            let may_skip = !whole && self.focus_block_was != Some(i);
+            if may_skip
                 && let Some(h) = self.heights.get(i)
                 && band.skips(ui.next_widget_position().y, h)
             {
                 ui.allocate_space(egui::vec2(0.0, h));
                 continue;
             }
+            ctx.block = i;
+            ctx.band = may_skip.then_some(band);
+            let had_focus = ctx.focus_href.is_some()
+                || ctx.focus_image.is_some()
+                || ctx.focus_comment.is_some();
             let resp = ui.scope(|ui| blocks::block_ui(ui, b, &mut ctx)).response;
+            if !had_focus
+                && (ctx.focus_href.is_some()
+                    || ctx.focus_image.is_some()
+                    || ctx.focus_comment.is_some())
+            {
+                self.focus_block = Some(i);
+            }
             self.heights.set(i, resp.rect.height());
             if scroll_to == Some(i) {
                 resp.scroll_to_me(Some(Align::TOP));
@@ -1812,6 +1863,8 @@ impl ReaderApp {
             theme::line_height_px(&self.settings.read) * 4.0,
         ));
 
+        self.heights
+            .restore_comments(std::mem::take(&mut ctx.comment_heights));
         self.find_total = ctx.find_seen;
         self.find_scroll = false;
         self.focused_href = ctx.focus_href.clone();

@@ -105,8 +105,9 @@ pub fn detect(html: &Html) -> (CardMap, Verdict) {
     let a = Selector::parse("a[href]").unwrap();
     let img = Selector::parse("img, picture").unwrap();
     let mut map = CardMap::new();
-    let mut reports: Vec<GroupReport> = crate::thread::sibling_groups(html)
-        .into_iter()
+    let groups = crate::thread::sibling_groups(html);
+    let mut reports: Vec<GroupReport> = groups
+        .iter()
         .map(|g| {
             let mut lens: Vec<usize> = g.iter().map(|e| crate::thread::text_len(**e)).collect();
             lens.sort_unstable();
@@ -147,6 +148,46 @@ pub fn detect(html: &Html) -> (CardMap, Verdict) {
             }
         })
         .collect();
+    // A lone card beside an accepted list is a card: a lead with one extra class has the
+    // shape of its neighbours and only lost the signature vote. Same parent, same tag, every
+    // class the list's members share, reads as a card, and carries a card's worth of text.
+    // The class test is what keeps a newsletter box out: one link, forty characters, and
+    // nothing in common with the cards either side of it, it was a story card titled
+    // "Subscribe to the newsletter". Joined before the reports are ranked, and counted in
+    // the report of the list it joined, so `--why` reports the membership the walker emits.
+    for (g, report) in groups.iter().zip(reports.iter_mut()) {
+        if report.rejected.is_some() {
+            continue;
+        }
+        let Some(parent) = g[0].parent() else {
+            continue;
+        };
+        let Some(members) = map.get_mut(&parent.id()) else {
+            continue;
+        };
+        let tag = g[0].value().name();
+        let shared = crate::thread::signature_classes(&g[0]);
+        for c in parent.children() {
+            if let Some(e) = ElementRef::wrap(c)
+                && e.value().name() == tag
+                && !members.contains(&e.id())
+                && {
+                    let own = crate::thread::signature_classes(&e);
+                    shared.iter().all(|k| own.contains(k))
+                }
+                && is_card(&e, &a)
+                && crate::thread::text_len(*e) >= MIN_MEDIAN_TEXT
+            {
+                members.push(e.id());
+                report.count += 1;
+                report.cards += 1;
+                report.total_text += crate::thread::text_len(*e);
+                report.with_image += usize::from(e.select(&img).next().is_some());
+                report.with_time +=
+                    usize::from(crate::thread::find_hint(&e, crate::thread::TIME_HINT).is_some());
+            }
+        }
+    }
     // Accepted first, then largest first: the ones that matter read at the top.
     reports.sort_by_key(|r| (r.rejected.is_some(), std::cmp::Reverse(r.total_text)));
     reports.truncate(Verdict::KEEP);
@@ -231,6 +272,30 @@ mod tests {
         assert_eq!(v.groups[0].rejected, Some("median text too short"), "{v:?}");
     }
 
+    /// A lead card with one extra class lost the signature vote and rendered as a placeholder
+    /// and a heading above a list of entries. It has its neighbours' shape; it joins them.
+    #[test]
+    fn a_lone_card_beside_an_accepted_list_joins_it() {
+        let card = |cls: &str, i: usize| {
+            format!(
+                "<div class=\"{cls}\"><h3><a href=\"/s{i}\">Headline {i} about a thing that happened \
+                 today</a></h3><p>A dek sentence for story {i}, long enough to be a card.</p></div>"
+            )
+        };
+        let html = parse(&format!(
+            "<main>{}{}{}{}</main>",
+            card("card lead", 0),
+            card("card", 1),
+            card("card", 2),
+            card("card", 3)
+        ));
+        let (map, v) = detect(&html);
+        let members: usize = map.values().map(Vec::len).sum();
+        assert_eq!(members, 4, "{map:?}");
+        // And `--why` reports the membership the walker emits.
+        assert_eq!((v.groups[0].count, v.groups[0].cards), (4, 4), "{v:?}");
+    }
+
     #[test]
     fn a_card_that_is_itself_the_anchor_counts() {
         let cards = (0..4)
@@ -258,5 +323,29 @@ mod tests {
             .collect::<String>();
         let v = explain(&parse(&format!("<article>{ps}</article>")));
         assert_eq!(v.accepted().count(), 0, "{v:?}");
+    }
+
+    /// The join wants the list's classes, not only its tag and shape: a newsletter box is
+    /// one link and forty characters, and it was a story card titled "Subscribe".
+    #[test]
+    fn a_promo_box_beside_a_card_list_does_not_join_it() {
+        let card = |i: usize| {
+            format!(
+                "<div class=\"card\"><h3><a href=\"/s{i}\">Headline {i} about a thing that happened \
+                 today</a></h3><p>A dek sentence for story {i}, long enough to be a card.</p></div>"
+            )
+        };
+        let html = parse(&format!(
+            "<main>{}{}{}<div class=\"newsletter-promo\"><p>Sign up for our morning briefing \
+             and get the day's news in your inbox.</p><a href=\"/subscribe\">Subscribe to the \
+             newsletter</a></div></main>",
+            card(0),
+            card(1),
+            card(2)
+        ));
+        let (map, v) = detect(&html);
+        let members: usize = map.values().map(Vec::len).sum();
+        assert_eq!(members, 3, "{map:?}");
+        assert_eq!(v.groups[0].count, 3, "{v:?}");
     }
 }

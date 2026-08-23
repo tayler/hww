@@ -19,7 +19,7 @@ use crate::reader::settings::Settings;
 use crate::reader::thread_tree::CommentKey;
 use crate::reader::ui::theme::Palette;
 use eframe::egui;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use url::Url;
 
 /// What a click asked for. Widgets never navigate; they record an intent that `app` acts on
@@ -76,6 +76,11 @@ pub struct RenderCtx<'a> {
     /// inline in the block, and a front page repeats one href in nav, headline, and footer, so
     /// matching the string marks every occurrence rather than the one that was clicked.
     pub pending: Option<egui::Id>,
+    /// The same mark for a navigation that began without a widget: Enter on a focused link,
+    /// or the shot harness following one. An href rather than an id, so it marks every inline
+    /// carrying that href, which is the trade the id avoids for a click and the right one when
+    /// there was no click.
+    pub pending_href: Option<String>,
     /// Which link the click this frame came from, read back by `app` once the action it queued
     /// has been applied. The counterpart to [`RenderCtx::pending`], one navigation earlier.
     pub clicked_link: Option<egui::Id>,
@@ -89,6 +94,13 @@ pub struct RenderCtx<'a> {
     /// keyboard action of its own). `app` reads it only to keep that widget drawn: a focused
     /// widget that is not laid out loses its focus.
     pub focus_other: bool,
+    /// The window the reading column may skip outside of, or `None` when this block is laid
+    /// out whole. Consulted by `thread_ui`, which skips comment by comment inside one block.
+    pub band: Option<crate::reader::measure::Band>,
+    /// Which top-level block is being drawn, the first half of a comment-height key.
+    pub block: usize,
+    /// The comment heights for the frame, lent by `measure::Heights`.
+    pub comment_heights: HashMap<(usize, usize), f32>,
 }
 
 impl RenderCtx<'_> {
@@ -115,12 +127,16 @@ impl RenderCtx<'_> {
             find_scroll: false,
             action: None,
             pending: None,
+            pending_href: None,
             clicked_link: None,
             hover_href: None,
             focus_href: None,
             focus_image: None,
             focus_comment: None,
             focus_other: false,
+            band: None,
+            block: 0,
+            comment_heights: HashMap::new(),
         }
     }
 

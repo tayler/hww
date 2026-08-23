@@ -16,6 +16,7 @@
 //! wrong, and it needs no `egui::Context`: what the reader hands in is four floats.
 
 use crate::reader::opts::ReadOpts;
+use std::collections::HashMap;
 
 /// Everything a remembered height depends on. Any change clears the table.
 #[derive(Clone, PartialEq, Debug)]
@@ -45,11 +46,16 @@ pub struct Layout {
     pub collapsed: u64,
 }
 
-/// Heights measured under one [`Layout`], indexed by block.
+/// Heights measured under one [`Layout`], indexed by block, and within a discussion by
+/// comment: a thread is one block, and a long one used to cost the whole page every frame.
 #[derive(Default)]
 pub struct Heights {
     layout: Option<Layout>,
     h: Vec<Option<f32>>,
+    /// `(block, comment node)` -> height, for the comments of a `Block::Thread`. Lent to the
+    /// renderer for the frame (`take_comments`/`restore_comments`), because the block table
+    /// and the comment table are read and written on opposite sides of one borrow.
+    comments: HashMap<(usize, usize), f32>,
 }
 
 impl Heights {
@@ -57,6 +63,7 @@ impl Heights {
     pub fn clear(&mut self) {
         self.layout = None;
         self.h.clear();
+        self.comments.clear();
     }
 
     /// Point the table at the layout this frame is drawing under, clearing it if that differs
@@ -65,7 +72,16 @@ impl Heights {
         if self.layout.as_ref() != Some(layout) {
             self.layout = Some(layout.clone());
             self.h.clear();
+            self.comments.clear();
         }
+    }
+
+    pub fn take_comments(&mut self) -> HashMap<(usize, usize), f32> {
+        std::mem::take(&mut self.comments)
+    }
+
+    pub fn restore_comments(&mut self, comments: HashMap<(usize, usize), f32>) {
+        self.comments = comments;
     }
 
     /// What block `i` measured last time it was laid out, if it has been.
@@ -88,7 +104,7 @@ impl Heights {
 /// drag-selection running past the bottom, egui's own scroll-focus-into-view. One window's
 /// worth either way is two extra screens of layout, which is still a fortieth of the page
 /// this was written for.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Band {
     pub top: f32,
     pub bottom: f32,

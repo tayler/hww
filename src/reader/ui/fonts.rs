@@ -39,6 +39,10 @@ const PLEX_SERIF_BOLD_ITALIC: &[u8] = include_bytes!("../../../fonts/IBMPlexSeri
 const PLEX_MONO: &[u8] = include_bytes!("../../../fonts/IBMPlexMono-Regular.ttf");
 const PLEX_MONO_BOLD: &[u8] = include_bytes!("../../../fonts/IBMPlexMono-Bold.ttf");
 const TAIL: &[u8] = include_bytes!("../../../fonts/DejaVuSerif.ttf");
+/// Two scripts `harfrust` shapes correctly and no face above carries: a Noto file each, in
+/// every chain after the tail. Variable, so `wght`/`wdth` are pinned like the rest.
+const DEVANAGARI: &[u8] = include_bytes!("../../../fonts/NotoSansDevanagari-Variable.ttf");
+const THAI: &[u8] = include_bytes!("../../../fonts/NotoSansThai-Variable.ttf");
 const EMOJI: &[u8] = include_bytes!("../../../fonts/NotoEmoji-Regular.ttf");
 
 /// Plex Sans runs `wght` 100–700, so 700 is its bold end, not an arbitrary number.
@@ -93,6 +97,12 @@ pub fn install(ctx: &egui::Context) {
     }
     defs.font_data
         .insert("tail".to_owned(), Arc::new(weighted(TAIL, REGULAR)));
+    defs.font_data.insert(
+        "devanagari".to_owned(),
+        Arc::new(weighted(DEVANAGARI, REGULAR)),
+    );
+    defs.font_data
+        .insert("thai".to_owned(), Arc::new(weighted(THAI, REGULAR)));
     // At 0.81, which is the tweak epaint applied to this same face when it embedded it: at
     // 1.0 an emoji stands taller than the line box `format_for` pins, and overlaps the rows
     // either side of it.
@@ -101,7 +111,15 @@ pub fn install(ctx: &egui::Context) {
 
     // Every chain ends the same way. A chain that forgets the tail renders tofu for exactly the
     // scripts the tail exists to cover, and only on a page nobody tests with.
-    let chain = |first: &str| vec![first.to_owned(), "tail".to_owned(), "emoji".to_owned()];
+    let chain = |first: &str| {
+        vec![
+            first.to_owned(),
+            "tail".to_owned(),
+            "devanagari".to_owned(),
+            "thai".to_owned(),
+            "emoji".to_owned(),
+        ]
+    };
     for (name, _, _) in FACES {
         defs.families.insert(family_named(name), chain(name));
     }

@@ -23,6 +23,22 @@ pub fn matches(attrs: &str, hints: &[&str]) -> bool {
     })
 }
 
+/// Does any whitespace-separated class in `classes` consist of exactly one hint's tokens?
+///
+/// [`matches`] finds a hint *in* a class (`main-navigation` is chrome because `navigation`
+/// is); this finds a hint that *is* a class. The body hints want that and the noise hints do
+/// not: `message-header` contains `message` and is the byline over the body, not the body,
+/// and `post-md` contains `md` and is a post. `comment-body`, `commentBody`, and
+/// `comment_body` are the same class here as in [`matches`].
+pub fn names(classes: &str, hints: &[&str]) -> bool {
+    classes.split_whitespace().any(|c| {
+        let toks = tokens(c);
+        hints
+            .iter()
+            .any(|h| h.split('-').eq(toks.iter().map(String::as_str)))
+    })
+}
+
 /// Split on non-alphanumerics and on camelCase steps, lowercased. `PagePromo-title` is
 /// `["page", "promo", "title"]`; `hnuser` is `["hnuser"]`.
 fn tokens(s: &str) -> Vec<String> {
@@ -80,6 +96,22 @@ mod tests {
     fn hyphenated_hints_need_the_whole_run() {
         assert!(!matches("comment body", &["comment-body-text"]));
         assert!(matches("c comment-body-text x", &["comment-body-text"]));
+    }
+
+    #[test]
+    fn a_name_is_the_whole_class_and_not_a_token_in_it() {
+        assert!(names("message", &["message"]));
+        assert!(names("bbWrapper message-body", &["message-body"]));
+        assert!(names("commentBody", &["comment-body"]));
+        assert!(names("comment_body", &["comment-body"]));
+        assert!(!names("message-header", &["message"]));
+        assert!(!names("post-md", &["md"]));
+        assert!(!names("entry-content-meta", &["entry-content"]));
+        assert!(!names("comment-body-text", &["comment-body"]));
+        assert!(
+            matches("message-header", &["message"]),
+            "the contrast with `matches`"
+        );
     }
 
     #[test]

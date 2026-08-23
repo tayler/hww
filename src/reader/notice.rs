@@ -236,6 +236,52 @@ fn truncation_body(t: Truncation) -> Option<String> {
     })
 }
 
+/// A page carrying right-to-left text. epaint shapes but does not reorder, so Hebrew and
+/// Arabic lay out in logical order, backwards, or as tofu (the tail face is chosen to carry no
+/// RTL script so the failure is visible rather than plausible). The honest completion of that
+/// choice is to say so. `U+0590..=U+08FF` is Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan,
+/// Mandaic, and Arabic Supplement/Extended-A: the RTL blocks in one span.
+pub fn rtl(doc: &crate::ir::Document) -> Option<Notice> {
+    fn has_rtl(s: &str) -> bool {
+        s.chars().any(|c| ('\u{0590}'..='\u{08FF}').contains(&c))
+    }
+    fn blocks_have_rtl(blocks: &[crate::ir::Block]) -> bool {
+        use crate::ir::Block;
+        blocks.iter().any(|b| match b {
+            Block::Heading { inlines, .. } | Block::Paragraph(inlines) => {
+                has_rtl(&crate::ir::plain_text(inlines))
+            }
+            Block::List { items, .. } => items.iter().any(|i| blocks_have_rtl(i)),
+            Block::Quote { blocks, .. } => blocks_have_rtl(blocks),
+            Block::Code { text, .. } => has_rtl(text),
+            Block::Figure { caption, .. } => caption
+                .as_deref()
+                .is_some_and(|c| has_rtl(&crate::ir::plain_text(c))),
+            Block::Table { headers, rows } => {
+                headers.iter().any(|c| has_rtl(&crate::ir::plain_text(c)))
+                    || rows
+                        .iter()
+                        .flatten()
+                        .any(|c| has_rtl(&crate::ir::plain_text(c)))
+            }
+            Block::Thread(cs) => cs.iter().any(|c| blocks_have_rtl(&c.blocks)),
+            Block::Entries(es) => es
+                .iter()
+                .any(|e| has_rtl(&crate::ir::plain_text(&e.title)) || blocks_have_rtl(&e.summary)),
+            Block::Rule | Block::Embed { .. } => false,
+        })
+    }
+    let in_title = doc.title.as_deref().is_some_and(has_rtl);
+    (in_title || blocks_have_rtl(&doc.blocks)).then(|| {
+        Notice::new(
+            Severity::Caution,
+            "This page carries right-to-left text, which this reader cannot lay out yet: a \
+             Hebrew or Arabic run is drawn in the wrong order, or as missing glyphs."
+                .to_owned(),
+        )
+    })
+}
+
 /// The screen a failed navigation gets.
 ///
 /// Each error gets its own words and its own actions: a wrong-but-confident diagnosis is the
@@ -697,5 +743,22 @@ mod tests {
         assert!(MARK.starts_with('['));
         assert!(MARK.ends_with(']'));
         assert!(!MARK.contains(char::is_whitespace));
+    }
+
+    #[test]
+    fn a_page_with_hebrew_or_arabic_gets_the_rtl_caution_and_a_latin_page_does_not() {
+        let mut d = crate::html::extract(
+            "<html><body><article><p>A page in Latin script, long enough to be a paragraph on \
+             its own merits and then some.</p></article></body></html>",
+            &url::Url::parse("https://example.test/").unwrap(),
+        );
+        assert!(rtl(&d).is_none());
+        d.blocks
+            .push(crate::ir::Block::Paragraph(vec![crate::ir::Inline::Text(
+                "שלום עולם".to_owned(),
+            )]));
+        let n = rtl(&d).expect("a caution");
+        assert_eq!(n.severity, Severity::Caution);
+        assert!(!n.severity.fills_the_viewport());
     }
 }

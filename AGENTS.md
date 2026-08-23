@@ -290,13 +290,15 @@ four faces epaint would otherwise embed (Ubuntu-Light, Hack, NotoEmoji, emoji-ic
 in the binary, and `reader::ui::fonts` is the only file in the crate that contains font bytes.
 The reasoning is the same as `reqwest`'s `default-features = false` two paragraphs down: a face
 nobody chose cannot appear on a page, and text renders identically on every platform because no
-system font is ever probed. Ten files, 2.86 MB: IBM Plex Sans (variable, so its bold is the same
+system font is ever probed. Twelve files, 3.7 MB: IBM Plex Sans (variable, so its bold is the same
 bytes at `wght` 700), Plex Serif and Plex Mono in four and two weights, `DejaVuSerif` as the one
-coverage tail behind all three chains, and NotoEmoji behind that.
+coverage tail behind all three chains, Noto Sans Devanagari and Noto Sans Thai behind that, and
+NotoEmoji last.
 
 Three rules for changing this. **The tail carries no RTL script and that is deliberate**, not an
-oversight to correct: see Known gaps. **A chain ends `[…, tail, emoji]`**, because a chain that
-forgets the tail tofus exactly the scripts the tail exists for, on pages nobody tests with.
+oversight to correct: see Known gaps. **A chain ends `[…, tail, devanagari, thai, emoji]`**,
+because a chain that forgets the tail tofus exactly the scripts the tail exists for, on pages
+nobody tests with.
 And **`wdth` is pinned at 100 explicitly** rather than left to the face's default, so a change in
 how skrifa resolves an unset axis cannot quietly narrow the page.
 
@@ -409,8 +411,10 @@ discussion, just a much shorter one. The machinery was deleted rather than switc
 mechanism with no caller. The per-site layer rewrites URLs and does nothing else.
 `docs/phase0-findings.md`, Phase 2.
 
-**Nested replies in `thread.rs` are an open problem.** That 13-of-61 is not fixed by a URL
-rewrite: a rewrite gets the bytes, extraction still loses the tree.
+**Nested replies in `thread.rs` were an open problem, now closed by extension rather than
+override.** That 13-of-61 was never fixed by a URL rewrite: a rewrite gets the bytes. The fix
+was in `thread.rs`: the sibling vote finds the top level and `with_nested` gathers the replies
+under it, so the thread is the whole tree and the merge picks it on length honestly.
 
 **No config file, and no fallback when a rewrite fails.** A request that does not end on the
 host it was rewritten to is reported as a dead rule on stderr: the early warning that stands
@@ -571,12 +575,10 @@ Real, and worth knowing before re-discovering them:
   navigation started from the keyboard or from chrome has the strip and the progress rule and no
   third cue, which is the weakest case in the design and is known.
 
-  It also has **no scene**, and that is the gap worth knowing. Photographing it needs a link
-  followed, which needs Tab and then Enter, and synthetic Tab focus does not reliably land in the
-  shot harness: `focus-link` comes back byte-identical to `article`, with no focus ring, on the
-  same machines where every other scene is stable. So the mark is compiled and not photographed,
-  which is exactly the hole `hww-shot` exists to close. A pointer-click step would fix both
-  scenes at once and is the obvious next thing to build.
+  It has a scene now: `pending-link`, driven by `Step::Follow`, which does what Enter on a
+  focused link does (`ReaderApp::follow_link`) without needing focus to land. A navigation
+  started that way marks by href rather than widget id (`RenderCtx::pending_href`), so every
+  inline carrying the href gets the bracket; a click still marks the one widget.
 
 - **No circled `i`, and no info glyph worth the name.** `ⓘ` (U+24D8) is in none of the ten faces
   `reader::ui::fonts` embeds, was in none of the four `default_fonts` embedded before them, and is
@@ -590,25 +592,24 @@ Real, and worth knowing before re-discovering them:
   The arrow entry that used to sit beside this one is gone, and the difference between the two is
   worth keeping: `→` was a gap in a particular set of faces and closed when the faces changed,
   while `ⓘ` is a gap in what text faces are *for*.
-- **Right-to-left text cannot work, and the tail is chosen so that it fails visibly.** epaint
+- **Right-to-left text cannot work, and the tail is chosen so that it fails visibly; the
+  reader now says so.** `notice::rtl` puts a Caution band on any document with a run in
+  U+0590–U+08FF, which is the honest completion of the choice below. epaint
   shapes with `harfrust`, so joining and marks are right, but it has no bidi: `epaint::text::font`
   carries `TODO(emilk): heed bidi characters` and `text_layout` notes that script-aware run
   splitting waits on the same work. A Hebrew or Arabic run therefore lays out in logical order,
   which is backwards. `DejaVuSans` would have been the wider tail and carries exactly those
   scripts; `DejaVuSerif` is the tail instead because it carries none of them, so those pages tofu
   rather than rendering a confident, plausible, reversed line. Same argument as the substituted
-  hotlink image, one medium over. The honest completion is a `Notice` when a document contains a
-  run in U+0590–U+08FF; it is not written.
-- **Devanagari, Thai, and CJK are absent.** All three shape correctly under `harfrust` and none is
-  covered by the shipped faces. Devanagari and Thai are a Noto file each, roughly 100–250K. CJK is
-  10–16 MB per weight, which is the one addition that would change the binary's size story rather
-  than round off in it.
-- **A discussion is one block, so skipping does not reach it.** `reader::measure` works over
-  `doc.blocks`, and `thread.rs` hands the reader a whole thread as a single `Block::Thread`. A
-  long article now costs a window of layout and a long discussion still costs the whole page, plus
-  a `thread_tree::build` per frame. The shape of the fix is the same one (`thread_ui` already walks
-  the tree iteratively, so it has a per-comment index to key heights on); it has not been measured
-  or written.
+  hotlink image, one medium over.
+- **CJK is absent.** Devanagari and Thai shape correctly under `harfrust` and are now a Noto
+  file each (`devanagari`, `thai`, after the tail in every chain); CJK also shapes correctly and
+  is not shipped, because it is 10–16 MB per weight, the one addition that would change the
+  binary's size story rather than round off in it.
+- **A discussion still builds its tree every frame.** Skipping now reaches inside a
+  `Block::Thread`: `measure::Heights` keeps a height per `(block, comment)` and `thread_ui`
+  replaces a comment clear of the band with empty space of that height, walking its children
+  so the ones that reach the band are drawn. `thread_tree::build` per frame remains.
 
 - **A click on page text keeps the page laid out whole.** egui records a caret as a selection, and
   `lays_out_whole_page` cannot tell a caret from a selected passage: `LabelSelectionState` exposes
@@ -617,27 +618,28 @@ Real, and worth knowing before re-discovering them:
   that egui silently deselects a passage the moment it leaves the band, and a `Ctrl+C` that copies
   half of what is highlighted is worse than a slow frame.
 
-- **Focus on the page keeps the page laid out whole, too.** Nothing in egui drops focus on a
-  scroll, and the reader's scroll keys leave it alone, so one Tab onto a link costs the whole-page
-  frame on every frame after it, through all of a long read, until Escape or a click. The
-  mechanism wants only the focused widget's block drawn, not the page: a `focus_block` index
-  recorded beside `focus_href` and exempted from `Band::skips` would keep egui's dead-man's
-  switch satisfied at the cost of one block. Not written; the same shape would serve
-  `scroll_to_block`.
+- **Focus on the page costs one block, not the page.** `focus_block` is recorded beside
+  `focus_href` during the render and, a frame wide like `focus_was_on_page`, exempts that block
+  from `Band::skips`; only a focus whose block is not known (a control outside the block loop)
+  still lays the page out whole. `scroll_to_block` still does.
 
-- **A lone story card is not an entry.** `cards::detect` wants three same-signature siblings,
-  and a lead card that carries one extra class (`card lead`) or a single card between two
-  lists breaks the group; it renders as the walker sees it, an image placeholder and a linked
-  heading. The `front` scene's fixture gives its lead card the plain class for that reason.
-  Measured on two fronts in the Phase 3 sample; the fix is a detector that accepts a lone card
-  whose shape matches a neighbouring accepted group, and it is not written.
+- **A lone story card with no accepted neighbour is not an entry.** `cards::detect` wants three
+  same-signature siblings, and then lets a lone card of the same tag and shape under the same
+  parent join them, provided it carries every class the list's members share (a lead card with
+  one extra class). The class test is what keeps a newsletter box, one link and forty
+  characters, from joining as a story; the joined card is counted in the list's `GroupReport`,
+  so `--why` reports the membership the walker emits. A card with no accepted list beside it,
+  or under a different parent, still renders as the walker sees it: an image placeholder and a
+  linked heading. Measured on two fronts in the Phase 3 sample.
 - **Entry thumbnails have no placeholder, by design.** `ir::Entry.image` is filled from the
-  card; `blocks::entries_ui` draws nothing for it until `I` has loaded the page's images, and
-  then a thumbnail a few lines high above the headline (`images::thumbnail`). A column of one
-  placeholder per card was the worst thing about these pages, and the headline is the card's
-  affordance. There is no per-entry click to load one image; that is the gap.
-- **Nested replies in `thread.rs` are still under-counted** (see Closed decisions). The reader
-  reconstructs whatever tree extraction hands it; it cannot recover replies extraction lost.
+  card; `blocks::entries_ui` draws nothing for it until it is loaded, then a thumbnail a few
+  lines high above the headline (`images::thumbnail`). The one control is a small dim
+  `[image]` beside the time (`images::load_control`), which loads that picture; `I` loads them
+  all. A column of one placeholder per card was the worst thing about these pages.
+- **Nested replies are gathered; the 13-of-61 is closed** (see Closed decisions). `thread::with_nested`
+  collects every same-signature element inside an accepted member, in document order, and a
+  parent's body stops where its replies begin (`html::blocks_from_skipping`). Measured live on a
+  42-comment thread at depths 0–5 where the sibling vote alone found the 20 top-level posts.
 - **No justification, and no `justify` setting.** One `Label` per segment cannot justify. The
   setting is deliberately absent rather than present and inert: if justification is ever wanted
   badly enough it arrives together with a single-galley renderer, and the two are one decision.

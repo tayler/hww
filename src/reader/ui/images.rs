@@ -363,6 +363,25 @@ pub fn thumbnail(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     }
 }
 
+/// The one control an entry's thumbnail gets: a small dim `[image]` beside the time, which
+/// loads that one picture, and nothing once it is loaded. `Never` shows nothing at all.
+pub fn load_control(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
+    if ctx.opts.images == ImagePolicy::Never
+        || matches!(ctx.images.state(&img.src), Some(State::Ready(_)))
+    {
+        return;
+    }
+    let pal = ctx.pal;
+    let resp =
+        ui.add(egui::Button::new(RichText::new("[image]").color(pal.dim).small()).frame(false));
+    if resp.has_focus() {
+        ctx.focus_image = Some(img.src.clone());
+    }
+    if resp.clicked() {
+        ctx.act(Action::LoadImage(img.src.clone()));
+    }
+}
+
 /// An image inside a paragraph. Always the compact strip: an icon-sized image mid-sentence
 /// that expanded to the column width would break the line it sits in.
 pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {

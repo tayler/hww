@@ -67,6 +67,9 @@ enum Step {
     },
     /// A real navigation, typed into the URL bar exactly as a reader would type it.
     Nav(String),
+    /// A real navigation started from a link in the page, as Enter on it does. What a click
+    /// does, without needing to know where the link is drawn.
+    Follow(String),
     Key(Modifiers, Key),
     Type(String),
     Wait(u32),
@@ -162,6 +165,16 @@ still talking. What was agreed, and what was left for the autumn.</p><span class
 <footer><a href="/about">about</a> <a href="/contact">contact</a></footer>
 </body></html>
 "#;
+
+/// The article with one more link in its first paragraph, to `href`: what `pending-link`
+/// follows. A fixture of its own rather than a change to `ARTICLE`, which a dozen scenes share.
+fn article_linking(href: &str) -> String {
+    ARTICLE.replacen(
+        "left as text.",
+        &format!("left as text, <a href=\"{href}\">the slow page</a> notwithstanding."),
+        1,
+    )
+}
 
 const ARTICLE: &str = r#"
 <html lang="en"><head><title>Reading without the rest of it</title>
@@ -528,6 +541,22 @@ fn catalog(port: u16) -> Vec<Scene> {
             settle_ms: 400,
             volatile: true,
             ..scene(
+                "pending-link",
+                "a link followed and its page still in flight: the [loading] mark on the link",
+                // The mark that `notice::PENDING` exists for, photographed at last: the page
+                // stays, the followed link carries the bracket, the strip counts. Driven by
+                // `Step::Follow`, which does what Enter on the focused link does, because a
+                // synthetic Tab does not reliably land focus in this harness.
+                vec![
+                    page(ARTICLE_URL, &article_linking(&stall)),
+                    Step::Follow(stall.clone()),
+                ],
+            )
+        },
+        Scene {
+            settle_ms: 400,
+            volatile: true,
+            ..scene(
                 "loading-over-page",
                 "a navigation in flight while the outgoing page is still being read",
                 // The picture the commit-on-arrival change exists for: the article still
@@ -563,7 +592,7 @@ fn catalog(port: u16) -> Vec<Scene> {
 fn network_last(name: &str) -> u8 {
     u8::from(matches!(
         name,
-        "loading" | "loading-over-page" | "fail-transport"
+        "loading" | "loading-over-page" | "pending-link" | "fail-transport"
     ))
 }
 
@@ -674,7 +703,7 @@ impl Runner {
                 let url = Url::parse(&url).expect("a fixture URL parses");
                 self.app.present(url, None, Err(error));
             }
-            Step::Nav(_) | Step::Key(..) | Step::Type(_) | Step::Wait(_) => {
+            Step::Nav(_) | Step::Follow(_) | Step::Key(..) | Step::Type(_) | Step::Wait(_) => {
                 unreachable!("handled against the context")
             }
         }
@@ -709,6 +738,10 @@ impl Runner {
                         Step::Key(mods, k) => press(ctx, mods, k),
                         Step::Type(text) => {
                             ctx.input_mut(|i| i.events.push(egui::Event::Text(text)))
+                        }
+                        Step::Follow(href) => {
+                            self.app.follow_link(&href);
+                            self.wait = 2;
                         }
                         Step::Nav(target) => {
                             press(ctx, Modifiers::COMMAND, Key::L);
@@ -1583,6 +1616,7 @@ fn clone_step(s: &Step) -> Step {
         Step::Type(t) => Step::Type(t.clone()),
         Step::Wait(n) => Step::Wait(*n),
         Step::Nav(u) => Step::Nav(u.clone()),
+        Step::Follow(u) => Step::Follow(u.clone()),
         Step::Page {
             url,
             rewrite,

@@ -22,23 +22,52 @@ const MIN_MEDIAN_TEXT: usize = 40;
 /// comment's links are a username and a "reply"; a card's headline and dek are both links.
 const MAX_LINK_DENSITY: f64 = 0.5;
 
+/// Matched as tokens (`hint::matches`), so `author` covers `comment-author` and
+/// `authorLink`; the one-word forms (`authorname`, `nickname`) are listed because a token
+/// match no longer reaches inside them. The substring match that preceded it did, and a
+/// four-post thread set in `authorname`/`datetime` lost its attribution vote when it went.
 const AUTHOR_HINT: &[&str] = &[
     "hnuser",
     "author",
+    "authorname",
     "username",
     "user-name",
+    "nickname",
     "byline",
     "poster",
+    "commenter",
+    "postedby",
+    "posted-by",
 ];
-pub(crate) const TIME_HINT: &[&str] = &["age", "date", "time", "timestamp", "created"];
+pub(crate) const TIME_HINT: &[&str] = &[
+    "age",
+    "date",
+    "datetime",
+    "pubdate",
+    "time",
+    "timeago",
+    "timestamp",
+    "created",
+    "published",
+    "updated",
+];
+/// Matched as whole classes (`hint::names`), not tokens: `message` is a body and
+/// `message-header` is the byline over it, `md` is a body and `post-md` is a post. A token
+/// match took the header for the body on every post of a forum thread.
 const BODY_HINT: &[&str] = &[
     "commtext",
     "comment-body",
+    "comment-content",
+    "comment-text",
     "usertext-body",
     "post-body",
+    "post-content",
+    "post-text",
     "md",
     "entry-content",
     "message",
+    "message-body",
+    "cooked",
 ];
 
 pub fn extract_thread(html: &Html, base: &Url) -> Option<Vec<Comment>> {
@@ -60,15 +89,22 @@ pub fn extract_thread_traced(
     let Some(group) = group else {
         return (None, verdict);
     };
+    // Replies that nest inside a post rather than beside it are posts of the same signature
+    // further down the tree. The sibling vote found the top level; this gathers the rest,
+    // in document order, and their parents' bodies stop where they begin. This was the
+    // 13-of-61: the detector found the top-level comments and the article path found the
+    // tree, and the merge had to choose.
+    let group = with_nested(html, group);
+    let skip: std::collections::HashSet<ego_tree::NodeId> = group.iter().map(|e| e.id()).collect();
     let mut comments: Vec<Comment> = Vec::new();
     for el in &group {
-        let body = body_of(el, base);
+        let body = body_of(el, base, &skip);
         if body.is_empty() {
             continue;
         }
         comments.push(Comment {
-            author: find_hint(el, AUTHOR_HINT),
-            timestamp: find_hint(el, TIME_HINT),
+            author: find_hint_skipping(el, AUTHOR_HINT, &skip),
+            timestamp: find_hint_skipping(el, TIME_HINT, &skip),
             depth: depth_of(el, &group),
             id: el.value().id().map(str::to_owned),
             blocks: body,
@@ -130,6 +166,12 @@ impl std::fmt::Display for GroupReport {
 /// Normalise a class list into a stable signature, dropping per-item noise
 /// (`c00`, `depth-3`, hashed module names) that would otherwise split a group.
 pub(crate) fn signature(el: &ElementRef) -> String {
+    format!("{}.{}", el.value().name(), signature_classes(el).join("."))
+}
+
+/// The classes [`signature`] is built from, sorted and de-duplicated: what two members of a
+/// group share, and what a card has to carry to join one (`cards::detect`).
+pub(crate) fn signature_classes<'a>(el: &ElementRef<'a>) -> Vec<&'a str> {
     let mut classes: Vec<&str> = el
         .value()
         .attr("class")
@@ -139,7 +181,7 @@ pub(crate) fn signature(el: &ElementRef) -> String {
         .collect();
     classes.sort_unstable();
     classes.dedup();
-    format!("{}.{}", el.value().name(), classes.join("."))
+    classes
 }
 
 /// The largest set of same-signature siblings that looks like posts rather than chrome, and
@@ -255,6 +297,42 @@ fn best_group<'a>(
     )
 }
 
+/// The group plus every same-signature element nested inside any of its members, in document
+/// order.
+fn with_nested<'a>(html: &'a Html, group: Vec<ElementRef<'a>>) -> Vec<ElementRef<'a>> {
+    let sig = signature(&group[0]);
+    let mut ids: std::collections::HashSet<ego_tree::NodeId> =
+        group.iter().map(|e| e.id()).collect();
+    let mut all = group;
+    let mut i = 0;
+    while i < all.len() {
+        let el = all[i];
+        for d in el.descendants().skip(1) {
+            if let Some(e) = ElementRef::wrap(d)
+                && !ids.contains(&e.id())
+                && signature(&e) == sig
+            {
+                ids.insert(e.id());
+                all.push(e);
+            }
+        }
+        i += 1;
+    }
+    if all.len() > ids.len() || all.len() == 1 {
+        return all;
+    }
+    // Document order: a reply is read after its parent and before its parent's next sibling.
+    let mut order: std::collections::HashMap<ego_tree::NodeId, usize> =
+        std::collections::HashMap::new();
+    for (n, node) in html.tree.root().descendants().enumerate() {
+        if ids.contains(&node.id()) {
+            order.insert(node.id(), n);
+        }
+    }
+    all.sort_by_key(|e| order.get(&e.id()).copied().unwrap_or(usize::MAX));
+    all
+}
+
 /// Reply nesting. HN encodes depth in an `indent` attribute on a spacer cell; nested markup
 /// (Discourse, Reddit) encodes it by containment. Support both.
 fn depth_of(el: &ElementRef, group: &[ElementRef]) -> u16 {
@@ -278,7 +356,41 @@ fn depth_of(el: &ElementRef, group: &[ElementRef]) -> u16 {
 }
 
 pub(crate) fn find_hint(el: &ElementRef, hints: &[&str]) -> Option<String> {
-    for node in el.descendants() {
+    find_hint_skipping(el, hints, &std::collections::HashSet::new())
+}
+
+/// `el` and its descendants in document order, not entering the subtrees in `skip`.
+///
+/// The nested posts are in `skip`, and a flat `descendants()` walk that merely stepped over
+/// a skipped node went on into its children: a parent post with no byline of its own was
+/// attributed to its first reply, and `body_of` handed it that reply's body. Iterative, for
+/// the reason `collect` is.
+fn descendants_skipping<'a>(
+    el: &ElementRef<'a>,
+    skip: &std::collections::HashSet<ego_tree::NodeId>,
+) -> impl Iterator<Item = NodeRef<'a, Node>> {
+    // Lazy, because `find_hint` stops at the first hit and is asked about every member of
+    // every sibling group on the page.
+    let mut stack: Vec<NodeRef<'a, Node>> = el.children().rev().collect();
+    std::iter::once(**el).chain(std::iter::from_fn(move || {
+        while let Some(n) = stack.pop() {
+            if skip.contains(&n.id()) {
+                continue;
+            }
+            stack.extend(n.children().rev());
+            return Some(n);
+        }
+        None
+    }))
+}
+
+/// [`find_hint`] that does not look inside the nested posts in `skip`.
+fn find_hint_skipping(
+    el: &ElementRef,
+    hints: &[&str],
+    skip: &std::collections::HashSet<ego_tree::NodeId>,
+) -> Option<String> {
+    for node in descendants_skipping(el, skip) {
         let Some(e) = ElementRef::wrap(node) else {
             continue;
         };
@@ -300,17 +412,23 @@ pub(crate) fn find_hint(el: &ElementRef, hints: &[&str]) -> Option<String> {
 }
 
 /// The post body: a hinted container if present, else the largest text-bearing descendant.
-fn body_of(el: &ElementRef, base: &Url) -> Vec<Block> {
-    for node in el.descendants() {
+fn body_of(
+    el: &ElementRef,
+    base: &Url,
+    skip: &std::collections::HashSet<ego_tree::NodeId>,
+) -> Vec<Block> {
+    // A nested post's body is its own, not this one's: the walk does not enter the posts in
+    // `skip`, so a hinted container inside one is never taken for this post's.
+    for node in descendants_skipping(el, skip).skip(1) {
         let Some(e) = ElementRef::wrap(node) else {
             continue;
         };
-        if crate::hint::matches(e.value().attr("class").unwrap_or(""), BODY_HINT) {
-            return crate::html::blocks_from_public(e, base);
+        if crate::hint::names(e.value().attr("class").unwrap_or(""), BODY_HINT) {
+            return crate::html::blocks_from_skipping(e, base, skip);
         }
     }
-    // No hint: take the element itself, minus the metadata line.
-    crate::html::blocks_from_public(*el, base)
+    // No hint: the element itself, stopping at the posts nested inside it.
+    crate::html::blocks_from_skipping(*el, base, skip)
 }
 
 pub(crate) fn text_of(node: NodeRef<'_, Node>) -> String {
@@ -442,5 +560,139 @@ mod tests {
         let thread = thread.unwrap_or_else(|| panic!("no thread: {verdict:?}"));
         assert_eq!(thread.len(), 4);
         assert_eq!(thread[0].author.as_deref(), Some("user0"));
+    }
+
+    /// The 13-of-61: replies nest in child containers inside their parent comment, so the
+    /// sibling vote finds the top level and nothing below it. Now the nested posts are gathered
+    /// in document order with their depth, and a parent's body stops where its replies begin.
+    #[test]
+    fn replies_nested_inside_their_parents_are_found_with_their_depth() {
+        fn post(i: usize, children: &str) -> String {
+            format!(
+                "<div class=\"comment\"><span class=\"user-name\">user{i}</span> \
+                 <span class=\"age\">{i} hours ago</span><div class=\"comment-body\">Post {i} body, \
+                 with enough words in it to clear the median text floor and be a post.</div>\
+                 <div class=\"children\">{children}</div></div>"
+            )
+        }
+        let tree = format!(
+            "{}{}{}",
+            post(0, &format!("{}{}", post(1, &post(2, "")), post(3, ""))),
+            post(4, &post(5, "")),
+            post(6, "")
+        );
+        let html = parse(&format!("<div class=\"comments\">{tree}</div>"));
+        let (thread, verdict) =
+            extract_thread_traced(&html, &base(), &crate::cards::CardMap::new());
+        let thread = thread.unwrap_or_else(|| panic!("no thread: {verdict:?}"));
+        let authors: Vec<_> = thread.iter().map(|c| c.author.clone().unwrap()).collect();
+        assert_eq!(
+            authors,
+            [
+                "user0", "user1", "user2", "user3", "user4", "user5", "user6"
+            ]
+        );
+        let depths: Vec<_> = thread.iter().map(|c| c.depth).collect();
+        assert_eq!(depths, [0, 1, 2, 1, 0, 1, 0]);
+        // No parent carries its children's words.
+        let t0 = crate::ir::blocks_text_len(&thread[0].blocks);
+        let t2 = crate::ir::blocks_text_len(&thread[2].blocks);
+        assert!(
+            t0 < 2 * t2,
+            "parent body includes its replies: {t0} vs {t2}"
+        );
+    }
+
+    /// Token matching stopped `author` reaching inside `authorname` and `time` inside
+    /// `datetime`; a four-post thread set that way lost the attribution vote whole.
+    #[test]
+    fn authorname_and_datetime_attribute_a_post() {
+        let posts: String = (0..4)
+            .map(|i| {
+                format!(
+                    "<div class=\"comment\"><span class=\"authorname\">user{i}</span> \
+                     <span class=\"datetime\">{i} hours ago</span><div class=\"text\">Post {i}, \
+                     with enough words in it to clear the median text floor and be a post.</div>\
+                     </div>"
+                )
+            })
+            .collect();
+        let html = parse(&format!("<div class=\"comments\">{posts}</div>"));
+        let (thread, verdict) =
+            extract_thread_traced(&html, &base(), &crate::cards::CardMap::new());
+        let thread = thread.unwrap_or_else(|| panic!("no thread: {verdict:?}"));
+        assert_eq!(thread.len(), 4);
+        assert_eq!(thread[1].author.as_deref(), Some("user1"));
+        assert_eq!(thread[1].timestamp.as_deref(), Some("1 hours ago"));
+    }
+
+    /// `message` is a body hint and `message-header` is the byline over the body. Matched
+    /// as a token it was the first hit on every post, and the thread was four bylines.
+    #[test]
+    fn a_message_header_is_not_the_message_body() {
+        let posts: String = (0..4)
+            .map(|i| {
+                format!(
+                    "<div class=\"post\"><div class=\"message-header\"><span class=\"username\">\
+                     user{i}</span> <span class=\"date\">{i} hours ago</span> Joined 2012</div>\
+                     <div class=\"message-body\">The comment text of post {i}, long enough to be \
+                     a post and not a line of metadata.</div></div>"
+                )
+            })
+            .collect();
+        let html = parse(&format!("<div class=\"thread\">{posts}</div>"));
+        let (thread, verdict) =
+            extract_thread_traced(&html, &base(), &crate::cards::CardMap::new());
+        let thread = thread.unwrap_or_else(|| panic!("no thread: {verdict:?}"));
+        for (i, c) in thread.iter().enumerate() {
+            let body = format!("{:?}", c.blocks);
+            assert!(
+                body.contains(&format!("comment text of post {i}")),
+                "{body}"
+            );
+            assert!(
+                !body.contains("Joined 2012"),
+                "header taken for body: {body}"
+            );
+        }
+    }
+
+    /// A `[deleted]` parent has no byline, timestamp, or hinted body of its own, and the
+    /// hint walk used to step over its nested reply's node and straight into the reply's
+    /// children: the parent was attributed to its reply and given the reply's body.
+    #[test]
+    fn a_parent_without_a_byline_does_not_borrow_its_reply() {
+        fn post(i: usize, children: &str) -> String {
+            format!(
+                "<div class=\"comment\"><span class=\"user-name\">user{i}</span> \
+                 <span class=\"age\">{i} hours ago</span><div class=\"comment-body\">Post {i} body, \
+                 with enough words in it to clear the median text floor and be a post.</div>\
+                 <div class=\"children\">{children}</div></div>"
+            )
+        }
+        let deleted = format!(
+            "<div class=\"comment\">[deleted] This post was removed, and what is left of it is \
+             this line, which is long enough to be its body.<div class=\"children\">{}</div></div>",
+            post(1, "")
+        );
+        let html = parse(&format!(
+            "<div class=\"comments\">{deleted}{}{}</div>",
+            post(2, ""),
+            post(3, "")
+        ));
+        let (thread, verdict) =
+            extract_thread_traced(&html, &base(), &crate::cards::CardMap::new());
+        let thread = thread.unwrap_or_else(|| panic!("no thread: {verdict:?}"));
+        assert_eq!(thread.len(), 4, "{thread:?}");
+        assert_eq!(thread[0].author, None, "{:?}", thread[0]);
+        assert_eq!(thread[0].timestamp, None, "{:?}", thread[0]);
+        let body = format!("{:?}", thread[0].blocks);
+        assert!(body.contains("[deleted]"), "{body}");
+        assert!(
+            !body.contains("Post 1 body"),
+            "reply's body taken for the parent's: {body}"
+        );
+        assert_eq!(thread[1].author.as_deref(), Some("user1"));
+        assert_eq!(thread[1].depth, 1);
     }
 }

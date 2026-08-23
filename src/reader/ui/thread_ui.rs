@@ -25,7 +25,21 @@ pub fn thread_ui(ui: &mut Ui, comments: &[ir::Comment], ctx: &mut RenderCtx<'_>)
         let comment = &comments[node.comment];
         let collapsed = is_collapsed(&tree, n, ctx);
 
-        ui.horizontal_top(|ui| {
+        // The window rule, one level down: a comment clear of the band is empty space of the
+        // height it measured last time. Its children are still walked, so the ones that reach
+        // the band are drawn.
+        if let Some(band) = ctx.band
+            && let Some(h) = ctx.comment_heights.get(&(ctx.block, n)).copied()
+            && band.skips(ui.next_widget_position().y, h)
+        {
+            ui.allocate_space(egui::vec2(0.0, h));
+            if !collapsed {
+                stack.extend(node.children.iter().rev().copied());
+            }
+            continue;
+        }
+
+        let drawn = ui.horizontal_top(|ui| {
             let indent = ctx.opts.indent_for(node.depth);
             // A hairline guide per level, so a reply four deep can be traced back to what it
             // answers without counting pixels. Reserved and filled in after the reply is laid
@@ -61,6 +75,8 @@ pub fn thread_ui(ui: &mut Ui, comments: &[ir::Comment], ctx: &mut RenderCtx<'_>)
                 );
             }
         });
+        ctx.comment_heights
+            .insert((ctx.block, n), drawn.response.rect.height());
 
         if !collapsed {
             stack.extend(node.children.iter().rev().copied());

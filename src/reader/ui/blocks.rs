@@ -154,8 +154,15 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
         let set = Setting::heading(ctx.opts, &ctx.pal, 4);
         runs(ui, &title, &set, ctx);
         blocks_ui(ui, &e.summary, ctx, None);
-        if let Some(p) = &e.published {
-            ui.label(RichText::new(p).color(ctx.pal.dim).small());
+        if e.published.is_some() || e.image.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                if let Some(p) = &e.published {
+                    ui.label(RichText::new(p).color(ctx.pal.dim).small());
+                }
+                if let Some(img) = &e.image {
+                    super::images::load_control(ui, img, ctx);
+                }
+            });
         }
     }
 }

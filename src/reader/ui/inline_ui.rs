@@ -357,7 +357,7 @@ fn link_ui(
     // convention: `[image]` two modules over is the same shape, and it is set the same way.
     // Not a colour or a second underline: the hover rule is already painted at this exact
     // baseline, and the pointer is still on the link in the moment this matters most.
-    if ctx.pending == Some(resp.id) {
+    if ctx.pending == Some(resp.id) || ctx.pending_href.as_deref() == Some(href) {
         // The leading space is not cosmetic. `runs_ui` sets `item_spacing.x = 0.0`, because word
         // spacing on a wrapped line comes from the text itself, so a bare label here renders as
         // `the quiet web[loading]`. The `[image]` placeholder gets away with no space only

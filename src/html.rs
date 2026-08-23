@@ -68,6 +68,24 @@ const NOISE_HINT: &[&str] = &[
     "banner",
     "breadcrumb",
     "pagination",
+    // Token matching made `nav` stop matching `navigation`, `advert` `advertising`, and
+    // `cookie` `cookies`. These are the whole-word forms the substring match used to cover,
+    // and a page that falls back to `<body>` meets every one of them.
+    "navigation",
+    "navbar",
+    "topnav",
+    "subnav",
+    "mainnav",
+    "submenu",
+    "megamenu",
+    "advertising",
+    "advertorial",
+    "cookies",
+    "sharing",
+    "sharebar",
+    "socials",
+    "subscription",
+    "subscriptions",
     // Token matching made `advert` stop matching `advertisement`; these are the forms seen.
     "advertisement",
     "ad",
@@ -160,6 +178,9 @@ pub struct Explanation {
     pub thread: crate::thread::Verdict,
     /// What the story-card detector saw.
     pub cards: crate::cards::Verdict,
+    /// The text of the accepted cards outside chrome: what [`CARDS_RATIO`] weighed against
+    /// the root. Less than the accepted groups' total when a card list sits in a sidebar.
+    pub cards_text: usize,
     /// What the site profile did, if one applied. Its `host` is filled by `session`.
     pub profile: Option<crate::profile::ProfileReport>,
     /// What the thread merge did: `"replaced the document"`, `"appended"`,
@@ -239,7 +260,11 @@ impl std::fmt::Display for Explanation {
             writeln!(f, "  {mark} {g}")?;
         }
         let accepted = self.cards.accepted().count();
-        writeln!(f, "cards: {accepted} group(s) look like story cards")?;
+        writeln!(
+            f,
+            "cards: {accepted} group(s) look like story cards; {} chars outside chrome",
+            self.cards_text
+        )?;
         for g in &self.cards.groups {
             let mark = if g.rejected.is_none() { '*' } else { ' ' };
             writeln!(f, "  {mark} {g}")?;
@@ -348,6 +373,7 @@ fn extract_traced(
         winner: None,
         thread: Default::default(),
         cards,
+        cards_text: 0,
         profile: profile_report,
         thread_merge: "no thread",
         meta: vec![
@@ -399,7 +425,8 @@ fn extract_traced(
     // body with its navigation beats a legal notice with nothing.
     // And a root the page's own story cards dwarf: one portal keeps its sixty-card stream
     // beside `<main>` rather than in it, and `<main>` was a 1,233-char root.
-    let cards_text: usize = why.cards.accepted().map(|g| g.total_text).sum();
+    let cards_text = cards_outside_chrome(&html, &card_map);
+    why.cards_text = cards_text;
     let have = doc.text_len();
     if (have < SLIVER_TEXT || cards_text > CARDS_RATIO * have)
         && let Ok(sel) = Selector::parse("body")
@@ -424,21 +451,54 @@ fn extract_traced(
     (doc, why)
 }
 
+/// The text of every accepted story card whose list is not inside chrome: what
+/// [`CARDS_RATIO`] weighs against the chosen root.
+///
+/// The card detector reads the raw tree and never asks [`in_chrome`], so a forty-card
+/// "Latest" rail in a `div.sidebar` is as accepted as a front page's stream. Summing every
+/// accepted group made a correctly rooted 1,369-char article take the body walk, rail and
+/// newsletter box included, because the rail out-weighed it three to one. The walker would
+/// drop that rail on the way past, so the ratio does not count it either. Measured from the
+/// map rather than the reports so a card that joined a list late (`cards::detect`'s lone-card
+/// join) is counted with the list it joined.
+fn cards_outside_chrome(html: &Html, cards: &crate::cards::CardMap) -> usize {
+    cards
+        .iter()
+        .filter(|(parent, _)| {
+            html.tree
+                .get(**parent)
+                .and_then(ElementRef::wrap)
+                .is_some_and(|p| !in_chrome(&p))
+        })
+        .flat_map(|(_, members)| members.iter())
+        .filter_map(|id| html.tree.get(*id))
+        .map(crate::thread::text_len)
+        .sum()
+}
+
 /// An article ends in prose. What trails the last prose block is link rubble: a tag list, a
 /// "See all" or "Read more", a "Most viewed" heading whose list the extractor already dropped,
 /// a rule. Measured on forty articles across fifty-seven hosts: ten ended this way. Prose is
 /// never trimmed, however short; only link-only runs, link-only lists, headings with nothing
 /// after them, and rules.
 fn trim_tail(blocks: &mut Vec<Block>) {
-    if crate::ir::blocks_text_len(blocks) < crate::ir::THIN_TEXT {
+    let mut total = crate::ir::blocks_text_len(blocks);
+    if total < crate::ir::THIN_TEXT {
         return;
     }
     while let Some(last) = blocks.last() {
-        if is_rubble(last) {
-            blocks.pop();
-        } else {
+        if !is_rubble(last) {
             break;
         }
+        // Never under the floor. A page that is one list of linked titles (a blog archive,
+        // which only the body fallback reaches) is rubble item by item and the page by the
+        // sum; popping the list and then the heading over it left a document of nothing.
+        let rest = total - crate::ir::blocks_text_len(std::slice::from_ref(last));
+        if rest < crate::ir::THIN_TEXT {
+            break;
+        }
+        total = rest;
+        blocks.pop();
     }
 }
 
@@ -913,9 +973,27 @@ fn link_density(el: &ElementRef) -> f64 {
 /// pathological page rather than blanking it.
 const MAX_DEPTH: usize = 256;
 
+/// Accepted cards inside accepted cards, past which the walk stops making entries. See
+/// `Walk::card_depth`.
+const MAX_CARD_NESTING: u8 = 3;
+
 /// Public entry point for the thread extractor, which builds blocks for one post.
 pub fn blocks_from_public(root: ElementRef<'_>, base: &Url) -> Vec<Block> {
     blocks_from(root, &Walk::bare(base))
+}
+
+/// [`blocks_from_public`] that does not enter the subtrees in `skip`: how a post's body is
+/// read when its replies nest inside it.
+pub fn blocks_from_skipping(
+    root: ElementRef<'_>,
+    base: &Url,
+    skip: &std::collections::HashSet<ego_tree::NodeId>,
+) -> Vec<Block> {
+    let walk = Walk {
+        skip: Some(skip),
+        ..Walk::bare(base)
+    };
+    blocks_from(root, &walk)
 }
 
 /// What every walker is handed, and all it is allowed to know: where hrefs resolve, and
@@ -924,12 +1002,22 @@ pub fn blocks_from_public(root: ElementRef<'_>, base: &Url) -> Vec<Block> {
 /// `noise_hints` is off for a root whose hinted subtrees turned out to be most of its text
 /// (see `root_candidates`): a wire service names its story cards `PagePromo`, and a hint that
 /// deletes the page is not describing chrome.
+#[derive(Clone, Copy)]
 pub struct Walk<'a> {
     pub base: &'a Url,
     noise_hints: bool,
+    /// How many accepted cards this walk is inside. A lead package nests a card list in a
+    /// card, which is one level; past [`MAX_CARD_NESTING`] the walk carries no `cards`, so
+    /// a page of nested triplets is walked as plain containers, whose frames the
+    /// [`MAX_DEPTH`] budget was measured for. `entry_from` costs a frame of its own per
+    /// level, and 256 of those on top of the walker's did not fit the worker stack.
+    card_depth: u8,
     /// Which children of which containers are story cards, from `cards::detect`. `None` is
     /// "no cards anywhere", which is what a thread body or a test fixture wants.
     cards: Option<&'a crate::cards::CardMap>,
+    /// Subtrees not to enter: a post's body stops at the replies nested inside it, which are
+    /// posts of their own.
+    skip: Option<&'a std::collections::HashSet<ego_tree::NodeId>>,
 }
 
 impl<'a> Walk<'a> {
@@ -937,7 +1025,9 @@ impl<'a> Walk<'a> {
         Self {
             base,
             noise_hints: true,
+            card_depth: 0,
             cards: None,
+            skip: None,
         }
     }
     fn without_hints(base: &'a Url) -> Self {
@@ -951,6 +1041,13 @@ impl<'a> Walk<'a> {
             cards: Some(cards),
             ..self
         }
+    }
+    /// Is this node a subtree the walk must not enter? Every arm that reaches past a
+    /// container's direct children (`<li>`s under a list, `<dd>`s under a `<dl>`) asks this
+    /// too: a reply nested as `<ul class="children"><li class="comment">` is a post of its
+    /// own, and a guard on the children loop alone walked it into its parent's body.
+    fn skips(&self, id: ego_tree::NodeId) -> bool {
+        self.skip.is_some_and(|k| k.contains(&id))
     }
 }
 
@@ -1012,6 +1109,9 @@ fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, d
             }
             continue;
         };
+        if walk.skips(child.id()) {
+            continue;
+        }
         // Media before the noise check: `iframe` is a noise tag (nothing inside one is
         // readable), but the element itself is a placeholder the reader may act on.
         if matches!(el.value().name(), "video" | "audio" | "iframe") {
@@ -1062,6 +1162,7 @@ fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, d
                 let items: Vec<Vec<Block>> = el
                     .select(&li)
                     .filter(|l| l.parent().map(|p| p.id()) == Some(child.id()))
+                    .filter(|l| !walk.skips(l.id()))
                     .map(|l| {
                         let mut b = Vec::new();
                         walk_blocks(*l, walk, &mut b, depth + 2);
@@ -1201,6 +1302,9 @@ fn dl_from(el: &ElementRef, walk: &Walk<'_>, depth: usize) -> Option<Block> {
         let Some(ce) = ElementRef::wrap(c) else {
             continue;
         };
+        if walk.skips(c.id()) {
+            continue;
+        }
         match ce.value().name() {
             "dt" => {
                 let t = trim_inlines(inlines_from(c, walk, depth + 2));
@@ -1298,12 +1402,20 @@ fn entry_from(card: &ElementRef, walk: &Walk<'_>, depth: usize) -> Option<crate:
     }
     let published = crate::thread::find_hint(card, crate::thread::TIME_HINT);
     let image = card.select(&img).find_map(|i| image_from(&i, walk.base));
-    let summary = summary_of(
-        blocks_from(*card, walk),
-        &title_text,
-        href.as_deref(),
-        published.as_deref(),
-    );
+    // The card's own blocks, at this depth and not from zero: an accepted card list can sit
+    // inside an accepted card (a lead package), and restarting the count at each one let a
+    // page of nested triplets walk past `MAX_DEPTH` and off the end of the stack. One level
+    // of nesting is a real shape; past `MAX_CARD_NESTING` the body is walked without cards.
+    let inner = Walk {
+        card_depth: walk.card_depth + 1,
+        cards: walk
+            .cards
+            .filter(|_| walk.card_depth + 1 < MAX_CARD_NESTING),
+        ..*walk
+    };
+    let mut body = Vec::new();
+    walk_blocks(**card, &inner, &mut body, depth);
+    let summary = summary_of(body, &title_text, href.as_deref(), published.as_deref());
     Some(crate::ir::Entry {
         title,
         href,
@@ -1646,7 +1758,10 @@ fn inline_child(child: NodeRef<'_, Node>, walk: &Walk<'_>, depth: usize, out: &m
             let Some(el) = ElementRef::wrap(child) else {
                 return;
             };
-            if is_noise(&el, walk) {
+            // A container that emitted no blocks falls to this flatten, and the one whose
+            // every block was a nested post is exactly that container: without the check
+            // the post the block walk stepped around came back as inline text.
+            if walk.skips(child.id()) || is_noise(&el, walk) {
                 return;
             }
             let name = e.name.local.as_ref();
@@ -1808,12 +1923,34 @@ fn image_from(el: &ElementRef, base: &Url) -> Option<Image> {
 
 /// The first URL in a `srcset`: `url 1x, url 2x` or `url 256w, url 512w`. The smallest
 /// candidate is listed first by convention, and this reader decodes at column width anyway.
+///
+/// Not `split(',')`: a URL may carry commas (an image CDN's transform segment,
+/// `/upload/w_300,h_200,c_fill/photo.jpg`), and the HTML grammar separates candidates on a
+/// comma only where it ends a URL token. A URL runs to the first whitespace, loses any commas
+/// it ends in, and the descriptors after it run to the next comma.
 fn first_of_srcset(srcset: &str) -> Option<&str> {
-    srcset
-        .split(',')
-        .map(str::trim)
-        .filter_map(|c| c.split_whitespace().next())
-        .find(|u| !u.is_empty() && !u.starts_with("data:"))
+    let mut rest = srcset;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
+        if rest.is_empty() {
+            return None;
+        }
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let token = &rest[..end];
+        let url = token.trim_end_matches(',');
+        if !url.is_empty() && !url.starts_with("data:") {
+            return Some(url);
+        }
+        // A token that ended in a comma had no descriptors; otherwise they run to the comma.
+        rest = if url.len() < token.len() {
+            &rest[end..]
+        } else {
+            match rest[end..].find(',') {
+                Some(i) => &rest[end + i + 1..],
+                None => "",
+            }
+        };
+    }
 }
 
 /// A row is a *header* row only when every cell it owns is a `<th>`.
@@ -3107,6 +3244,178 @@ mod tests {
                 ),
             ],
             "{:?}",
+            d.blocks
+        );
+    }
+
+    /// Accepted card lists nest (a lead package holds a list of its own), and `entry_from`
+    /// used to walk a card's body from depth zero: a page of nested triplets never reached
+    /// `MAX_DEPTH` and walked off the end of the stack. The harness is the one
+    /// `a_pathologically_nested_page_extracts_instead_of_aborting` uses.
+    #[test]
+    fn nested_story_cards_do_not_walk_off_the_stack() {
+        // Overflowed at 200 before the fix, and not at 100. Kept at the smaller number that
+        // did, because the detector's cost is quadratic in this depth.
+        const DEPTH: usize = 200;
+        let open = "<div class=\"card\"><a href=\"/s\">A headline long enough to be one</a> \
+                    and a dek of forty characters or more beside it. ";
+        let leaf = "<div class=\"card\"><a href=\"/s\">A headline long enough to be one</a> \
+                    and a dek of forty characters or more beside it.</div>";
+        let mut src = String::from("<html><body><main>");
+        src.push_str(&open.repeat(DEPTH));
+        src.push_str(&leaf.repeat(3));
+        src.push_str(&format!("{leaf}{leaf}</div>").repeat(DEPTH));
+        src.push_str(&leaf.repeat(2));
+        src.push_str("</main></body></html>");
+        let out = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || extract(&src, &Url::parse("https://example.com/a").unwrap()))
+            .unwrap()
+            .join()
+            .expect("extraction unwound");
+        assert!(
+            out.text_len() > 0,
+            "the nested card page extracted nothing at all"
+        );
+        assert!(
+            out.blocks.iter().any(|b| matches!(b, Block::Entries(_))),
+            "not a card page: {:?}",
+            out.blocks.first()
+        );
+    }
+
+    /// A blog archive is one list of linked titles under a heading. Only the body fallback
+    /// reaches it, and `trim_tail` then saw a link-only list and a short heading: rubble by
+    /// the block, the whole page by the sum, and a document of nothing after it.
+    #[test]
+    fn a_body_fallback_page_that_is_one_link_list_keeps_the_list() {
+        let items: String = (0..40)
+            .map(|i| format!("<li><a href=\"/p/{i}\">Post number {i} title</a></li>"))
+            .collect();
+        let d = doc(&format!("<main><h1>Archive</h1><ul>{items}</ul></main>"));
+        assert!(d.text_len() > 0, "trimmed to nothing");
+        assert!(
+            d.blocks.iter().any(|b| matches!(b, Block::List { .. })),
+            "the list is the page: {:?}",
+            d.blocks
+        );
+    }
+
+    /// Token matching dropped the chrome classes the substring match reached by accident:
+    /// `navigation` no longer contained `nav`. These are the whole-word forms, and a root
+    /// that is `<main>` or `<body>` meets every one of them.
+    #[test]
+    fn whole_word_chrome_classes_are_still_chrome() {
+        let d = doc("<main>\
+             <div class=\"main-navigation\"><ul><li><a href=\"/a\">Home</a></li>\
+             <li><a href=\"/b\">World</a></li></ul></div>\
+             <div class=\"navbar\"><a href=\"/login\">Login</a> <a href=\"/reg\">Register</a></div>\
+             <div class=\"advertising\"><p>Buy the thing advertised here today, on offer.</p></div>\
+             <div class=\"cookies\"><p>We use cookies to improve your experience on this site.</p></div>\
+             <div class=\"content\"><p>The article itself, a paragraph of prose long enough to be \
+             the content of the page and to clear every floor the extractor applies to a root \
+             candidate, which it is.</p></div></main>");
+        let text = d
+            .blocks
+            .iter()
+            .map(|b| match b {
+                Block::Paragraph(i) | Block::Heading { inlines: i, .. } => crate::ir::plain_text(i),
+                Block::List { items, .. } => format!("{items:?}"),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("The article itself"), "{text}");
+        for leaked in ["Login", "World", "advertised", "cookies to improve"] {
+            assert!(!text.contains(leaked), "{leaked:?} leaked: {text}");
+        }
+    }
+
+    /// `Walk.skip` was checked in the children loop and nowhere else, and the list arm
+    /// reaches its `<li>`s by selector: a reply nested as `<ul class="children"><li
+    /// class="comment">` was walked into its parent's body as a bullet list.
+    #[test]
+    fn a_reply_nested_as_a_list_item_is_skipped_like_any_other() {
+        let html = Html::parse_document(
+            "<html><body><ul><li class=\"comment\" id=\"p\"><p>The parent post, which says \
+             enough to be a paragraph of its own here.</p>\
+             <ul class=\"children\"><li class=\"comment\" id=\"r\"><p>The reply, which is a \
+             post of its own and not part of the parent.</p></li></ul></li></ul></body></html>",
+        );
+        let sel = |s: &str| html.select(&Selector::parse(s).unwrap()).next().unwrap();
+        let skip: std::collections::HashSet<_> = [sel("#r").id()].into_iter().collect();
+        let body = blocks_from_skipping(
+            sel("#p"),
+            &Url::parse("https://example.test/").unwrap(),
+            &skip,
+        );
+        let text = format!("{body:?}");
+        assert!(text.contains("The parent post"), "{text}");
+        assert!(
+            !text.contains("The reply"),
+            "reply walked into the parent: {text}"
+        );
+    }
+
+    /// A srcset URL may carry commas (an image CDN's transform segment); the grammar splits
+    /// candidates only on a comma that ends a URL token.
+    #[test]
+    fn first_of_srcset_keeps_a_comma_inside_a_url() {
+        assert_eq!(
+            first_of_srcset(
+                "https://res.example.com/image/upload/w_300,h_200,c_fill/photo.jpg 300w, \
+                 https://res.example.com/image/upload/w_600,h_400,c_fill/photo.jpg 600w"
+            ),
+            Some("https://res.example.com/image/upload/w_300,h_200,c_fill/photo.jpg")
+        );
+        assert_eq!(first_of_srcset("a.jpg 1x, b.jpg 2x"), Some("a.jpg"));
+        assert_eq!(first_of_srcset("a.jpg 1x,b.jpg 2x"), Some("a.jpg"));
+        assert_eq!(first_of_srcset("a.jpg, b.jpg"), Some("a.jpg"));
+        // No whitespace after the comma: one URL, as the grammar and browsers read it.
+        assert_eq!(first_of_srcset("a.jpg,b.jpg"), Some("a.jpg,b.jpg"));
+        assert_eq!(first_of_srcset(" , a.jpg"), Some("a.jpg"));
+        assert_eq!(
+            first_of_srcset("data:image/gif;base64,R0lGOD 1x, b.jpg 2x"),
+            Some("b.jpg")
+        );
+        assert_eq!(first_of_srcset("data:image/gif;base64,R0lGOD 1x"), None);
+        assert_eq!(first_of_srcset(""), None);
+    }
+
+    /// A forty-card rail in a class-hinted sidebar is accepted as cards and dropped by the
+    /// walker; counted against the root it made a correctly rooted article take the body walk.
+    #[test]
+    fn a_card_rail_in_a_sidebar_does_not_count_against_the_root() {
+        let prose: String = (0..8)
+            .map(|i| {
+                format!(
+                    "<p>Paragraph {i} of the article, carrying enough prose that the article \
+                     is the root of the page by a comfortable margin and clears the sliver floor \
+                     on its own, as a real article of modest length does.</p>"
+                )
+            })
+            .collect();
+        let rail: String = (0..40)
+            .map(|i| {
+                format!(
+                    "<div class=\"card\"><h3><a href=\"/s{i}\">Latest headline number {i} about \
+                     a thing</a></h3><p>A dek sentence for the latest story {i}, long enough.</p>\
+                     </div>"
+                )
+            })
+            .collect();
+        let src = format!(
+            "<html><body><nav><a href=\"/\">Home</a></nav><article>{prose}</article>\
+             <div class=\"sidebar\"><h2>Latest</h2>{rail}</div></body></html>"
+        );
+        let why = explain(&src, &Url::parse("https://example.test/a").unwrap());
+        assert_eq!(why.cards.accepted().count(), 1, "{why}");
+        assert_eq!(why.cards_text, 0, "{why}");
+        assert!(!why.body_fallback, "{why}");
+        let d = doc(&src);
+        assert!(
+            !d.blocks.iter().any(|b| matches!(b, Block::Entries(_))),
+            "the rail reached the page: {:?}",
             d.blocks
         );
     }
