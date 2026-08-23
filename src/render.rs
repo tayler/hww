@@ -398,6 +398,7 @@ mod tests {
             byline: Some("A Writer".into()),
             published: None,
             site_name: None,
+            favicon: None,
             lang: None,
             blocks: vec![
                 Block::Heading {
@@ -436,6 +437,7 @@ mod tests {
             byline: None,
             published: None,
             site_name: None,
+            favicon: None,
             lang: None,
             blocks: vec![Block::Thread(vec![crate::ir::Comment {
                 author: Some("a".into()),
@@ -481,6 +483,7 @@ mod tests {
             byline: None,
             published: None,
             site_name: None,
+            favicon: None,
             lang: None,
             blocks: vec![Block::Entries(vec![crate::ir::Entry {
                 title: vec![Inline::Text("A headline of some length".into())],

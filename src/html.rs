@@ -357,12 +357,14 @@ fn extract_traced(
         ),
         ("meta[name=date]", meta_attr(&html, "date")),
     ]);
+    let (favicon, favicon_src) = favicon_of(&html, url);
     let mut doc = Document {
         url: url.to_string(),
         title,
         byline,
         published,
         site_name: meta_prop(&html, "og:site_name"),
+        favicon,
         lang: html.root_element().value().attr("lang").map(str::to_owned),
         blocks: Vec::new(),
     };
@@ -380,6 +382,7 @@ fn extract_traced(
             ("title", title_src, doc.title.clone()),
             ("byline", byline_src, doc.byline.clone()),
             ("published", published_src, doc.published.clone()),
+            ("favicon", favicon_src, doc.favicon.clone()),
         ],
         body_fallback: false,
         body_emitted: None,
@@ -2042,6 +2045,104 @@ fn meta_attr(html: &Html, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The page's favicon URL, and which source named it.
+///
+/// Prefers a `<link rel=icon>` (and the apple-touch variants) over the well-known
+/// `/favicon.ico` fallback. SVG is skipped when a raster alternative exists: this crate
+/// deliberately does not decode SVG. `data:` hrefs are skipped the same way image `src` is.
+fn favicon_of(html: &Html, base: &Url) -> (Option<String>, &'static str) {
+    let Ok(sel) = Selector::parse("link[rel][href]") else {
+        return (None, "none");
+    };
+    let mut best: Option<(i32, u32, String)> = None;
+    for el in html.select(&sel) {
+        let rel = el.value().attr("rel").unwrap_or("");
+        if !is_icon_rel(rel) {
+            continue;
+        }
+        let href = el.value().attr("href").unwrap_or("");
+        if href.is_empty() || href.starts_with("data:") {
+            continue;
+        }
+        let Ok(url) = base.join(href) else {
+            continue;
+        };
+        let typ = el.value().attr("type");
+        let sizes = el.value().attr("sizes");
+        let rank = icon_rank(url.as_str(), typ, sizes);
+        // SVG ranks at 0: keep it only when nothing better turned up.
+        if rank.0 == 0 && best.as_ref().is_some_and(|(r, ..)| *r > 0) {
+            continue;
+        }
+        match &best {
+            Some((r, s, _)) if (*r, *s) >= rank => {}
+            _ => best = Some((rank.0, rank.1, url.to_string())),
+        }
+    }
+    if let Some((rank, _, url)) = best
+        && rank > 0
+    {
+        return (Some(url), "<link rel=icon>");
+    }
+    // Well-known fallback. Browsers request this when markup is silent; so do we.
+    // An SVG-only `<link>` loses to the fallback: this crate does not decode SVG.
+    match base.join("/favicon.ico") {
+        Ok(u) => (Some(u.to_string()), "/favicon.ico"),
+        Err(_) => (None, "none"),
+    }
+}
+
+fn is_icon_rel(rel: &str) -> bool {
+    rel.split_whitespace().any(|t| {
+        let t = t.to_ascii_lowercase();
+        matches!(
+            t.as_str(),
+            "icon" | "apple-touch-icon" | "apple-touch-icon-precomposed"
+        )
+    })
+}
+
+/// `(format_rank, size_px)`. Higher wins. SVG is 0 so a raster link always beats it.
+fn icon_rank(href: &str, typ: Option<&str>, sizes: Option<&str>) -> (i32, u32) {
+    let path = href.split('?').next().unwrap_or(href).to_ascii_lowercase();
+    let typ = typ.map(|t| t.to_ascii_lowercase()).unwrap_or_default();
+    let format = if typ.contains("svg") || path.ends_with(".svg") {
+        0
+    } else if typ.contains("png") || path.ends_with(".png") {
+        4
+    } else if typ.contains("icon") || path.ends_with(".ico") {
+        3
+    } else if typ.contains("jpeg")
+        || typ.contains("jpg")
+        || path.ends_with(".jpg")
+        || path.ends_with(".jpeg")
+        || typ.contains("webp")
+        || path.ends_with(".webp")
+        || typ.contains("gif")
+        || path.ends_with(".gif")
+    {
+        2
+    } else {
+        1
+    };
+    let size = sizes
+        .map(|s| {
+            s.split_whitespace()
+                .filter_map(|tok| {
+                    let tok = tok.to_ascii_lowercase();
+                    if tok == "any" {
+                        return None;
+                    }
+                    let (w, h) = tok.split_once('x')?;
+                    Some(w.parse::<u32>().ok()?.max(h.parse().ok()?))
+                })
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    (format, size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2074,6 +2175,44 @@ mod tests {
             }
             b => panic!("expected code, got {b:?}"),
         }
+        // No <link rel=icon>: the well-known path, resolved against the page URL.
+        assert_eq!(
+            d.favicon.as_deref(),
+            Some("https://example.test/favicon.ico")
+        );
+    }
+
+    #[test]
+    fn a_link_rel_icon_beats_the_well_known_fallback() {
+        let d = doc(r#"<html><head>
+              <link rel="icon" href="/static/mark.png" sizes="32x32">
+              <link rel="apple-touch-icon" href="/static/touch.png" sizes="180x180">
+            </head><body><article><p>Enough prose that this page has a body worth extracting as an article page for the favicon test.</p></article></body></html>"#);
+        // Larger PNG wins over the smaller one; both beat /favicon.ico.
+        assert_eq!(
+            d.favicon.as_deref(),
+            Some("https://example.test/static/touch.png")
+        );
+    }
+
+    #[test]
+    fn a_raster_icon_beats_an_svg_one() {
+        let d = doc(r#"<html><head>
+              <link rel="icon" href="/mark.svg" type="image/svg+xml">
+              <link rel="icon" href="/mark.ico">
+            </head><body><article><p>Enough prose that this page has a body worth extracting as an article page for the favicon test.</p></article></body></html>"#);
+        assert_eq!(d.favicon.as_deref(), Some("https://example.test/mark.ico"));
+    }
+
+    #[test]
+    fn an_svg_only_icon_falls_back_to_favicon_ico() {
+        let d = doc(r#"<html><head>
+              <link rel="icon" href="/mark.svg" type="image/svg+xml" sizes="any">
+            </head><body><article><p>Enough prose that this page has a body worth extracting as an article page for the favicon test.</p></article></body></html>"#);
+        assert_eq!(
+            d.favicon.as_deref(),
+            Some("https://example.test/favicon.ico")
+        );
     }
 
     #[test]

@@ -15,10 +15,9 @@
 //!
 //! # What is not here
 //!
-//! Truncation and a dead rewrite rule were in the same dim line and are now bands, because
-//! neither is accounting: one says the article stops early with nothing on screen to say so,
-//! the other says the article may not be the one that was asked for. See
-//! [`notice::about_page`](crate::reader::notice::about_page).
+//! Truncation, a dead rewrite rule, a thin extraction, and RTL text are bars, because none of
+//! them is accounting. The bar is the alarm; this module is the record, including after a bar
+//! is closed. See [`notice::about_page`](crate::reader::notice::about_page).
 
 use crate::fetch::Truncation;
 use crate::session::Provenance;
@@ -35,14 +34,40 @@ use url::Url;
 /// a font size outside `theme.rs`. Colour and position carry the distinction instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
+    /// Which heading the row sits under. Rows are emitted grouped, so the panel draws a
+    /// heading when the group changes and never sorts.
+    pub group: Group,
     pub label: &'static str,
     pub value: String,
     pub note: Option<String>,
 }
 
+/// The four questions the panel answers, in the order a reader asks them: where am I, how did
+/// the request get here, what came back, and who else was contacted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    Address,
+    Route,
+    Response,
+    ThirdParties,
+}
+
+impl Group {
+    /// The heading, as drawn: a letter-spaced chrome label.
+    pub fn title(self) -> &'static str {
+        match self {
+            Group::Address => "Address",
+            Group::Route => "Route",
+            Group::Response => "Response",
+            Group::ThirdParties => "Third parties",
+        }
+    }
+}
+
 impl Row {
-    fn new(label: &'static str, value: impl Into<String>) -> Self {
+    fn new(group: Group, label: &'static str, value: impl Into<String>) -> Self {
         Self {
+            group,
             label,
             value: value.into(),
             note: None,
@@ -71,18 +96,22 @@ pub struct Counts {
 }
 
 /// Everything worth saying about how this page arrived, in reading order.
-pub fn rows(prov: &Provenance, counts: &Counts) -> Vec<Row> {
-    let mut out = vec![Row::new("Address", prov.final_url.as_str())];
+///
+/// `rtl` is the document's, not the provenance's: epaint has no bidi, so a Hebrew or Arabic
+/// page is a fact about what was extracted, and it has to survive the caution being closed.
+pub fn rows(prov: &Provenance, counts: &Counts, rtl: bool) -> Vec<Row> {
+    use Group::*;
+    let mut out = vec![Row::new(Address, "Address", prov.final_url.as_str())];
 
     // Only when they differ, which is a rewrite or a redirect. On the great majority of pages
     // this row would just repeat the one above it.
     if prov.requested != prov.final_url {
-        out.push(Row::new("Requested", prov.requested.as_str()));
+        out.push(Row::new(Address, "Requested", prov.requested.as_str()));
     }
     if let Some(to) = &prov.rewritten_to {
         let host = to.host_str().unwrap_or(to.as_str());
         out.push(
-            Row::new("Rewrite rule", format!("sent to {host}"))
+            Row::new(Route, "Rewrite rule", format!("sent to {host}"))
                 .with_note("Compiled in, never fetched. hww ships no updatable rule list."),
         );
     }
@@ -93,7 +122,12 @@ pub fn rows(prov: &Provenance, counts: &Counts) -> Vec<Row> {
             .map(|f| format!("{} {}", f.field, f.outcome))
             .collect();
         out.push(
-            Row::new("Site profile", format!("{}: {}", r.host, what.join(", "))).with_note(
+            Row::new(
+                Route,
+                "Site profile",
+                format!("{}: {}", r.host, what.join(", ")),
+            )
+            .with_note(
                 "Compiled in, never fetched. A field that matched nothing is listed, so a \
                  stale profile is visible here rather than silently doing nothing.",
             ),
@@ -101,7 +135,7 @@ pub fn rows(prov: &Provenance, counts: &Counts) -> Vec<Row> {
     }
     if !prov.hops.is_empty() {
         out.push(
-            Row::new("Redirects", plural(prov.hops.len(), "hop")).with_note(
+            Row::new(Route, "Redirects", plural(prov.hops.len(), "hop")).with_note(
                 prov.hops
                     .iter()
                     .map(Url::as_str)
@@ -111,25 +145,44 @@ pub fn rows(prov: &Provenance, counts: &Counts) -> Vec<Row> {
         );
     }
 
-    out.push(Row::new("Server answered", prov.status.to_string()));
-    out.push(Row::new("Text encoding", prov.encoding));
-    out.push(Row::new("Downloaded", human_bytes(prov.bytes)));
     out.push(Row::new(
+        Response,
+        "Server answered",
+        prov.status.to_string(),
+    ));
+    out.push(Row::new(Response, "Text encoding", prov.encoding));
+    out.push(Row::new(Response, "Downloaded", human_bytes(prov.bytes)));
+    let mut article = Row::new(
+        Response,
         "Article text",
         format!("{} characters", group_digits(prov.chars)),
-    ));
+    );
+    // Same event as the thin-extraction bar. The count alone is easy to miss; the note is
+    // the record after the bar is closed.
+    if prov.chars < crate::ir::THIN_TEXT {
+        article = article.with_note(
+            "Below the extraction floor. This page may need JavaScript to show its content.",
+        );
+    }
+    out.push(article);
 
-    // Deliberately the same event as the truncation band. The band is the alarm and is seen
+    // Deliberately the same event as the truncation bar. The bar is the alarm and is seen
     // without asking; this is the record, and a record with a hole where the interesting case
     // goes is worse than a line that appears twice.
     if let Some(v) = truncation_value(prov.truncation) {
-        out.push(Row::new("Transfer", v));
+        out.push(Row::new(Response, "Transfer", v));
+    }
+    if rtl {
+        out.push(Row::new(Response, "Layout", "right-to-left").with_note(
+            "epaint has no bidi, so a Hebrew or Arabic run is drawn in the wrong order, \
+                 or as missing glyphs.",
+        ));
     }
 
     let cookies = prov.cookie_attempts + counts.cookie_attempts;
     if cookies > 0 {
         out.push(
-            Row::new("Cookies discarded", group_digits(cookies)).with_note(
+            Row::new(ThirdParties, "Cookies discarded", group_digits(cookies)).with_note(
                 "hww is built with no cookie store at all, so these were counted and dropped. \
                  The capability is absent, not merely unused.",
             ),
@@ -138,6 +191,7 @@ pub fn rows(prov: &Provenance, counts: &Counts) -> Vec<Row> {
     if counts.images > 0 {
         out.push(
             Row::new(
+                ThirdParties,
                 "Images loaded",
                 format!(
                     "{}, from {} (this session)",
@@ -151,6 +205,7 @@ pub fn rows(prov: &Provenance, counts: &Counts) -> Vec<Row> {
     if counts.referer_requests > 0 {
         out.push(
             Row::new(
+                ThirdParties,
                 "Referer sent",
                 format!(
                     "{} (this session)",
@@ -236,7 +291,7 @@ mod tests {
     /// The rows a page always has, so the panel is never empty on a page that loaded.
     #[test]
     fn a_clean_page_still_reports_how_it_arrived() {
-        let rows = rows(&prov(), &Counts::default());
+        let rows = rows(&prov(), &Counts::default(), false);
         for label in [
             "Address",
             "Server answered",
@@ -253,6 +308,7 @@ mod tests {
             "Site profile",
             "Redirects",
             "Transfer",
+            "Layout",
             "Images loaded",
             "Referer sent",
         ] {
@@ -264,11 +320,11 @@ mod tests {
     /// request did not end where it started.
     #[test]
     fn requested_appears_only_when_it_differs_from_the_address() {
-        assert!(find(&rows(&prov(), &Counts::default()), "Requested").is_none());
+        assert!(find(&rows(&prov(), &Counts::default(), false), "Requested").is_none());
 
         let mut p = prov();
         p.final_url = Url::parse("https://example.com/b").unwrap();
-        let rows = rows(&p, &Counts::default());
+        let rows = rows(&p, &Counts::default(), false);
         assert_eq!(
             find(&rows, "Requested").unwrap().value,
             "https://example.com/a"
@@ -285,7 +341,7 @@ mod tests {
             cookie_attempts: 0,
             referer_requests: 2,
         };
-        let rows = rows(&prov(), &counts);
+        let rows = rows(&prov(), &counts, false);
         let images = find(&rows, "Images loaded").unwrap();
         assert!(images.value.contains("this session"));
         assert!(images.value.contains("2 hosts"));
@@ -310,12 +366,14 @@ mod tests {
             ..Counts::default()
         };
         assert_eq!(
-            find(&rows(&p, &counts), "Cookies discarded").unwrap().value,
+            find(&rows(&p, &counts, false), "Cookies discarded")
+                .unwrap()
+                .value,
             "5"
         );
 
         p.cookie_attempts = 0;
-        assert!(find(&rows(&p, &Counts::default()), "Cookies discarded").is_none());
+        assert!(find(&rows(&p, &Counts::default(), false), "Cookies discarded").is_none());
     }
 
     /// Every way a body can arrive short gets a value, and a whole one gets no row.
@@ -330,7 +388,7 @@ mod tests {
         ] {
             let mut p = prov();
             p.truncation = t;
-            let rows = rows(&p, &Counts::default());
+            let rows = rows(&p, &Counts::default(), false);
             assert!(find(&rows, "Transfer").is_some(), "{t:?} produced no row");
         }
     }
@@ -350,12 +408,47 @@ mod tests {
             cookie_attempts: 1,
             referer_requests: 1,
         };
-        for row in rows(&p, &counts) {
+        for row in rows(&p, &counts, false) {
             assert!(!row.value.contains('→'), "arrow in {:?}", row.value);
             assert!(!row.label.contains('→'));
             if let Some(n) = &row.note {
                 assert!(!n.contains('→'), "arrow in {n:?}");
             }
+        }
+    }
+
+    /// Rows come out grouped and the groups come out in reading order, so the panel can draw a
+    /// heading on every change of group without sorting: a sort would reorder the rows inside
+    /// a group, and "Address" before "Requested" is an order that means something.
+    #[test]
+    fn rows_are_grouped_in_reading_order() {
+        let mut p = prov();
+        p.rewritten_to = Some(Url::parse("https://alt.example.net/a").unwrap());
+        p.final_url = Url::parse("https://www.example.org/a").unwrap();
+        p.hops = vec![Url::parse("https://hop.example/1").unwrap()];
+        p.cookie_attempts = 1;
+        let counts = Counts {
+            images: 1,
+            hosts: vec!["cdn.example.net".to_owned()],
+            cookie_attempts: 0,
+            referer_requests: 1,
+        };
+        let rows = rows(&p, &counts, false);
+        let order = [
+            Group::Address,
+            Group::Route,
+            Group::Response,
+            Group::ThirdParties,
+        ];
+        let mut last = 0usize;
+        for r in &rows {
+            let at = order.iter().position(|g| *g == r.group).unwrap();
+            assert!(at >= last, "{} is out of group order", r.label);
+            last = at;
+        }
+        for g in order {
+            assert!(rows.iter().any(|r| r.group == g), "{g:?} is empty here");
+            assert!(!g.title().is_empty());
         }
     }
 
@@ -404,7 +497,7 @@ mod tests {
                 },
             ],
         });
-        let rows = rows(&p, &Counts::default());
+        let rows = rows(&p, &Counts::default(), false);
         let row = find(&rows, "Site profile").expect("a row");
         assert_eq!(
             row.value,
@@ -415,5 +508,38 @@ mod tests {
                 .as_deref()
                 .is_some_and(|n| n.contains("Compiled in"))
         );
+    }
+
+    /// The thin-extraction bar's quiet half: the character count is always there, and below
+    /// the floor it carries the same diagnosis the bar does, so closing the bar loses nothing.
+    #[test]
+    fn a_thin_page_notes_the_extraction_floor_on_article_text() {
+        let mut p = prov();
+        p.chars = crate::ir::THIN_TEXT - 1;
+        let rows_thin = rows(&p, &Counts::default(), false);
+        let thin = find(&rows_thin, "Article text").unwrap();
+        assert!(
+            thin.note
+                .as_deref()
+                .is_some_and(|n| n.contains("JavaScript")),
+            "{thin:?}"
+        );
+        p.chars = crate::ir::THIN_TEXT;
+        assert!(
+            find(&rows(&p, &Counts::default(), false), "Article text")
+                .unwrap()
+                .note
+                .is_none()
+        );
+    }
+
+    /// The RTL caution's quiet half: a row, so dismissing the bar is not how the fact dies.
+    #[test]
+    fn an_rtl_page_reports_its_layout() {
+        assert!(find(&rows(&prov(), &Counts::default(), false), "Layout").is_none());
+        let rows_rtl = rows(&prov(), &Counts::default(), true);
+        let row = find(&rows_rtl, "Layout").expect("a row");
+        assert_eq!(row.value, "right-to-left");
+        assert!(row.note.as_deref().is_some_and(|n| n.contains("bidi")));
     }
 }

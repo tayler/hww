@@ -5,7 +5,7 @@
 
 use crate::reader::face::Face;
 use crate::reader::notice::Severity;
-use crate::reader::opts::{ReadOpts, Theme};
+use crate::reader::opts::{FontChoice, ReadOpts, Theme};
 use crate::reader::ui::fonts;
 use eframe::egui::{self, Color32, FontFamily, FontId, Stroke};
 
@@ -49,29 +49,54 @@ pub struct Palette {
     /// Was `accent`, which had quietly become five different jobs, one of which was not a
     /// notice at all. See [`notice_ink`].
     pub notice_fg: Color32,
-    /// The ground behind a `Caution` band, and behind nothing else.
+    /// The ground behind a `Caution` bar, and behind nothing else.
     ///
-    /// Was `notice_bg`, shared by all three severities. `Quiet` and `Failure` fill the viewport,
-    /// so they have no page to be a different surface *from*; `Caution` is the one severity with
-    /// prose under it. Held to 1.5:1 from `bg` by `a_caution_band_is_a_different_surface`, and it
-    /// is a real surface rather than a tint because the alternative caps how dark it can go: an
-    /// ink that has to stay legible on it is what sets the ceiling, and colouring the ground
-    /// instead of the words is the only way past that.
+    /// A pale tint now, not a surface: the bar is docked under the top chrome with a painted
+    /// icon, a hairline, and a close control, so the ground is no longer the only thing saying
+    /// "this is a remark", and it can be quiet. Held to 1.1:1 from `bg` by
+    /// `a_caution_bar_is_tinted_and_its_inks_clear_the_floor`, which also asks every ink the bar
+    /// draws (`fg`, `dim`, `notice_fg`) to clear the theme's floor on it. The old 1.5 floor
+    /// existed because the ground carried the whole signal; see `notice_ui`.
     pub caution_bg: Color32,
+    /// The underline under a link in prose: `link` at 65% over the page.
+    ///
+    /// Decoration, like `rule`, so it is not one of the inks `every_palette_meets_its_floor`
+    /// walks; but it is the one non-colour cue that says "this is a link", so
+    /// `the_link_underline_is_visible` holds its blend over `bg` to the 3:1 non-text floor.
+    /// Stored with alpha so one value serves every ground the link can sit on.
+    pub link_underline: Color32,
     /// The current find match. Its own role because find is the reader searching the page,
     /// not the reader reporting on it, and the two must be free to move independently.
     pub find_current_bg: Color32,
-    /// Surfaces that **float over** the page: the page-info panel, the help card, the hover-URL
-    /// strip, and egui's tooltips via `window_fill`.
+    /// Top chrome (URL bar, find bar, notice bars, outline) and surfaces that **float over**
+    /// the page: the page-info panel, the help card, the hover-URL strip, the toast's neighbours,
+    /// and egui's tooltips via `window_fill`. The status strip stays on `bg`.
     ///
-    /// Docked panels do not use it. They take `bg` and one `guide` edge on the side facing the
-    /// page, because a docked panel is separated by position and a floating one is not. In the
-    /// contrast pair this equals `bg` on purpose, which is the platform convention, and it works
-    /// because every floating surface is drawn with a stroke around it.
+    /// In the contrast pair this equals `bg` on purpose, which is the platform convention, and
+    /// it works because every floating surface is drawn with a stroke around it.
     pub chrome_bg: Color32,
     pub selection: Color32,
+    /// The transient status toast: the page's negative. A dark pill on a light page, a lifted
+    /// grey on a dark one, so a word that is on screen for six seconds is found at a glance and
+    /// is unmistakably the reader's. `toast_fg` is held to the theme's floor on it.
+    pub toast_bg: Color32,
+    pub toast_fg: Color32,
     pub dark_mode: bool,
 }
+
+/// The one corner radius, in points. Five: three read as square from a normal distance and
+/// seven turns an 18 pt keycap into a pill. It goes on what sits *on* the page or floats *over*
+/// it (every control, the code ground, the image frame, a chip, a panel) and never on anything
+/// that spans the window (a bar, the strip, a rule, a guide): those are edges, and an edge has
+/// no corner to round. `theme::apply` installs it on every egui widget at once, and the frames
+/// drawn by hand take it by name.
+pub const RADIUS: u8 = 5;
+
+/// `link_underline`'s alpha: 65% of `link` over `bg` blends to 3.3:1 or better on every theme,
+/// which is the non-text floor; Sepia is the tight one, at 3.29. 45% was tried and blends to
+/// 2.2 on Light, which is faint for the one cue that says "this is a link" to an eye that does
+/// not see the blue, and 60% left Sepia at 2.95. Blended the way epaint blends, in gamma space.
+const UNDERLINE_ALPHA: u8 = 166;
 
 pub fn palette(theme: Theme, system_dark: bool) -> Palette {
     match theme {
@@ -93,10 +118,13 @@ pub fn palette(theme: Theme, system_dark: bool) -> Palette {
             rule: Color32::from_rgb(0xD8, 0xD8, 0xD2),
             guide: Color32::from_rgb(0x89, 0x89, 0x82),
             notice_fg: Color32::from_rgb(0x9A, 0x45, 0x0B),
-            caution_bg: Color32::from_rgb(0xDF, 0xB2, 0x71),
+            caution_bg: Color32::from_rgb(0xF4, 0xED, 0xDB),
+            link_underline: Color32::from_rgba_unmultiplied(0x15, 0x4B, 0x9E, UNDERLINE_ALPHA),
             find_current_bg: Color32::from_rgb(0x9A, 0x45, 0x0B),
             chrome_bg: Color32::from_rgb(0xF1, 0xF1, 0xEC),
             selection: Color32::from_rgba_unmultiplied(0x15, 0x4B, 0x9E, 0x40),
+            toast_bg: Color32::from_rgb(0x2B, 0x2D, 0x30),
+            toast_fg: Color32::from_rgb(0xEC, 0xEC, 0xE7),
             dark_mode: false,
         },
         Theme::Sepia => Palette {
@@ -111,10 +139,13 @@ pub fn palette(theme: Theme, system_dark: bool) -> Palette {
             rule: Color32::from_rgb(0xD5, 0xC8, 0xA9),
             guide: Color32::from_rgb(0x88, 0x7D, 0x62),
             notice_fg: Color32::from_rgb(0x8E, 0x3F, 0x12),
-            caution_bg: Color32::from_rgb(0xD6, 0xB2, 0x79),
+            caution_bg: Color32::from_rgb(0xE8, 0xDD, 0xBF),
+            link_underline: Color32::from_rgba_unmultiplied(0x1D, 0x4E, 0x77, UNDERLINE_ALPHA),
             find_current_bg: Color32::from_rgb(0x8E, 0x3F, 0x12),
             chrome_bg: Color32::from_rgb(0xE9, 0xDF, 0xC8),
             selection: Color32::from_rgba_unmultiplied(0x1D, 0x4E, 0x77, 0x40),
+            toast_bg: Color32::from_rgb(0x3A, 0x33, 0x28),
+            toast_fg: Color32::from_rgb(0xEF, 0xE8, 0xD6),
             dark_mode: false,
         },
         Theme::Dark => Palette {
@@ -128,10 +159,13 @@ pub fn palette(theme: Theme, system_dark: bool) -> Palette {
             rule: Color32::from_rgb(0x33, 0x37, 0x3B),
             guide: Color32::from_rgb(0x6A, 0x71, 0x78),
             notice_fg: Color32::from_rgb(0xE0, 0x9B, 0x54),
-            caution_bg: Color32::from_rgb(0x55, 0x3D, 0x24),
+            caution_bg: Color32::from_rgb(0x2A, 0x25, 0x19),
+            link_underline: Color32::from_rgba_unmultiplied(0x7F, 0xB4, 0xF5, UNDERLINE_ALPHA),
             find_current_bg: Color32::from_rgb(0xE0, 0x9B, 0x54),
             chrome_bg: Color32::from_rgb(0x1E, 0x21, 0x23),
             selection: Color32::from_rgba_unmultiplied(0x7F, 0xB4, 0xF5, 0x40),
+            toast_bg: Color32::from_rgb(0x3B, 0x3F, 0x44),
+            toast_fg: Color32::from_rgb(0xED, 0xEC, 0xE7),
             dark_mode: true,
         },
         // The contrast pair. `chrome_bg` equals `bg` on purpose: that is the platform convention
@@ -148,10 +182,13 @@ pub fn palette(theme: Theme, system_dark: bool) -> Palette {
             rule: Color32::from_rgb(0x55, 0x55, 0x55),
             guide: Color32::from_rgb(0x00, 0x00, 0x00),
             notice_fg: Color32::from_rgb(0x7A, 0x26, 0x00),
-            caution_bg: Color32::from_rgb(0xFF, 0xC2, 0x4D),
+            caution_bg: Color32::from_rgb(0xFF, 0xF0, 0xC2),
+            link_underline: Color32::from_rgba_unmultiplied(0x00, 0x30, 0x8F, UNDERLINE_ALPHA),
             find_current_bg: Color32::from_rgb(0x00, 0x00, 0x00),
             chrome_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
             selection: Color32::from_rgba_unmultiplied(0x00, 0x30, 0x8F, 0x40),
+            toast_bg: Color32::from_rgb(0x00, 0x00, 0x00),
+            toast_fg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
             dark_mode: false,
         },
         Theme::ContrastDark => Palette {
@@ -164,10 +201,13 @@ pub fn palette(theme: Theme, system_dark: bool) -> Palette {
             rule: Color32::from_rgb(0xAB, 0xAB, 0xAB),
             guide: Color32::from_rgb(0xFF, 0xFF, 0xFF),
             notice_fg: Color32::from_rgb(0xFF, 0xB0, 0x00),
-            caution_bg: Color32::from_rgb(0x4A, 0x33, 0x00),
+            caution_bg: Color32::from_rgb(0x1F, 0x1A, 0x00),
+            link_underline: Color32::from_rgba_unmultiplied(0x7F, 0xC0, 0xFF, UNDERLINE_ALPHA),
             find_current_bg: Color32::from_rgb(0xFF, 0xB0, 0x00),
             chrome_bg: Color32::from_rgb(0x00, 0x00, 0x00),
             selection: Color32::from_rgba_unmultiplied(0x7F, 0xC0, 0xFF, 0x40),
+            toast_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+            toast_fg: Color32::from_rgb(0x00, 0x00, 0x00),
             dark_mode: true,
         },
     }
@@ -186,17 +226,43 @@ pub fn body_font(opts: &ReadOpts) -> FontId {
     FontId::new(opts.base_size_pt, body_family(opts))
 }
 
-/// Headings step down from the body size. Level 1 is the article title, so it gets the jump;
-/// levels past 4 stop shrinking, because a heading smaller than its paragraph is not a heading.
+/// The role a heading at `level` is set in.
+///
+/// The title and the first two heading levels take the **serif** when the page is set in sans:
+/// a display face over a text face is the oldest pairing there is, and Plex Serif is already
+/// embedded for the serif reading choice, so it costs nothing. A serif page keeps the serif, and
+/// a mono page keeps mono: a reader who chose one family for the whole page gets the whole page
+/// in it. Levels past 3 follow the body, because by then the heading is a run-in, not a display.
+///
+/// A role rather than a `FontId`, so `inline_ui::Setting` can resolve `Strong` and `Emph`
+/// inside the heading to the matching faces: an `<em>` in a serif heading is serif italic.
+pub fn heading_role(opts: &ReadOpts, level: u8) -> FontChoice {
+    match (opts.family, level) {
+        (FontChoice::Sans, 0..=3) => FontChoice::Serif,
+        (family, _) => family,
+    }
+}
+
+/// Headings step down from the body size. Level 1 is the article title, so it gets the jump,
+/// and it is the one level set in the display role's **bold** face; levels past 4 stop
+/// shrinking, because a heading smaller than its paragraph is not a heading.
 pub fn heading_font(opts: &ReadOpts, level: u8) -> FontId {
     let scale = match level {
-        0 | 1 => 1.65,
+        0 | 1 => 1.9,
         2 => 1.35,
         3 => 1.18,
         4 => 1.07,
         _ => 1.0,
     };
-    FontId::new(opts.base_size_pt * scale, body_family(opts))
+    let face = Face::new(heading_role(opts, level), level <= 1, false);
+    FontId::new(opts.base_size_pt * scale, fonts::family(face))
+}
+
+/// Air above a heading, in points: more than below, so a heading belongs to what follows it.
+/// Below is the ordinary block gap, which `ready_screen`'s placer adds and a skipped block
+/// reproduces; the extra sits *inside* the block, where `measure::Heights` sees it.
+pub fn heading_space_above(opts: &ReadOpts, level: u8) -> f32 {
+    snap(opts.base_size_pt * if level <= 3 { 1.2 } else { 0.6 })
 }
 
 /// Code is 0.92x because a monospace face at the body's optical size reads larger than it is.
@@ -207,7 +273,7 @@ pub fn mono_font(opts: &ReadOpts) -> FontId {
     FontId::new(opts.base_size_pt * CODE_SCALE, FontFamily::Monospace)
 }
 
-/// Chrome: status strip, URL bar, outline, page info, and every word a band says. Fixed
+/// Chrome: status strip, URL bar, outline, page info, and every word a bar says. Fixed
 /// relative to the body so a wide reading size does not turn the strip into a second column of
 /// prose.
 ///
@@ -218,10 +284,31 @@ pub fn mono_font(opts: &ReadOpts) -> FontId {
 ///
 /// It is not free. A monospace advance is wider at the same size, so the status strip truncates
 /// sooner; see `chrome_is_monospace`. And with [`crate::reader::opts::FontChoice::Mono`] the page is in this family
-/// too, which leaves size as the only type signal for that reader; the band's full bleed and
-/// `notice::MARK` are what carry it there.
+/// too, which leaves size as the only type signal for that reader; the bar's dock under the
+/// chrome and the painted icon are what carry it there.
 pub fn chrome_font(opts: &ReadOpts) -> FontId {
     FontId::new((opts.base_size_pt * 0.78).max(11.0), FontFamily::Monospace)
+}
+
+/// A chrome *label*: the site eyebrow over a title, a panel's title, a group heading in the
+/// page-info panel. Uppercase with a little tracking, in the chrome font and colour given, so it
+/// reads as a label rather than as a line of the text it sits over. A `LayoutJob`, because
+/// letter spacing is a `TextFormat` property and `RichText` has none.
+pub fn label_job(text: &str, opts: &ReadOpts, color: Color32) -> egui::text::LayoutJob {
+    let font = chrome_font(opts);
+    let spacing = font.size * 0.08;
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &text.to_uppercase(),
+        0.0,
+        egui::TextFormat {
+            font_id: font,
+            color,
+            extra_letter_spacing: spacing,
+            ..Default::default()
+        },
+    );
+    job
 }
 
 /// `TextStyle::Small`: the chrome size in the **page's** family.
@@ -289,77 +376,77 @@ pub struct NoticeInk {
     pub fill: Color32,
     pub heading: Color32,
     pub body: Color32,
-    /// `notice::MARK`, the severity word, and every `detail` line.
-    ///
-    /// Its own role because `dim` measures 3.10 on Light's `caution_bg` and cannot be used
-    /// there. On the two severities that keep `bg` it still resolves to `dim`.
+    /// Every `detail` line: the URL under a failure, the address a dead rule was asked for.
     pub aside: Color32,
+    /// The painted severity icon: the triangle, the circled `i`, the crossed circle. A graphical
+    /// object, so it is held to 3:1 on `fill` rather than to the text floor.
+    pub icon: Color32,
 }
 
-/// Only `Caution` gets a ground of its own.
+/// How each severity is painted, in the dress browsers already taught everyone.
 ///
-/// The old rule was that every severity shares one fill, argued from a band being unmistakable
-/// because it is full-bleed. That argument is why this changed: `Severity::fills_the_viewport`
-/// is true for `Quiet` and `Failure`, so those two are already as full-bleed as it gets and have
-/// no page under them to be a different surface *from*. `Caution` is the only severity with
-/// prose underneath.
+/// A `Quiet` remark is an information bar: the top chrome's own ground, a dim icon. A
+/// `Caution` is the same bar on a pale tint, with the icon in the notice colour; the tint is a
+/// cue, not the signal, which is why it can be as quiet as it is (see `Palette::caution_bg`). A
+/// `Failure` is an error page on the page ground: a muted glyph in `guide`, the heading in the
+/// notice colour, and the explanation in `fg`, because it is prose meant to be read.
 ///
-/// A second constraint forces the same answer. How dark a fill can go is capped by whatever has
-/// to stay legible on it, and on the old shared ground that was `dim` at 1.32:1 from the page,
-/// or `notice_fg` at 1.42:1. Colouring the ground instead of the words is the only way past
-/// that ceiling, and it is only affordable once one severity owns the ground.
-///
-/// Dropping the fill on the other two raises every ink on them, because they now land on `bg`:
-/// heading to 6.38 / 6.21 / 7.62, body to 16.94 / 10.87 / 11.68, aside to 5.95 / 5.54 / 6.26.
-/// The worst pair in the audit stops existing rather than being corrected.
-///
-/// There was a fourth field here, a `guide` hairline on the edges of a band with no ground. It
-/// was built and removed, because it can never fire where it would mean anything: the only
-/// severities without a ground are the two that claim the viewport, so the top edge lands
-/// exactly on the bottom edge the URL or find bar already drew, or, with no bar open, on row
-/// zero of the window, where it renders half clipped and reads as a stray window border. Every
-/// palette was photographed to check. A band that fills the viewport has no page beside it to
-/// be told apart from, which is the same argument that took the fill away.
+/// What the old band did with colour it did because colour was nearly all it had. Every ink
+/// here still clears the theme's floor on its own fill, which
+/// `every_notice_ink_is_legible_on_its_own_ground` walks.
 pub fn notice_ink(pal: &Palette, severity: Severity) -> NoticeInk {
     match severity {
         Severity::Quiet => NoticeInk {
-            fill: pal.bg,
-            heading: pal.dim,
-            body: pal.dim,
+            fill: pal.chrome_bg,
+            heading: pal.fg,
+            body: pal.fg,
             aside: pal.dim,
+            icon: pal.dim,
         },
         Severity::Caution => NoticeInk {
             fill: pal.caution_bg,
             heading: pal.fg,
             body: pal.fg,
-            aside: pal.fg,
+            aside: pal.dim,
+            icon: pal.notice_fg,
         },
-        // A failure's body is prose meant to be read, so it is set in `fg`; only the heading
-        // carries the notice colour. That is what `error_screen` already did.
         Severity::Failure => NoticeInk {
             fill: pal.bg,
             heading: pal.notice_fg,
             body: pal.fg,
             aside: pal.dim,
+            icon: pal.guide,
         },
     }
 }
 
-/// A failure heading.
+/// The error page's heading.
 ///
-/// Deliberately **not** [`heading_font`]: hww never borrows the page's type scale, because a
-/// heading set exactly like an article's `<h2>` is the thing this whole column exists to stop.
-/// It is not a guarantee of a distinct size, because `chrome_font`'s 11 pt floor breaks the
-/// proportion at small reading sizes; size is a supporting signal and the full-bleed band is
-/// the load-bearing one.
+/// The one line of the reader's own that is not monospace, and deliberately: an error page is
+/// the convention every browser shares (a short heading in the UI face, a paragraph, the code,
+/// Reload), and a reader meets it on the worst day a page can have. It is set in the **sans
+/// bold** at 1.4x body whatever the page's family, so it is never the page's own `<h2>`: the
+/// page is serif-headed or mono-headed by `heading_role`, and sans bold at this size belongs to
+/// nothing an article can contain.
 pub fn notice_heading_font(opts: &ReadOpts) -> FontId {
-    FontId::new(chrome_font(opts).size * 1.45, FontFamily::Monospace)
+    FontId::new(
+        snap(opts.base_size_pt * 1.4),
+        fonts::family(Face::new(FontChoice::Sans, true, false)),
+    )
 }
 
-/// Vertical padding inside a band, in points. Integer because `egui::Margin` is `i8`, which is
-/// also why the band's horizontal gutter cannot be a margin and is an `add_space` instead.
-pub fn band_pad(opts: &ReadOpts) -> i8 {
-    (opts.base_size_pt * 0.55).round().clamp(6.0, 24.0) as i8
+/// The idle screen's wordmark: the serif bold, large. The one screen where the reader is the
+/// page, so it takes the page's display face rather than the chrome's.
+pub fn wordmark_font(opts: &ReadOpts) -> FontId {
+    FontId::new(
+        snap(opts.base_size_pt * 2.6),
+        fonts::family(Face::new(FontChoice::Serif, true, false)),
+    )
+}
+
+/// Vertical padding inside a notice bar, in points. Integer because `egui::Margin` is `i8`.
+pub fn bar_pad(opts: &ReadOpts) -> i8 {
+    (opts.base_size_pt * 0.5).round().clamp(6.0, 24.0) as i8
 }
 
 /// Install the palette and metrics. Called every frame; cheap, and it means a theme or
@@ -409,16 +496,20 @@ pub fn apply(ctx: &egui::Context, opts: &ReadOpts) -> Palette {
     // the near-invisible edge that made any change to it look like feedback.
     visuals.widgets.hovered.weak_bg_fill = pal.code_bg;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, pal.fg);
-    // Square. The reader draws no rounded box anywhere else, and a rounded `TextEdit` in a panel
-    // with no fill behind it is the one shape that still looks like somebody else's widget.
+    // One radius on every control (see `RADIUS`): the URL and find fields, every button, the
+    // help card's keycaps. A frame the reader draws by hand takes the same constant by name, and
+    // the things that span the window (bars, the strip, rules) are not widgets and stay square.
     for w in [
         &mut visuals.widgets.noninteractive,
         &mut visuals.widgets.inactive,
         &mut visuals.widgets.hovered,
         &mut visuals.widgets.active,
     ] {
-        w.corner_radius = egui::CornerRadius::ZERO;
+        w.corner_radius = egui::CornerRadius::same(RADIUS);
     }
+    // The floating surfaces egui dresses itself: tooltips and the link context menu.
+    visuals.window_corner_radius = egui::CornerRadius::same(RADIUS);
+    visuals.menu_corner_radius = egui::CornerRadius::same(RADIUS);
     // The reader draws its own focus affordance on links; egui's default is a thick blue box
     // that fights the text.
     visuals.widgets.active.bg_stroke = Stroke::new(1.0, pal.link);
@@ -524,6 +615,44 @@ mod tests {
             // The current find match inverts: the page ground becomes the ink.
             let c = contrast(p.bg, p.find_current_bg);
             assert!(c >= floor, "{theme:?}: bg on find_current_bg is {c:.2}");
+            // So does the toast, and its ink is its own role.
+            let c = contrast(p.toast_fg, p.toast_bg);
+            assert!(c >= floor, "{theme:?}: toast_fg on toast_bg is {c:.2}");
+            // And it is a different surface from the page it floats over: the old band's 1.5,
+            // which is the line below which a fill reads as a tint of the page rather than as
+            // a thing laid on it. Dark's lift is the closest, at 1.72.
+            let c = contrast(p.toast_bg, p.bg);
+            assert!(c >= 1.5, "{theme:?}: toast_bg is {c:.2} from bg");
+        }
+    }
+
+    /// `link_underline` over `bg`, composited, clears the 3:1 non-text floor.
+    ///
+    /// The underline is decoration in the sense that the word above it carries the text
+    /// contrast, but it is the one cue that says "link" to an eye that does not see the hue,
+    /// and WCAG 1.4.11 holds a graphical object that conveys information to 3:1. At 45% alpha
+    /// it blended to 2.2 on Light and at 60% Sepia sat at 2.95; this is why the constant is 65%.
+    /// Blended in gamma space, because that is how epaint composites a translucent stroke.
+    #[test]
+    fn the_link_underline_is_visible() {
+        for theme in Theme::REAL {
+            let p = palette(theme, false);
+            // `Color32` stores premultiplied components; the blend wants the straight ones.
+            let [r, g, b, a] = p.link_underline.to_srgba_unmultiplied();
+            let ground = p.bg;
+            let a = f32::from(a) / 255.0;
+            let blend = |o: u8, g: u8| {
+                (f32::from(o) * a + f32::from(g) * (1.0 - a))
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            let blended = Color32::from_rgb(
+                blend(r, ground.r()),
+                blend(g, ground.g()),
+                blend(b, ground.b()),
+            );
+            let c = contrast(blended, p.bg);
+            assert!(c >= 3.0, "{theme:?}: the underline blends to {c:.2} on bg");
         }
     }
 
@@ -551,21 +680,33 @@ mod tests {
                         "{theme:?}/{sev:?}: {name} is {m:.2}, floor {floor}"
                     );
                 }
+                // The icon is a shape, not text: the non-text floor.
+                let m = contrast(ink.icon, ink.fill);
+                assert!(m >= 3.0, "{theme:?}/{sev:?}: icon is {m:.2}");
             }
         }
     }
 
-    /// A caution has a page under it, so its ground has to read as a different surface.
+    /// A caution bar is tinted, and every ink it draws clears the floor on the tint.
     ///
-    /// Not a WCAG rule, a project one. Below about 1.5 a strip reads as a tint of the page
-    /// rather than as something laid over it, which is the failure the old distance test was
-    /// meant to catch and did not.
+    /// The floor on the tint itself is 1.1, not the 1.5 the old band held, and the difference
+    /// is what the bar has that the band did not: a dock under the chrome, a painted icon, a
+    /// hairline, and a close. The ground used to be the whole signal, so it had to read as a
+    /// separate surface; now it is one of five, and it can be a tint. What must not drift is
+    /// the ink on it: `dim` measured 3.10 on the old Light ground, which is why `aside` had to
+    /// be `fg` there, and a tint that fails `dim` would send that back. The icon is a graphical
+    /// object, so it is held to 3:1 rather than to the text floor.
     #[test]
-    fn a_caution_band_is_a_different_surface() {
+    fn a_caution_bar_is_tinted_and_its_inks_clear_the_floor() {
         for theme in Theme::REAL {
             let p = palette(theme, false);
-            let c = contrast(p.caution_bg, p.bg);
-            assert!(c >= 1.5, "{theme:?}: caution_bg is {c:.2} from bg");
+            let floor = theme.floor();
+            let tint = contrast(p.caution_bg, p.bg);
+            assert!(tint >= 1.1, "{theme:?}: caution_bg is {tint:.2} from bg");
+            for (name, ink) in [("fg", p.fg), ("dim", p.dim), ("notice_fg", p.notice_fg)] {
+                let c = contrast(ink, p.caution_bg);
+                assert!(c >= floor, "{theme:?}: {name} on caution_bg is {c:.2}");
+            }
         }
     }
 
@@ -596,21 +737,57 @@ mod tests {
     /// Reachable for the same reason [`palette`] is: [`chrome_font`] and [`small_font`] take
     /// only a `&ReadOpts`, never a `Context`.
     ///
-    /// This used to be tied to `notice::no_notice_contains_an_arrow`, because the four faces
-    /// epaint embedded put arrows in `Monospace` and nowhere else. That is no longer the shape
-    /// of the problem: every shipped face carries the arrows, so the chrome is monospace for the
-    /// reason stated on [`chrome_font`] and for no other.
+    /// The error page's heading is the one named exception (see [`notice_heading_font`]): it is
+    /// the sans bold, and it must not be the family the page's headings are set in, which is
+    /// what the second assertion pins for the sans reader, where `heading_role` hands the page
+    /// the serif.
     #[test]
     fn chrome_is_monospace() {
         let mut opts = ReadOpts::default();
         for family in [FontChoice::Sans, FontChoice::Serif, FontChoice::Mono] {
             opts.family = family;
             assert_eq!(chrome_font(&opts).family, FontFamily::Monospace);
-            assert_eq!(notice_heading_font(&opts).family, FontFamily::Monospace);
             // `Small` follows the page, or the byline and the code chip go monospace with it.
             assert_eq!(small_font(&opts).family, body_font(&opts).family);
             assert_eq!(small_font(&opts).size, chrome_font(&opts).size);
         }
+        opts.family = FontChoice::Sans;
+        assert_ne!(
+            notice_heading_font(&opts).family,
+            heading_font(&opts, 2).family,
+            "the error page's heading must not be the page's"
+        );
+    }
+
+    /// A sans page is serif-headed; a serif or mono page keeps its own family throughout, and
+    /// the title is the display role's bold. Decidable without a `Context` for the same reason
+    /// as the test above.
+    #[test]
+    fn headings_take_the_display_role_only_over_a_sans_page() {
+        let mut opts = ReadOpts {
+            family: FontChoice::Sans,
+            ..ReadOpts::default()
+        };
+        for level in 1..=3 {
+            assert_eq!(heading_role(&opts, level), FontChoice::Serif);
+        }
+        assert_eq!(heading_role(&opts, 4), FontChoice::Sans);
+        for family in [FontChoice::Serif, FontChoice::Mono] {
+            opts.family = family;
+            for level in 1..=5 {
+                assert_eq!(heading_role(&opts, level), family, "{family:?} h{level}");
+            }
+        }
+        opts.family = FontChoice::Sans;
+        assert_eq!(
+            heading_font(&opts, 1).family,
+            fonts::family(Face::new(FontChoice::Serif, true, false))
+        );
+        assert_eq!(
+            heading_font(&opts, 2).family,
+            fonts::family(Face::new(FontChoice::Serif, false, false))
+        );
+        assert!(heading_space_above(&opts, 2) > heading_space_above(&opts, 5));
     }
 
     /// `Theme::System` is a redirect, not a palette. If it ever grew colours of its own they

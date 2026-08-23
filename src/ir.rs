@@ -17,6 +17,10 @@ pub struct Document {
     pub byline: Option<String>,
     pub published: Option<String>,
     pub site_name: Option<String>,
+    /// Absolute URL of the page's favicon, when the markup named one or the well-known
+    /// `/favicon.ico` fallback applies. A URL, not pixels: fetching and decoding are the
+    /// reader's job, and the CLI never does either.
+    pub favicon: Option<String>,
     pub lang: Option<String>,
     pub blocks: Vec<Block>,
 }

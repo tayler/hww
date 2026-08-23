@@ -99,7 +99,7 @@ impl std::fmt::Display for Outcome {
 
 impl std::fmt::Display for ProfileReport {
     /// `[profile example.com: strip matched 2]`. The bracket convention of the rewrite notice
-    /// and `notice::MARK`; ASCII only.
+    /// and the inline `[image]` / `[loading]` marks; ASCII only.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[profile {}:", self.host)?;
         for (i, fr) in self.fields.iter().enumerate() {

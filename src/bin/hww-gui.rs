@@ -1,8 +1,8 @@
 //! The reading GUI. A thin main: argv in, `reader::ui::run` out.
 //!
 //! Everything this binary can do that `hww` cannot is behind the `gui` feature, so the CLI
-//! keeps compile-time absence of the reader's one added network capability: loading an image
-//! subresource on an explicit click.
+//! keeps compile-time absence of the image subresource path (article pictures on click, and
+//! the page favicon).
 
 use hww::reader::{settings, ui};
 

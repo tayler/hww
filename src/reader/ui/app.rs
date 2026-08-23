@@ -20,10 +20,10 @@
 //! line crowded the URL, and with `wrap_mode = Truncate` on a narrow window the tail was not
 //! drawn at all, which is a poor way to report anything. They are labelled rows in the
 //! page-info panel now (`p`, or the circled `i`, `reader::ui::pageinfo_ui`). The two that could
-//! not wait for a click went the other way and became bands: a truncated body and a rewrite
-//! rule that landed on the wrong host both change how the page in front of the reader should be
-//! read. The dead rule in particular used to be a twelve-second `flash` here, which is to say
-//! it was unrecoverable by anyone who looked away.
+//! not wait for a click went the other way and became infobars under the top chrome: a truncated
+//! body and a rewrite rule that landed on the wrong host both change how the page in front of
+//! the reader should be read. The dead rule in particular used to be a twelve-second `flash`
+//! here, which is to say it was unrecoverable by anyone who looked away.
 //!
 //! # Zoom is egui's, not ours
 //!
@@ -92,14 +92,14 @@ enum Page {
         /// navigation stop being a screen change.
         ///
         /// A click used to blank the reading column on the frame it happened: `Page::Loading`
-        /// replaced the page, and `notice::loading` is a `Quiet` band, which fills the viewport.
-        /// On a fast host that flashes for two frames and cannot be read; on a slow one it is a
-        /// blank screen, so following a link reads as arriving somewhere empty and then being
-        /// moved again. Keeping the outgoing page is the browser model and the one readers
-        /// already have: the column does not change until a new document commits.
+        /// replaced the page, and `notice::loading` took the viewport. On a fast host that
+        /// flashes for two frames and cannot be read; on a slow one it is a blank screen, so
+        /// following a link reads as arriving somewhere empty and then being moved again.
+        /// Keeping the outgoing page is the browser model and the one readers already have: the
+        /// column does not change until a new document commits.
         ///
         /// `None` when there is genuinely nothing to keep: the session's first navigation, or a
-        /// retry from a failure. Only then is the loading band drawn.
+        /// retry from a failure. Only then is the loading line drawn.
         from: Option<Box<Ready>>,
         /// Whether this navigation added the history entry now at the cursor.
         ///
@@ -182,8 +182,10 @@ struct Ready {
     /// so an image placeholder can be clicked on a page that is already being replaced. Stamping
     /// the job with `current` would hand that reply to whatever committed next, and if the two
     /// pages share an image `src`, which a logo, a sprite, or a CDN path routinely does on the
-    /// same site, the new page would display a picture nobody clicked on it. Nothing is ever auto-loaded is
-    /// the first line of the images charter; this field is what keeps it true.
+    /// same site, the new page would display a picture nobody clicked on it. Article images are
+    /// never auto-loaded; this field is what keeps that true. The masthead favicon is the one
+    /// deliberate exception, and it is stamped with the same id so a late reply cannot land on
+    /// the next page.
     req: ReqId,
 }
 
@@ -194,6 +196,9 @@ struct Chrome {
     find: Option<String>,
     help_open: bool,
     info_open: bool,
+    /// Notice bars closed on the page on screen, by `Notice::key`. Cleared in `commit`, with
+    /// every other per-page reset: a dismissal is about *this* page and no other.
+    dismissed: HashSet<String>,
 }
 
 pub struct ReaderApp {
@@ -205,15 +210,21 @@ pub struct ReaderApp {
     page: Page,
     /// The navigation every reply is matched against. Anything older is stale by definition.
     current: Option<ReqId>,
-    /// Sticky for the life of one navigation, and shown whether it succeeds or hangs.
+    /// Charter point 4: on the strip from before the request goes out until the navigation
+    /// ends, whether it hangs or fails. Cleared in [`Self::settle`]: once a page is up,
+    /// [`notice::rewrite`] is the readable one.
     rewrite_notice: Option<String>,
-    /// Transient, with the instant it was set so it can fade.
+    /// Transient, with the instant it was set so it can fade: the toast (`notice_ui::toast`),
+    /// up for `notice::TOAST_FOR`.
     status: Option<(String, Instant)>,
     /// The link under the pointer right now. Its own slot rather than a status message, or a
     /// moment's hover would bury whatever the reader was actually told.
     hover_href: Option<String>,
     /// Last frame's status-strip height, so the hover overlay can sit on its top edge.
     strip_height: f32,
+    /// This frame's hover-URL overlay height, measured in [`Self::hover_strip`] before the
+    /// toast is drawn, so a wrapping address lifts the pill by what was actually painted.
+    hover_height: f32,
     chrome: Chrome,
     images: ImageStore,
     /// How tall each block was the last time it was laid out, so the blocks off the window can
@@ -305,6 +316,10 @@ pub struct ReaderApp {
     /// that arrives with it is a separate event, and a field focused earlier in the same frame
     /// still reads it.
     focus_find: bool,
+    /// The first block touching the top of the window last frame, which is what the outline
+    /// marks as the current section. Found in `ready_screen`, a frame late like everything the
+    /// render discovers.
+    top_block: Option<usize>,
 }
 
 /// Distance one wheel notch moves, in points.
@@ -357,6 +372,7 @@ impl ReaderApp {
             status: launch.settings_note.map(|n| (n, Instant::now())),
             hover_href: None,
             strip_height: 0.0,
+            hover_height: 0.0,
             chrome: Chrome::default(),
             images: ImageStore::default(),
             heights: Heights::default(),
@@ -385,6 +401,7 @@ impl ReaderApp {
             pending_href: None,
             focus_url_bar: false,
             focus_find: false,
+            top_block: None,
         };
         match launch.start {
             Some(url) => app.navigate(url, app.opts, true),
@@ -533,6 +550,31 @@ impl ReaderApp {
     // ---------------------------------------------------------------- images
 
     fn load_image(&mut self, ctx: &egui::Context, src: &str) {
+        let max_width =
+            (theme::measure_px(ctx, &self.settings.read) * ctx.pixels_per_point()).max(64.0) as u32;
+        self.request_image(src, max_width, true);
+    }
+
+    /// The masthead favicon: same path as an article image, but quiet and small. Kicked from
+    /// [`Self::ensure_favicon`] once a page is on screen; a toast would fire on every
+    /// navigation, and a column-width decode is wasted on a 16-px mark.
+    fn load_favicon(&mut self, src: &str) {
+        self.request_image(src, 64, false);
+    }
+
+    /// Start the favicon fetch for the page on screen, once. Failures stay silent: the eyebrow
+    /// label does not need a retry control for a missing mark.
+    fn ensure_favicon(&mut self) {
+        let Some(src) = self.shown().and_then(|r| r.loaded.doc.favicon.clone()) else {
+            return;
+        };
+        if self.images.state(&src).is_some() {
+            return;
+        }
+        self.load_favicon(&src);
+    }
+
+    fn request_image(&mut self, src: &str, max_width: u32, announce: bool) {
         // The visible page, and *its* request id rather than `self.current`: see `Ready::req`.
         let Some(ready) = self.shown() else {
             return;
@@ -554,8 +596,6 @@ impl ReaderApp {
         }
         // Decode straight to the reading column: without this, "load images" on a photo-heavy
         // page is a GPU-memory denial of service driven by untrusted input.
-        let max_width =
-            (theme::measure_px(ctx, &self.settings.read) * ctx.pixels_per_point()).max(64.0) as u32;
         self.net.submit(Job::Image {
             req: self.net.mint(),
             page: page_req,
@@ -565,7 +605,9 @@ impl ReaderApp {
             max_width,
             send_referer: self.settings.send_image_referer,
         });
-        self.flash(format!("loading one image from {host}"));
+        if announce {
+            self.flash(format!("loading one image from {host}"));
+        }
     }
 
     fn load_all_images(&mut self, ctx: &egui::Context) {
@@ -688,7 +730,7 @@ impl ReaderApp {
 
     fn settle(&mut self, loaded: Loaded) {
         // A dead rewrite rule used to flash here for twelve seconds and then be unrecoverable.
-        // It is a band now (`notice::about_page`), which lasts as long as the page it is about:
+        // It is a bar now (`notice::about_page`), which lasts as long as the page it is about:
         // "this may not be the page you asked for" is not a thing to say once and withdraw.
         let outline = outline::build(&loaded.doc.blocks);
         let masthead = title::masthead(&loaded.doc);
@@ -700,6 +742,9 @@ impl ReaderApp {
         // Before the page is installed, so `jump_to_fragment` below overrides the reset rather
         // than being overridden by it.
         self.commit();
+        // The strip line lasts until the navigation ends. The page is up; the rewrite bar
+        // owns the remark from here.
+        self.rewrite_notice = None;
         self.page = Page::Ready(Box::new(Ready {
             loaded,
             outline,
@@ -767,6 +812,8 @@ impl ReaderApp {
         self.find_total = 0;
         self.pending_link = None;
         self.pending_href = None;
+        self.chrome.dismissed.clear();
+        self.top_block = None;
         self.scroll_offset = Some(0.0);
         // The other two scroll one-shots, or a `Shift+G` pressed on the very frame a page
         // commits is applied against the *outgoing* page's `max_scroll` and opens the new one
@@ -1084,6 +1131,7 @@ impl eframe::App for ReaderApp {
         // reload, so it is re-derived rather than trusted from startup.
         apply_scroll_speed(&ctx, &self.settings);
         self.drain(&ctx);
+        self.ensure_favicon();
         self.handle_keys(&ctx);
 
         // Focus and hover are discovered during render; start each frame not knowing. Hover
@@ -1115,12 +1163,16 @@ impl eframe::App for ReaderApp {
         self.status_strip(ui, &pal);
         self.url_bar(ui, &pal);
         self.find_bar(ui, &pal);
+        // Under the bars and above the page, docked: the one place a remark about the page
+        // cannot scroll away and cannot be mistaken for the page.
+        self.notice_bars(ui, &pal);
         self.outline_panel(ui, &pal);
         self.central(ui, &pal);
         // *After* the page, because the page is what discovers the hover. An overlay takes no
         // space from anything, so nothing above depends on it having been drawn. See
         // `hover_strip`.
         self.hover_strip(ui, &pal);
+        self.toast(&ctx, &pal);
         self.help_overlay(&ctx, &pal);
         self.info_panel(&ctx, &pal);
 
@@ -1202,7 +1254,7 @@ impl ReaderApp {
             .frame(
                 egui::Frame::new()
                     .fill(pal.bg)
-                    .inner_margin(egui::Margin::symmetric(8, 4)),
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
             )
             .show(ui, |ui| {
                 // Every word in this panel is the reader's, so the family is set once here
@@ -1214,6 +1266,11 @@ impl ReaderApp {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    // Segmented: a `rule` hairline between the arrows, the address, and the
+                    // right-hand group. `separator` in a horizontal is a vertical line in
+                    // `noninteractive.bg_stroke`, which is `rule`: decoration, deliberately
+                    // soft, because these divide one strip into parts rather than one thing
+                    // from another.
                     // Pointer-reachable back/forward: a mouse-only reader must be able to
                     // return, and `Esc` may have hidden everything else. Arrows and not
                     // triangles: `◀`/`▶` are in none of the text faces `ui::fonts` embeds and
@@ -1239,6 +1296,7 @@ impl ReaderApp {
                     {
                         action = Some(StripAction::Forward);
                     }
+                    ui.separator();
 
                     // The URL itself summons the URL bar: the pointer's route to typing one.
                     let shown = self.status_url();
@@ -1255,12 +1313,6 @@ impl ReaderApp {
                     if let Some(n) = &self.rewrite_notice {
                         ui.label(RichText::new(n).color(pal.notice_fg));
                     }
-                    if let Some((text, at)) = &self.status
-                        && at.elapsed() < Duration::from_secs(12)
-                    {
-                        ui.label(RichText::new(text).color(pal.notice_fg));
-                    }
-
                     // The wrapper is what pins to the right edge; the icon alone would sit
                     // wherever the notices happened to end. What used to be here was seven
                     // facts `·`-joined into one dim truncated line, which crowded the URL and
@@ -1268,6 +1320,18 @@ impl ReaderApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if pageinfo_ui::icon(ui, pal, &self.settings.read).clicked() {
                             action = Some(StripAction::ToggleInfo);
+                        }
+                        ui.separator();
+                        // The one hint the strip keeps: where the rest of the keys are.
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("? keys").color(pal.dim))
+                                    .frame(false),
+                            )
+                            .on_hover_text("Keyboard shortcuts (?)")
+                            .clicked()
+                        {
+                            action = Some(StripAction::ToggleHelp);
                         }
                     });
                 });
@@ -1289,6 +1353,7 @@ impl ReaderApp {
             Some(StripAction::Forward) => self.go_forward(),
             Some(StripAction::OpenUrlBar) => self.open_url_bar(),
             Some(StripAction::ToggleInfo) => self.chrome.info_open = !self.chrome.info_open,
+            Some(StripAction::ToggleHelp) => self.chrome.help_open = !self.chrome.help_open,
             None => {}
         }
     }
@@ -1308,6 +1373,7 @@ impl ReaderApp {
     /// An overlay changes no other rect, and `interactable(false)` keeps it out of the hit test
     /// as well, so it cannot take the hover it exists to report.
     fn hover_strip(&mut self, ui: &mut Ui, pal: &theme::Palette) {
+        self.hover_height = 0.0;
         let Some(href) = &self.hover_href else {
             return;
         };
@@ -1324,7 +1390,7 @@ impl ReaderApp {
         // Sits on the strip's top edge. `status_strip` runs earlier in the same frame, so
         // `strip_height` is this frame's measurement, not the previous one's.
         let width = (ctx.content_rect().width() - 16.0).max(64.0);
-        egui::Area::new(egui::Id::new("hww-hover"))
+        let inner = egui::Area::new(egui::Id::new("hww-hover"))
             .order(egui::Order::Foreground)
             .interactable(false)
             .anchor(
@@ -1344,6 +1410,29 @@ impl ReaderApp {
                         ui.label(RichText::new(shown).color(pal.link));
                     });
             });
+        self.hover_height = inner.response.rect.height();
+    }
+
+    /// The transient status, as a pill above the strip, for `notice::TOAST_FOR` and not a frame
+    /// longer: the repaint is requested for the moment it expires, so it leaves on its own
+    /// rather than on the next input.
+    fn toast(&mut self, ctx: &egui::Context, pal: &theme::Palette) {
+        let Some((text, at)) = &self.status else {
+            return;
+        };
+        let age = at.elapsed();
+        if age >= notice::TOAST_FOR {
+            self.status = None;
+            return;
+        }
+        ctx.request_repaint_after(notice::TOAST_FOR - age);
+        notice_ui::toast(
+            ctx,
+            pal,
+            &self.settings.read,
+            text,
+            self.strip_height + self.hover_height,
+        );
     }
 
     fn status_url(&self) -> String {
@@ -1358,7 +1447,7 @@ impl ReaderApp {
             }
             Page::Ready(r) => notice::host_and_path(&r.loaded.prov.final_url),
             Page::Failed { url, .. } => notice::host_and_path(url),
-            Page::Idle => "hww: press Ctrl+L for a URL, ? for help".to_owned(),
+            Page::Idle => "no page".to_owned(),
         }
     }
 
@@ -1372,8 +1461,8 @@ impl ReaderApp {
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.bg)
-                    .inner_margin(egui::Margin::symmetric(8, 4)),
+                    .fill(pal.chrome_bg)
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
             )
             .show(ui, |ui| {
                 ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
@@ -1383,6 +1472,7 @@ impl ReaderApp {
                         egui::TextEdit::singleline(&mut text)
                             .id(egui::Id::new(URL_BAR_ID))
                             .desired_width(f32::INFINITY)
+                            .margin(egui::Margin::symmetric(8, 3))
                             .hint_text("https://…"),
                     );
                     if self.focus_url_bar {
@@ -1429,8 +1519,8 @@ impl ReaderApp {
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.bg)
-                    .inner_margin(egui::Margin::symmetric(8, 4)),
+                    .fill(pal.chrome_bg)
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
             )
             .show(ui, |ui| {
                 ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
@@ -1439,7 +1529,8 @@ impl ReaderApp {
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut query)
                             .id(egui::Id::new(FIND_ID))
-                            .desired_width(240.0),
+                            .desired_width(240.0)
+                            .margin(egui::Margin::symmetric(8, 3)),
                     );
                     if self.focus_find {
                         resp.request_focus();
@@ -1448,8 +1539,18 @@ impl ReaderApp {
                     if resp.changed() {
                         next = Some(0);
                     }
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && total > 0 {
-                        next = Some((current + 1) % total);
+                    // Bare Enter is TextEdit's return_key and surrenders focus; Shift+Enter is
+                    // not, so previous has to fire while the field still holds it.
+                    if total > 0
+                        && ui.input(|i| i.key_pressed(Key::Enter))
+                        && (resp.lost_focus() || resp.has_focus())
+                    {
+                        let prev = ui.input(|i| i.modifiers.shift);
+                        next = Some(if prev {
+                            (current + total - 1) % total
+                        } else {
+                            (current + 1) % total
+                        });
                         resp.request_focus();
                     }
                     let shown = if query.is_empty() {
@@ -1461,7 +1562,7 @@ impl ReaderApp {
                     };
                     ui.label(shown);
                     ui.label(
-                        RichText::new("n / N to step · Esc to dismiss")
+                        RichText::new("Esc to dismiss")
                             .color(pal.dim)
                             .font(theme::chrome_font(&self.settings.read)),
                     );
@@ -1483,6 +1584,17 @@ impl ReaderApp {
             return;
         };
         let entries: Vec<OutlineEntry> = ready.outline.clone();
+        // The section the reader is in: the last heading at or above the block touching the
+        // top of the window, which `ready_screen` found last frame.
+        let current = self.top_block.and_then(|top| {
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.block <= top)
+                .map(|(i, _)| i)
+                .next_back()
+        });
+        let opts = self.settings.read.clone();
         let mut jump = None;
         let panel = egui::Panel::left("hww-outline")
             .resizable(true)
@@ -1492,31 +1604,64 @@ impl ReaderApp {
             .default_size(240.0)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.bg)
-                    .inner_margin(egui::Margin::symmetric(8, 6)),
+                    .fill(pal.chrome_bg)
+                    .inner_margin(egui::Margin::symmetric(8, 8)),
             )
             .show(ui, |ui| {
-                ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
-                ui.label(
-                    RichText::new("Outline")
-                        .color(pal.dim)
-                        .font(theme::chrome_font(&self.settings.read)),
-                );
-                ui.separator();
+                ui.style_mut().override_font_id = Some(theme::chrome_font(&opts));
+                ui.label(theme::label_job("Outline", &opts, pal.dim));
+                ui.add_space(theme::snap(opts.base_size_pt * 0.3));
                 if entries.is_empty() {
                     ui.label(RichText::new("no headings on this page").color(pal.dim));
                 }
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for e in &entries {
-                        ui.horizontal(|ui| {
-                            ui.add_space(f32::from(e.level - 1) * 12.0);
-                            if ui
-                                .add(egui::Button::new(RichText::new(&e.text)).frame(false))
-                                .clicked()
-                            {
-                                jump = Some(e.block);
-                            }
-                        });
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for (i, e) in entries.iter().enumerate() {
+                        let is_current = current == Some(i);
+                        // The current entry is lifted onto the page ground and carries a 2px
+                        // `guide` bar: the lift alone is 1.11:1 and would be missed.
+                        let fill = if is_current {
+                            pal.bg
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        let resp = egui::Frame::new()
+                            .fill(fill)
+                            .corner_radius(egui::CornerRadius {
+                                nw: 0,
+                                sw: 0,
+                                ne: theme::RADIUS,
+                                se: theme::RADIUS,
+                            })
+                            .inner_margin(egui::Margin::symmetric(8, 2))
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.add_space(f32::from(e.level - 1) * 12.0);
+                                    let color = if is_current { pal.strong } else { pal.fg };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(RichText::new(&e.text).color(color))
+                                                .frame(false),
+                                        )
+                                        .clicked()
+                                    {
+                                        jump = Some(e.block);
+                                    }
+                                });
+                            })
+                            .response;
+                        if is_current {
+                            let r = resp.rect;
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_max(
+                                    r.left_top(),
+                                    egui::pos2(r.left() + 2.0, r.bottom()),
+                                ),
+                                0.0,
+                                pal.guide,
+                            );
+                        }
                     }
                 });
             });
@@ -1539,7 +1684,11 @@ impl ReaderApp {
         // to that while the status strip is showing the destination instead. "No page loaded."
         // over a plainly visible article is the lie here, not the rows.
         let rows = match self.shown() {
-            Some(r) => pageinfo::rows(&r.loaded.prov, &self.images.counts()),
+            Some(r) => pageinfo::rows(
+                &r.loaded.prov,
+                &self.images.counts(),
+                notice::carries_rtl(&r.loaded.doc),
+            ),
             None => Vec::new(),
         };
         let mut open = true;
@@ -1571,17 +1720,27 @@ impl ReaderApp {
                 egui::Frame::new()
                     .fill(pal.chrome_bg)
                     .stroke(egui::Stroke::new(1.0, pal.guide))
-                    .inner_margin(egui::Margin::same(12))
+                    .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+                    .inner_margin(egui::Margin::symmetric(16, 14))
                     .show(ui, |ui| {
-                        ui.style_mut().override_font_id =
-                            Some(theme::chrome_font(&self.settings.read));
-                        egui::Grid::new("hww-help").num_columns(2).show(ui, |ui| {
-                            for (keys, what) in HELP {
-                                ui.label(RichText::new(*keys).color(pal.strong).monospace());
-                                ui.label(*what);
-                                ui.end_row();
-                            }
-                        });
+                        let opts = self.settings.read.clone();
+                        ui.style_mut().override_font_id = Some(theme::chrome_font(&opts));
+                        // The keys as keycaps (`notice_ui::keycap`), the one convention for
+                        // "press this" the reader has; the rest of the card is the list it was.
+                        egui::Grid::new("hww-help")
+                            .num_columns(2)
+                            .spacing([
+                                theme::snap(opts.base_size_pt),
+                                theme::snap(opts.base_size_pt * 0.45),
+                            ])
+                            .show(ui, |ui| {
+                                for (keys, what) in HELP {
+                                    ui.horizontal(|ui| notice_ui::keycaps(ui, pal, &opts, keys));
+                                    ui.label(*what);
+                                    ui.end_row();
+                                }
+                            });
+                        ui.add_space(theme::snap(opts.base_size_pt * 0.3));
                         ui.separator();
                         ui.label(
                     RichText::new(
@@ -1623,15 +1782,16 @@ impl ReaderApp {
                         ui.scroll_with_delta(egui::vec2(0.0, self.scroll_delta));
                         self.scroll_delta = 0.0;
                     }
-                    // One geometry, two consumers. Computing the measure twice is how a band
-                    // and the column would come to disagree about a left edge. The outline
+                    // One geometry, every consumer. Computing the measure twice is how the error
+                    // page and the column would come to disagree about a left edge. The outline
                     // panel takes width from the column, so the measure is a ceiling rather
                     // than a promise; without the clamp inside `Column` the text is simply cut
                     // off on the right when the panel opens.
                     let column = notice_ui::Column::new(ui, wanted);
 
-                    // Everything above this line is the reader. Below it is the page.
-                    self.notices(ui, pal, column);
+                    // The states with no page under them are the reader's: the splash, the
+                    // loading line, the error page. Everything else is the page.
+                    self.empty_states(ui, pal, column);
 
                     if self.shown().is_some() {
                         ui.horizontal_top(|ui| {
@@ -1673,55 +1833,80 @@ impl ReaderApp {
         self.scroll_delta += ctx.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y));
     }
 
-    /// Every notice for the page on screen, in the one place they are drawn.
-    ///
-    /// What this replaces is each screen drawing its own banner where it happened, which put
-    /// the reader's words inside the reading column at the prose's own left edge and left
-    /// colour as the only thing telling them apart.
+    /// Every remark about the page on screen, as infobars docked under the top chrome.
     ///
     /// "On screen" rather than "current" is load-bearing during a navigation: the cautions belong
     /// to the article being read, so a truncated body or a dead rewrite rule must not blink out
-    /// the moment a link is clicked and reappear when the next page lands.
-    fn notices(&mut self, ui: &mut Ui, pal: &theme::Palette, column: notice_ui::Column) {
+    /// the moment a link is clicked and reappear when the next page lands. The rewrite bar comes
+    /// first (it is about how the page was asked for), then the cautions loudest first, which is
+    /// the order `about_page` chose, then the RTL caution.
+    fn notice_bars(&mut self, ui: &mut Ui, pal: &theme::Palette) {
         // Owned, so the borrow of `self.page` ends here rather than running through the draw
         // loop and colliding with the `&mut self` that acting on a button needs.
-        let notices: Vec<Notice> = match &self.page {
-            Page::Idle => vec![notice::idle()],
-            // The cautions belong to the page on screen and must not blink out under it: a
-            // truncated body or a dead rewrite rule is still true of the article being read.
-            // `notice::loading` returns `None` when there is one, so the two cannot both appear.
-            Page::Loading {
-                url, started, from, ..
-            } => match from {
-                Some(r) => {
-                    let mut n = notice::about_page(&r.loaded.prov, r.loaded.doc.text_len());
-                    n.extend(notice::rtl(&r.loaded.doc));
-                    n
-                }
-                None => notice::loading(url, started.elapsed(), false)
-                    .into_iter()
-                    .collect(),
-            },
-            Page::Failed { url, error, .. } => vec![notice::failure(error, url)],
-            Page::Ready(r) => {
-                let mut n = notice::about_page(&r.loaded.prov, r.loaded.doc.text_len());
+        let notices: Vec<Notice> = match self.shown() {
+            Some(r) => {
+                let mut n: Vec<Notice> = notice::rewrite(&r.loaded.prov).into_iter().collect();
+                n.extend(notice::about_page(&r.loaded.prov, r.loaded.doc.text_len()));
                 n.extend(notice::rtl(&r.loaded.doc));
                 n
             }
+            None => Vec::new(),
         };
         let mut pressed = None;
-        // Consecutive notices of one severity are one band. `about_page` can return four
-        // cautions about the same page, and four bands of one ground sit flush and read as one
-        // remark; see the `notice_ui` module doc. Grouping is by run rather than by sorting,
-        // because the order `about_page` chose is the order the reader should read them in.
-        for group in notices.chunk_by(|a, b| a.severity == b.severity) {
-            if let Some(b) = notice_ui::band(ui, pal, &self.settings.read, column, group) {
-                pressed = Some(b);
+        for (i, n) in notices.iter().enumerate() {
+            if self.chrome.dismissed.contains(n.key()) {
+                continue;
+            }
+            let event = notice_ui::bar(ui, pal, &self.settings.read, n, i);
+            panel_edge(ui, event.rect, Side::Bottom, pal);
+            if event.dismissed {
+                self.chrome.dismissed.insert(n.key().to_owned());
+            }
+            if event.pressed.is_some() {
+                pressed = event.pressed;
             }
         }
-
         // Acting is deferred past the borrow, the same shape `status_strip` uses for
-        // `StripAction`: widgets record an intent, `app` acts on it once per frame.
+        // `StripAction`: widgets record an intent, `app` acts on it once per frame. The only
+        // action a bar over a loaded page offers is the rewrite bar's.
+        match pressed {
+            Some(Button::RetryWithoutRewrite) => self.reload(LoadOptions {
+                rewrite: false,
+                ..self.opts
+            }),
+            Some(Button::Retry) => self.reload(self.opts),
+            Some(Button::CopyUrl) | None => {}
+        }
+    }
+
+    /// The states with no page under them: the splash, the loading line, and the error page.
+    ///
+    /// Drawn in the central panel's scroll area, in the reading column's geometry, and nowhere
+    /// else: each owns the viewport, which is what tells it apart from a bar over a page.
+    fn empty_states(&mut self, ui: &mut Ui, pal: &theme::Palette, column: notice_ui::Column) {
+        let opts = self.settings.read.clone();
+        let pressed = match &self.page {
+            Page::Idle => {
+                notice_ui::splash(ui, pal, &opts, column, &notice::idle());
+                None
+            }
+            Page::Loading {
+                url,
+                started,
+                from: None,
+                ..
+            } => {
+                if let Some(line) = notice::loading(url, started.elapsed(), false) {
+                    notice_ui::loading_line(ui, pal, &opts, &line);
+                }
+                None
+            }
+            Page::Failed { url, error, .. } => {
+                let n = notice::failure(error, url);
+                notice_ui::error_page(ui, pal, &opts, column, &n)
+            }
+            Page::Loading { from: Some(_), .. } | Page::Ready(_) => None,
+        };
         let (Some(b), Page::Failed { url, opts, .. }) = (pressed, &self.page) else {
             return;
         };
@@ -1734,7 +1919,7 @@ impl ReaderApp {
             }),
             Button::CopyUrl => {
                 self.copy(&url);
-                self.flash("URL copied".to_owned());
+                self.flash("page URL copied".to_owned());
             }
         }
     }
@@ -1823,7 +2008,9 @@ impl ReaderApp {
         let doc = &ready.loaded.doc;
         blocks::document_header(ui, doc, &mut ctx);
         let scroll_to = self.scroll_to_block.take();
-        let band = measure::Band::around(ui.clip_rect().top(), ui.clip_rect().bottom());
+        let clip_top = ui.clip_rect().top();
+        let band = measure::Band::around(clip_top, ui.clip_rect().bottom());
+        self.top_block = None;
         for (i, b) in doc.blocks.iter().enumerate() {
             // The article's <h1> is usually also its <title>, and its "By Name" is already
             // in the strip; rendering both shows each twice.
@@ -1834,10 +2021,14 @@ impl ReaderApp {
             // clear of the window. `allocate_space` and not `add_space`, so the item spacing
             // either side of it is the spacing the block itself would have had.
             let may_skip = !whole && self.focus_block_was != Some(i);
+            let y = ui.next_widget_position().y;
             if may_skip
                 && let Some(h) = self.heights.get(i)
-                && band.skips(ui.next_widget_position().y, h)
+                && band.skips(y, h)
             {
+                if self.top_block.is_none() && y + h >= clip_top {
+                    self.top_block = Some(i);
+                }
                 ui.allocate_space(egui::vec2(0.0, h));
                 continue;
             }
@@ -1855,6 +2046,9 @@ impl ReaderApp {
                 self.focus_block = Some(i);
             }
             self.heights.set(i, resp.rect.height());
+            if self.top_block.is_none() && resp.rect.bottom() >= clip_top {
+                self.top_block = Some(i);
+            }
             if scroll_to == Some(i) {
                 resp.scroll_to_me(Some(Align::TOP));
             }
@@ -1916,10 +2110,9 @@ enum Side {
 
 /// One rule on one side of a docked panel.
 ///
-/// A docked panel takes `bg` and this; only a surface that *floats* over the page takes
-/// `chrome_bg`. Position is what separates a docked panel from the page, and a fill on top of
-/// position was saying the same thing twice in a client whose whole argument is that the page
-/// gets no chrome treatment of its own.
+/// Top chrome (the URL and find bars, the notice bars, the outline) takes `chrome_bg` and this
+/// edge; the status strip stays on `bg`. A floating surface takes `chrome_bg`, a `guide` stroke,
+/// and the radius, and is not drawn here.
 ///
 /// It cannot be `Frame::stroke`, which draws four sides: the other three are the window's own
 /// edges, and a box drawn around the status strip is not what this means. `guide` rather than
@@ -1953,6 +2146,7 @@ enum StripAction {
     Forward,
     OpenUrlBar,
     ToggleInfo,
+    ToggleHelp,
 }
 
 /// Written with the glyphs egui's embedded fonts actually carry. `→` is not one of them; it
@@ -1973,7 +2167,7 @@ const HELP: &[(&str, &str)] = &[
     ("i / I", "load focused image · load all, naming their hosts"),
     ("t", "outline"),
     ("p", "page info: how this page arrived"),
-    ("/ then n / N", "find in page · next / previous match"),
+    ("/ then Enter / Shift+Enter", "find in page · next / previous match"),
     ("z / Z", "collapse focused reply · collapse all"),
     ("y / Y", "copy page URL · copy focused link"),
     ("[ / ]", "narrow / widen the reading measure"),

@@ -70,7 +70,8 @@ pub enum Job {
         url: Url,
         opts: LoadOptions,
     },
-    /// An image subresource, on an explicit click only. `page` is the navigation it belongs to,
+    /// An image subresource. Usually on an explicit click; also the masthead favicon.
+    /// `page` is the navigation it belongs to,
     /// so a result that arrives after the reader moved on is discarded like any other stale
     /// reply. `referrer` is the page being read (see `fetch::Referer`).
     Image {

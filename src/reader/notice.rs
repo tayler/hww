@@ -25,13 +25,23 @@
 //! readable immediately below. [`about_page`] returns the second kind and is empty for a page
 //! that arrived clean, which is most of them.
 //!
-//! # The mark
+//! # Who did what
 //!
-//! [`MARK`] is the bracket convention `session::Notice` (`[rewrote a -> b]`) and
-//! `images::placeholder` (`[image] …`) already used, made explicit and given an owner. A
-//! bracket survives a screenshot, a colour-blind reader, and a theme nobody has designed yet.
-//! Its inline cousins stay inline on purpose: `[image]` and `(N replies hidden)` mark one thing
-//! at one place in the document, and a full-bleed band cannot point at a place.
+//! Every sentence here names its actor as the grammatical subject: *hww* for what the reader
+//! did (a built-in rewrite rule, the 5 MB cap), the *host* for what the server did (a redirect,
+//! a 404). "Opened text.example.com instead of example.com" reads as a choice the browser made,
+//! and it was; "text.example.com sent the request on to www.example.com" reads as the server's,
+//! and it was. Neither hides behind a passive, and a reader deciding whether to trust the page
+//! can tell which side of the wire each fact came from.
+//!
+//! # The shape the words are drawn in
+//!
+//! The reader no longer prints a `[hww]` mark or the severity word: a notice about a loaded
+//! page is an **infobar** under the top chrome, in the form every browser shares (an icon, a
+//! sentence, the actions as buttons, a close), and a failure is an **error page**. The severity
+//! survives as the icon's shape and as [`Severity::word`], which is the icon's accessible name
+//! and hover text, so a screen reader and a monochrome eye both still get it. `[image]` and
+//! `[loading]` stay inline on purpose: they mark one thing at one place in the document.
 //!
 //! # Why this is not under `ui/`
 //!
@@ -44,9 +54,6 @@ use crate::fetch::Truncation;
 use crate::session::{LoadError, Provenance};
 use std::time::Duration;
 use url::Url;
-
-/// The prefix every notice carries.
-pub const MARK: &str = "[hww]";
 
 /// The extracted-text length below which a page is treated as having failed to extract.
 ///
@@ -65,53 +72,54 @@ pub use crate::fetch::TIMEOUT;
 /// The mark on a link whose page is being fetched.
 ///
 /// A bracket, not a colour or a second underline. Everything the reader says *inside* the reading
-/// column carries this convention already (`[image]`, `[hww]`, "(N replies hidden)") because a
-/// bracket survives a screenshot, a monochrome eye, and a theme nobody has designed yet, and
-/// because a coloured underline on a link would be the reader borrowing the page's own idiom to
-/// speak in, which is the one thing the column rule forbids. It is positional, which is what
-/// admits it inline at all: it marks one link at one place, and a full-bleed band cannot point.
+/// column carries this convention (`[image]` is the other) because a bracket survives a
+/// screenshot, a monochrome eye, and a theme nobody has designed yet, and because a coloured
+/// underline on a link would be the reader borrowing the page's own idiom to speak in, which is
+/// the one thing the column rule forbids. It is positional, which is what admits it inline at
+/// all: it marks one link at one place, and a bar docked above the page cannot point.
 pub const PENDING: &str = "[loading]";
+
+/// How long a transient status stays up: "Copied URL", "loading 2 images from …", "no link
+/// focused". The Material range is four to ten seconds; six, because the one message in the set
+/// that matters is the disclosure of which hosts `I` is about to contact, and a reader looking
+/// at the page rather than the pill needs a moment to notice it. It used to be twelve in the
+/// status strip, where a line of dim text needs longer to be found than a pill does.
+pub const TOAST_FOR: Duration = Duration::from_secs(6);
 
 /// How loud a notice is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
-    /// An aside, or a page that has not arrived yet. Nothing is wrong.
+    /// Information: something the reader did on the page's behalf and should own up to. An
+    /// information bar; nothing is wrong.
     Quiet,
-    /// Something about the page the reader would otherwise mis-read.
+    /// Something about the page the reader would otherwise mis-read. A caution bar over a
+    /// readable page.
     Caution,
-    /// There is no page. The notice owns the whole viewport.
+    /// There is no page. An error page, which owns the viewport.
     Failure,
 }
 
 impl Severity {
-    /// Whether this severity claims the viewport rather than sitting above a readable page.
-    ///
-    /// A `Caution` must not: there is real prose under it, and covering that would make the
-    /// remark worse than the thing it is remarking on.
-    pub fn fills_the_viewport(self) -> bool {
-        matches!(self, Severity::Quiet | Severity::Failure)
-    }
-
-    /// The severity, as a word, drawn beside [`MARK`].
+    /// The severity, as a word: the accessible name and hover text of the painted icon.
     ///
     /// Colour is the obvious way to say how loud a notice is and the one that fails quietest: a
     /// hue can be missed, screenshotted into greyscale, or read by an eye that does not separate
-    /// rust from brown. The variants are already named, so the cheapest fix is to print the
-    /// name. It costs one token on every band, including the ones about pages that are basically
-    /// fine, and that is the trade; a page that is actually fine emits no band at all.
+    /// rust from brown. The icon's *shape* carries it for a sighted reader (a triangle, a circled
+    /// `i`, a crossed circle); this word carries it for a screen reader, which is told nothing
+    /// by a shape, and for the pointer that rests on it.
     ///
     /// Wording, so it lives here rather than in `ui/` for the same reason every other notice
     /// string does: the fast CI job never compiles egui, and this is where a test can read it.
     pub fn word(self) -> &'static str {
         match self {
-            Severity::Quiet => "quiet",
+            Severity::Quiet => "note",
             Severity::Caution => "caution",
             Severity::Failure => "failure",
         }
     }
 }
 
-/// What a failure offers to do about itself.
+/// What a notice offers to do about itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
     Retry,
@@ -120,10 +128,12 @@ pub enum Button {
 }
 
 impl Button {
+    /// "Reload", which is the word on the button every browser puts on this page, rather than
+    /// "Retry", which is the word in the code.
     pub fn label(self) -> &'static str {
         match self {
-            Button::Retry => "Retry",
-            Button::RetryWithoutRewrite => "Retry without rewrite",
+            Button::Retry => "Reload",
+            Button::RetryWithoutRewrite => "Reload without rewrite",
             Button::CopyUrl => "Copy URL",
         }
     }
@@ -136,9 +146,12 @@ pub struct Notice {
     /// Failures only. A caution is one line and a heading would inflate it into a screen.
     pub heading: Option<&'static str>,
     pub body: String,
-    /// Set smaller and dimmer under the body: the URL, the redirect chain.
+    /// Set dimmer under the body: the URL, the redirect chain.
     pub detail: Vec<String>,
     pub actions: &'static [Button],
+    /// Failures only: the short name of what went wrong, the way an error page prints an
+    /// `ERR_` code under the prose. For the reader who files a bug, and for nobody else.
+    pub code: Option<&'static str>,
 }
 
 impl Notice {
@@ -149,8 +162,37 @@ impl Notice {
             body: body.into(),
             detail: Vec::new(),
             actions: &[],
+            code: None,
         }
     }
+
+    /// What a bar is dismissed by: its own words. A notice is rebuilt from the provenance every
+    /// frame, so the identity has to be something the words themselves carry, and two notices
+    /// with the same words about the same page are the same remark.
+    pub fn key(&self) -> &str {
+        &self.body
+    }
+}
+
+/// A built-in rewrite rule was applied: the reader asked a different host than the one named.
+///
+/// An information bar and not a caution, because nothing is wrong: the rule is compiled in,
+/// cited, and reported. But it is hww's doing and not the site's, and the bar says so in those
+/// words, with the one action a reader might want beside it. The status strip still prints the
+/// terse version before the request goes out (charter point 4); this is the readable one once
+/// the page is up, and it lasts as long as the page does.
+pub fn rewrite(prov: &Provenance) -> Option<Notice> {
+    let to = prov.rewritten_to.as_ref()?;
+    let aimed = to.host_str().unwrap_or("another host");
+    let asked = prov.requested.host_str().unwrap_or("the host you named");
+    let mut n = Notice::new(
+        Severity::Quiet,
+        format!(
+            "hww asked {aimed} for this page instead of {asked}, by a built-in rule for this site."
+        ),
+    );
+    n.actions = &[Button::RetryWithoutRewrite];
+    Some(n)
 }
 
 /// Everything worth saying *about* a page that loaded, loudest first.
@@ -179,8 +221,8 @@ pub fn about_page(prov: &Provenance, text_len: usize) -> Vec<Notice> {
         let mut n = Notice::new(
             Severity::Caution,
             format!(
-                "A rewrite rule sent this to {aimed}, which redirected to {landed}. \
-                 The rule appears dead, and this may not be the page you asked for."
+                "{aimed} sent the request on to {landed}. The rule that chose {aimed} appears \
+                 dead, so this may not be the page you asked for."
             ),
         );
         n.detail = vec![format!("asked for {}", prov.requested)];
@@ -192,10 +234,11 @@ pub fn about_page(prov: &Provenance, text_len: usize) -> Vec<Notice> {
     if prov.status >= 400 {
         // Many 404s are readable and many paywalls answer 403 with the article still in the
         // markup, so this is a remark *over* the content, never instead of it.
+        let host = prov.final_url.host_str().unwrap_or("The server");
         out.push(Notice::new(
             Severity::Caution,
             format!(
-                "The server answered {}. Showing what it sent anyway.",
+                "{host} answered {}. Showing what it sent anyway.",
                 prov.status
             ),
         ));
@@ -203,45 +246,45 @@ pub fn about_page(prov: &Provenance, text_len: usize) -> Vec<Notice> {
     if text_len < THIN_TEXT {
         out.push(Notice::new(
             Severity::Caution,
-            "Little content extracted. This page may require JavaScript.",
+            "hww found little text on this page, which may need JavaScript to show its content.",
         ));
     }
     out
 }
 
-/// The band prose for a body that did not arrive whole.
+/// The bar prose for a body that did not arrive whole.
 ///
 /// One string per variant, hedging exactly where the evidence hedges: `len >= cap` alone
 /// cannot tell a body that was cut from one that happened to end on the boundary, so
-/// `MaybeAtCap` says "may" and `AtCap` does not. The terser phrasing for the page-info panel
-/// is [`crate::reader::pageinfo`]'s; this one is the alarm, that one is the record.
+/// `MaybeAtCap` says "may" and `AtCap` does not. The cap and the clock are hww's, and the
+/// sentences say so. The terser phrasing for the page-info panel is
+/// [`crate::reader::pageinfo`]'s; this one is the alarm, that one is the record.
 fn truncation_body(t: Truncation) -> Option<String> {
     Some(match t {
         Truncation::Complete => return None,
         Truncation::AtCap(n) => format!(
-            "Stopped at the {} MB body cap. The rest of this page was not fetched.",
+            "hww stopped reading at its {} MB cap. The rest of this page was not fetched.",
             n / 1_000_000
         ),
         Truncation::MaybeAtCap(n) => format!(
-            "The body reached the {} MB cap and may be cut short.",
+            "hww may have cut this page short at its {} MB cap.",
             n / 1_000_000
         ),
         Truncation::Timeout(d) => format!(
-            "The body was still arriving after {}s. This article is incomplete.",
+            "hww stopped waiting after {}s with the body still arriving. This article is \
+             incomplete.",
             d.as_secs()
         ),
         Truncation::Incomplete(_) => {
-            "The connection dropped partway. This article is incomplete.".to_owned()
+            "hww lost the connection partway. This article is incomplete.".to_owned()
         }
     })
 }
 
-/// A page carrying right-to-left text. epaint shapes but does not reorder, so Hebrew and
-/// Arabic lay out in logical order, backwards, or as tofu (the tail face is chosen to carry no
-/// RTL script so the failure is visible rather than plausible). The honest completion of that
-/// choice is to say so. `U+0590..=U+08FF` is Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan,
-/// Mandaic, and Arabic Supplement/Extended-A: the RTL blocks in one span.
-pub fn rtl(doc: &crate::ir::Document) -> Option<Notice> {
+/// Whether the document carries a run in the RTL blocks. Public so the page-info panel can
+/// keep the record after the caution is closed: dismissing the bar must not be the way the
+/// fact disappears.
+pub fn carries_rtl(doc: &crate::ir::Document) -> bool {
     fn has_rtl(s: &str) -> bool {
         s.chars().any(|c| ('\u{0590}'..='\u{08FF}').contains(&c))
     }
@@ -271,12 +314,20 @@ pub fn rtl(doc: &crate::ir::Document) -> Option<Notice> {
             Block::Rule | Block::Embed { .. } => false,
         })
     }
-    let in_title = doc.title.as_deref().is_some_and(has_rtl);
-    (in_title || blocks_have_rtl(&doc.blocks)).then(|| {
+    doc.title.as_deref().is_some_and(has_rtl) || blocks_have_rtl(&doc.blocks)
+}
+
+/// A page carrying right-to-left text. epaint shapes but does not reorder, so Hebrew and
+/// Arabic lay out in logical order, backwards, or as tofu (the tail face is chosen to carry no
+/// RTL script so the failure is visible rather than plausible). The honest completion of that
+/// choice is to say so. `U+0590..=U+08FF` is Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan,
+/// Mandaic, and Arabic Supplement/Extended-A: the RTL blocks in one span.
+pub fn rtl(doc: &crate::ir::Document) -> Option<Notice> {
+    carries_rtl(doc).then(|| {
         Notice::new(
             Severity::Caution,
-            "This page carries right-to-left text, which this reader cannot lay out yet: a \
-             Hebrew or Arabic run is drawn in the wrong order, or as missing glyphs."
+            "hww cannot lay out the right-to-left text on this page: a Hebrew or Arabic run \
+             is drawn in the wrong order, or as missing glyphs."
                 .to_owned(),
         )
     })
@@ -289,65 +340,74 @@ pub fn rtl(doc: &crate::ir::Document) -> Option<Notice> {
 pub fn failure(error: &LoadError, url: &Url) -> Notice {
     use crate::fetch::FetchError;
 
-    let (heading, body, actions): (&'static str, String, &'static [Button]) = match error {
-        LoadError::Fetch(FetchError::LikelyBlocked) => (
-            "This site did not answer.",
-            // Phase 0 measured bot detection failing as a silent hang rather than a 403.
-            "The request timed out with no reply. On a document fetch that is usually bot \
+    let (heading, body, actions, code): (&'static str, String, &'static [Button], &'static str) =
+        match error {
+            LoadError::Fetch(FetchError::LikelyBlocked) => (
+                "This site did not answer.",
+                // Phase 0 measured bot detection failing as a silent hang rather than a 403.
+                "The request timed out with no reply. On a document fetch that is usually bot \
              detection failing silently rather than a network fault."
-                .to_owned(),
-            &[Button::Retry, Button::RetryWithoutRewrite, Button::CopyUrl],
-        ),
-        LoadError::Fetch(FetchError::Timeout(d)) => (
-            "Timed out.",
-            format!(
-                "No reply within {}s. That is bandwidth rather than a block.",
-                d.as_secs()
+                    .to_owned(),
+                &[Button::Retry, Button::RetryWithoutRewrite, Button::CopyUrl],
+                "LikelyBlocked",
             ),
-            // No retry-without-rewrite: bandwidth is not a rewrite rule's fault.
-            &[Button::Retry, Button::CopyUrl],
-        ),
-        LoadError::Fetch(FetchError::SchemeDowngrade(to)) => (
-            "Refused an https -> http downgrade.",
-            format!(
-                "A redirect tried to send this request to {} without encryption. \
+            LoadError::Fetch(FetchError::Timeout(d)) => (
+                "Timed out.",
+                format!(
+                    "No reply within {}s. That is bandwidth rather than a block.",
+                    d.as_secs()
+                ),
+                // No retry-without-rewrite: bandwidth is not a rewrite rule's fault.
+                &[Button::Retry, Button::CopyUrl],
+                "Timeout",
+            ),
+            LoadError::Fetch(FetchError::SchemeDowngrade(to)) => (
+                "Refused an https -> http downgrade.",
+                format!(
+                    "A redirect tried to send this request to {} without encryption. \
                  hww does not follow that.",
-                to.host_str().unwrap_or("an unnamed host")
+                    to.host_str().unwrap_or("an unnamed host")
+                ),
+                // No retry: refusing is correct, and a bypass would be a policy hole.
+                &[Button::CopyUrl],
+                "SchemeDowngrade",
             ),
-            // No retry: refusing is correct, and a bypass would be a policy hole.
-            &[Button::CopyUrl],
-        ),
-        LoadError::Fetch(FetchError::TooManyRedirects(_)) => (
-            "Too many redirects.",
-            "The request bounced past the redirect limit. A loop like this is usually a \
+            LoadError::Fetch(FetchError::TooManyRedirects(_)) => (
+                "Too many redirects.",
+                "The request bounced past the redirect limit. A loop like this is usually a \
              consent wall."
-                .to_owned(),
-            &[Button::Retry, Button::RetryWithoutRewrite, Button::CopyUrl],
-        ),
-        LoadError::Fetch(FetchError::RedirectWithoutLocation(status)) => (
-            "The server sent a broken redirect.",
-            format!(
-                "It answered {status}, which means \"go somewhere else\", but did not say \
-                 where. There is nothing to follow."
+                    .to_owned(),
+                &[Button::Retry, Button::RetryWithoutRewrite, Button::CopyUrl],
+                "TooManyRedirects",
             ),
-            &[Button::Retry, Button::CopyUrl],
-        ),
-        LoadError::Fetch(FetchError::BadLocation(to)) => (
-            "The server redirected somewhere unusable.",
-            format!("It pointed at {to}, which is not an address hww can fetch."),
-            &[Button::Retry, Button::CopyUrl],
-        ),
-        LoadError::NotWebPage { content_type } => (
-            "Not a web page.",
-            format!("The server sent {content_type}, which hww has no reader for."),
-            &[Button::CopyUrl],
-        ),
-        other => (
-            "The request failed.",
-            other.to_string(),
-            &[Button::Retry, Button::CopyUrl],
-        ),
-    };
+            LoadError::Fetch(FetchError::RedirectWithoutLocation(status)) => (
+                "The server sent a broken redirect.",
+                format!(
+                    "It answered {status}, which means \"go somewhere else\", but did not say \
+                 where. There is nothing to follow."
+                ),
+                &[Button::Retry, Button::CopyUrl],
+                "RedirectWithoutLocation",
+            ),
+            LoadError::Fetch(FetchError::BadLocation(to)) => (
+                "The server redirected somewhere unusable.",
+                format!("It pointed at {to}, which is not an address hww can fetch."),
+                &[Button::Retry, Button::CopyUrl],
+                "BadLocation",
+            ),
+            LoadError::NotWebPage { content_type } => (
+                "Not a web page.",
+                format!("The server sent {content_type}, which hww has no reader for."),
+                &[Button::CopyUrl],
+                "NotWebPage",
+            ),
+            other => (
+                "The request failed.",
+                other.to_string(),
+                &[Button::Retry, Button::CopyUrl],
+                "Transport",
+            ),
+        };
 
     let mut detail = vec![url.to_string()];
     if let LoadError::Fetch(FetchError::TooManyRedirects(hops)) = error {
@@ -361,41 +421,62 @@ pub fn failure(error: &LoadError, url: &Url) -> Notice {
         body,
         detail,
         actions,
+        code: Some(code),
     }
 }
 
-/// The splash, when nothing has been asked for.
-pub fn idle() -> Notice {
-    Notice::new(
-        Severity::Quiet,
-        "A reading client for the quiet web. Ctrl+L for a URL, ? for keys.",
-    )
+/// The idle screen: the one screen where the reader is the page.
+///
+/// A wordmark, one line of what this is, and the two keys that matter, each with its meaning.
+/// The waveform that sits over the wordmark is paint, not wording, so it lives in
+/// `ui::notice_ui` with the rest of how this screen is drawn. Not a notice: nothing has
+/// happened yet, so there is nothing to report, and a Quiet band that said "press Ctrl+L" was
+/// the reader describing its own chrome in the column. The URL bar is open and focused over
+/// it (`ReaderApp::new`), which is where the typing goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Splash {
+    pub wordmark: &'static str,
+    pub tagline: &'static str,
+    /// `(keys, what they do)`, set as keycaps by the reader.
+    pub keys: &'static [(&'static str, &'static str)],
 }
 
-/// A navigation in flight, when there is nothing on screen to read while it runs.
+pub fn idle() -> Splash {
+    Splash {
+        wordmark: "hww",
+        tagline: "A new browser for the human-wide web.",
+        keys: &[("Ctrl+L", "Open a URL"), ("?", "Keyboard shortcuts")],
+    }
+}
+
+/// A navigation in flight, when there is nothing on screen to read while it runs: one dim line
+/// in the middle of an empty page, naming what is being fetched.
 ///
 /// **`None` when a page is still up.** A fetch used to replace the article the moment the link
-/// was clicked, which on a fast connection is a band that flashes for two frames and cannot be
+/// was clicked, which on a fast connection is a line that flashes for two frames and cannot be
 /// read, and on a slow one is a blank screen that reads as having arrived somewhere empty rather
 /// than as waiting. The outgoing page stays now, and while it does the reader reports the errand
 /// from the chrome instead: the strip counts the seconds and `ui::notice_ui::progress_rule` draws
-/// what is left of the budget. A band over a readable page would be the same mistake one size
-/// smaller.
+/// what is left of the budget. A browser paints nothing on a page that has not arrived and moves
+/// an indicator in the chrome; this is that, plus the one line, because fifteen seconds of blank
+/// with a hairline moving at the bottom reads as a hang to anyone not watching the hairline.
 ///
 /// This returns the `Option` rather than letting the caller decide, because the caller is
 /// `app.rs`: the fast CI job never compiles egui, so a decision made there is a decision no test
-/// reads. `fills_the_viewport` was already carrying this rule; it stays here beside it.
+/// reads.
 ///
 /// `elapsed` is shown because a 15 s bot-block hang and a slow CDN look identical for the
 /// first ten seconds, and a number that keeps moving is the difference between waiting and
 /// wondering whether it is stuck.
-pub fn loading(url: &Url, elapsed: Duration, over_a_page: bool) -> Option<Notice> {
+pub fn loading(url: &Url, elapsed: Duration, over_a_page: bool) -> Option<String> {
     if over_a_page {
         return None;
     }
-    let mut notice = Notice::new(Severity::Quiet, format!("Loading {}…", host_and_path(url)));
-    notice.detail = vec![format!("{:.1}s", elapsed.as_secs_f32())];
-    Some(notice)
+    Some(format!(
+        "loading {} … {:.1}s",
+        host_and_path(url),
+        elapsed.as_secs_f32()
+    ))
 }
 
 /// How much of the fetch deadline a navigation has spent, as `0.0..=1.0`.
@@ -495,8 +576,9 @@ mod tests {
 
     /// Three severities, three words, and none of them a prefix of another.
     ///
-    /// The word is there so loudness survives greyscale and a screenshot; two severities sharing
-    /// a word, or one reading as an abbreviation of the next, would put that back where it was.
+    /// The word is the icon's accessible name, so loudness reaches a screen reader; two
+    /// severities sharing a word, or one reading as an abbreviation of the next, would put that
+    /// back where it was.
     #[test]
     fn each_severity_says_something_different() {
         let words = [Severity::Quiet, Severity::Caution, Severity::Failure].map(Severity::word);
@@ -558,7 +640,18 @@ mod tests {
                 n.detail.first().map(String::as_str),
                 Some("https://example.com/a")
             );
+            assert!(
+                n.code.is_some(),
+                "a failure with no code: {}",
+                n.heading.unwrap()
+            );
         }
+        // And the codes are distinct too: the code is what a bug report quotes.
+        let mut codes: Vec<&str> = notices.iter().filter_map(|n| n.code).collect();
+        codes.sort_unstable();
+        let before = codes.len();
+        codes.dedup();
+        assert_eq!(before, codes.len(), "two failures share a code");
     }
 
     #[test]
@@ -574,15 +667,102 @@ mod tests {
         assert!(notice.detail[2].contains("b.example/2"));
     }
 
-    /// The whole point of the third argument: a page still on screen gets no band, because the
+    /// The whole point of the third argument: a page still on screen gets no line, because the
     /// strip and the progress rule are reporting instead.
     #[test]
-    fn a_load_over_a_readable_page_draws_no_band() {
+    fn a_load_over_a_readable_page_draws_no_line() {
         let u = url("https://example.com/a");
         assert!(loading(&u, Duration::from_secs(3), true).is_none());
-        let notice = loading(&u, Duration::from_secs(3), false).expect("no page under it");
-        assert!(notice.severity.fills_the_viewport());
-        assert!(notice.body.contains("example.com/a"));
+        let line = loading(&u, Duration::from_secs(3), false).expect("no page under it");
+        assert!(line.contains("example.com/a"));
+        assert!(line.contains("3.0s"), "the clock is the point: {line}");
+    }
+
+    /// Inside Material's range for a snackbar, and long enough to read the hosts `I` names.
+    #[test]
+    fn a_toast_lives_between_four_and_ten_seconds() {
+        assert!(TOAST_FOR >= Duration::from_secs(4));
+        assert!(TOAST_FOR <= Duration::from_secs(10));
+    }
+
+    /// The idle screen names the two keys that matter and nothing the chrome already shows.
+    #[test]
+    fn the_splash_names_its_keys() {
+        let s = idle();
+        assert!(!s.wordmark.is_empty());
+        assert!(s.keys.iter().any(|(k, _)| *k == "Ctrl+L"));
+        assert!(s.keys.iter().any(|(k, _)| *k == "?"));
+        assert!(s.keys.iter().all(|(_, what)| !what.is_empty()));
+    }
+
+    /// The rewrite bar is hww owning up, so `hww` is its subject and the one action it offers
+    /// is the way out of it. It is not a caution: nothing is wrong.
+    #[test]
+    fn a_rewrite_is_an_information_bar_naming_hww_as_the_actor() {
+        assert!(rewrite(&page(200)).is_none(), "no rule, no bar");
+        let mut p = page(200);
+        p.rewritten_to = Some(url("https://text.example.com/a"));
+        let n = rewrite(&p).expect("a bar");
+        assert_eq!(n.severity, Severity::Quiet);
+        assert!(n.body.starts_with("hww "), "{}", n.body);
+        assert!(n.body.contains("text.example.com"));
+        assert!(n.body.contains("example.com"));
+        assert_eq!(n.actions, &[Button::RetryWithoutRewrite]);
+    }
+
+    /// Every sentence about a loaded page names who did the thing: the host for what the server
+    /// did, `hww` for what the reader did. A passive ("the body was cut") says neither.
+    fn names_hww_or_a_host(body: &str) {
+        let first = body.split_whitespace().next().unwrap_or("");
+        assert!(
+            first == "hww" || first.contains('.'),
+            "no actor as subject: {body}"
+        );
+    }
+
+    #[test]
+    fn every_remark_names_its_actor() {
+        let mut p = dead_rule();
+        p.status = 404;
+        p.truncation = Truncation::AtCap(5_000_000);
+        let notices = about_page(&p, 10);
+        assert!(
+            notices[0].body.starts_with("alt.example.net "),
+            "{}",
+            notices[0].body
+        );
+        assert!(notices[1].body.starts_with("hww "), "{}", notices[1].body);
+        assert!(
+            notices[2].body.starts_with("www.example.org "),
+            "{}",
+            notices[2].body
+        );
+        assert!(notices[3].body.starts_with("hww "), "{}", notices[3].body);
+        for n in &notices {
+            names_hww_or_a_host(&n.body);
+            assert!(!n.body.contains("The server"), "{}", n.body);
+        }
+        for t in every_truncation() {
+            let mut p = page(200);
+            p.truncation = t;
+            for n in about_page(&p, 9_000) {
+                names_hww_or_a_host(&n.body);
+            }
+        }
+        let mut rewritten = page(200);
+        rewritten.rewritten_to = Some(url("https://text.example.com/a"));
+        names_hww_or_a_host(&rewrite(&rewritten).expect("a bar").body);
+
+        let mut d = crate::html::extract(
+            "<html><body><article><p>A page in Latin script, long enough to be a paragraph on \
+             its own merits and then some.</p></article></body></html>",
+            &url::Url::parse("https://example.test/").unwrap(),
+        );
+        d.blocks
+            .push(crate::ir::Block::Paragraph(vec![crate::ir::Inline::Text(
+                "שלום עולם".to_owned(),
+            )]));
+        names_hww_or_a_host(&rtl(&d).expect("a caution").body);
     }
 
     /// Pinned against `TIMEOUT`, never the literal 15: the whole reason it is re-exported is so
@@ -628,10 +808,6 @@ mod tests {
             "a caution is one line, not a screen"
         );
         assert!(notices[0].actions.is_empty());
-        assert!(
-            !notices[0].severity.fills_the_viewport(),
-            "it would cover the article"
-        );
     }
 
     /// The threshold is `ir::THIN_TEXT`, which `html::extract` reads too, so this pins the
@@ -659,14 +835,10 @@ mod tests {
     /// no way to learn that the page in front of them came from a host the rule did not aim
     /// at, and no way to ask.
     #[test]
-    fn a_dead_rule_is_a_band_naming_both_hosts() {
+    fn a_dead_rule_is_a_bar_naming_both_hosts() {
         let notices = about_page(&dead_rule(), 9_000);
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].severity, Severity::Caution);
-        assert!(
-            !notices[0].severity.fills_the_viewport(),
-            "the page under it is readable"
-        );
         assert!(
             notices[0].body.contains("alt.example.net"),
             "the host aimed at"
@@ -684,7 +856,7 @@ mod tests {
     /// A truncated body ends mid-article with nothing on screen to say so, which is the exact
     /// definition of something the reader would otherwise mis-read.
     #[test]
-    fn every_truncation_is_a_band_and_a_whole_body_is_not() {
+    fn every_truncation_is_a_bar_and_a_whole_body_is_not() {
         let mut clean = page(200);
         clean.truncation = Truncation::Complete;
         assert!(about_page(&clean, 9_000).is_empty());
@@ -693,7 +865,7 @@ mod tests {
             let mut p = page(200);
             p.truncation = t;
             let notices = about_page(&p, 9_000);
-            assert_eq!(notices.len(), 1, "{t:?} produced {} bands", notices.len());
+            assert_eq!(notices.len(), 1, "{t:?} produced {} bars", notices.len());
             assert_eq!(notices[0].severity, Severity::Caution);
             assert!(!notices[0].body.is_empty());
         }
@@ -716,13 +888,13 @@ mod tests {
     /// Loudest first, across all four. A dead rule outranks everything because it is the only
     /// one that says the article may be the wrong article.
     #[test]
-    fn the_bands_are_ordered_loudest_first() {
+    fn the_bars_are_ordered_loudest_first() {
         let mut p = dead_rule();
         p.status = 500;
         p.truncation = Truncation::Incomplete(812_345);
         let notices = about_page(&p, 10);
         assert_eq!(notices.len(), 4);
-        assert!(notices[0].body.contains("rule appears dead"));
+        assert!(notices[0].body.contains("appears dead"));
         assert!(notices[1].body.contains("incomplete"));
         assert!(notices[2].body.contains("500"));
         assert!(notices[3].body.contains("JavaScript"));
@@ -739,13 +911,6 @@ mod tests {
     }
 
     #[test]
-    fn the_mark_matches_the_conventions_it_generalises() {
-        assert!(MARK.starts_with('['));
-        assert!(MARK.ends_with(']'));
-        assert!(!MARK.contains(char::is_whitespace));
-    }
-
-    #[test]
     fn a_page_with_hebrew_or_arabic_gets_the_rtl_caution_and_a_latin_page_does_not() {
         let mut d = crate::html::extract(
             "<html><body><article><p>A page in Latin script, long enough to be a paragraph on \
@@ -759,6 +924,5 @@ mod tests {
             )]));
         let n = rtl(&d).expect("a caution");
         assert_eq!(n.severity, Severity::Caution);
-        assert!(!n.severity.fills_the_viewport());
     }
 }

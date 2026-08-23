@@ -125,7 +125,8 @@ and `session::Loaded` and touches no extractor.
     reader/face.rs         which of the ten faces an inline style is set in. No egui types
     reader/ui/             everything that needs an egui::Context, and nothing else
     reader/ui/fonts.rs     the font bytes, and the family chains they are registered in
-    reader/ui/notice_ui.rs the one place the reader draws about itself: a band, and the
+    reader/ui/notice_ui.rs the one place the reader draws about itself: the infobars, the
+                           error page, the splash, the loading line, the toast, and the
                            progress rule the status strip wears during a fetch
     reader/ui/pageinfo_ui.rs  the strip's circled i, and the panel behind it
 
@@ -176,26 +177,36 @@ crate where a `Color32` appears, and that is a property worth keeping greppable.
 this client refuses to reproduce. And no dimensions on `ir::Image`: the extractor does not
 capture them, so the reader reserves layout from what it has actually decoded instead.
 
-**The reading column contains page content and nothing else, and a notice shares no colour role
-or layout idiom with the page.** This is the no-styling rule one layer out. Everything the
-reader reports *about* a page is a band drawn by `reader::ui::notice_ui::band`, full-bleed across
-the central panel, which is the one property an `ir::Block` cannot have: the column is a fixed
-measure and a band is not. That is the load-bearing signal, because it survives a screenshot, a
-monochrome eye, and a theme nobody has designed yet; `notice::MARK` is the second, and
-`Severity::word` is the third, because a hue can be missed and a printed word cannot. Colour is
-support, and `theme::every_notice_ink_is_legible_on_its_own_ground` holds the floor by walking
-`notice_ink` rather than by listing pairs. A band borrows no page idiom: not `heading_font`, not
-`body_font`, not the quote rule, not the code frame. Only `Caution` has a ground of its own:
-`Quiet` and `Failure` fill the viewport, so they have no page underneath to be a different
-surface *from*, and a notice that is the whole viewport needs no mark to be told apart from a
-page that is not there. The four inline
-exceptions (`[image]`, `Block::Embed`, "(N replies hidden)", `notice::PENDING`) are *positional*,
-marking one thing at one place, which a full-bleed band cannot do; they carry the bracket
-convention instead. `notice::PENDING` is the newest and shows what the rule buys: the obvious mark
-for "this link's page is being fetched" is a coloured underline, which is the reader speaking
-inside the column, in a notice colour, in the page's own link idiom, and painted on the baseline
-the hover rule already uses. `[loading]` says the same thing and borrows nothing.
-Wording lives in `src/reader/notice.rs`, outside `ui/`, so the fast CI job tests it.
+**The reading column contains page content and nothing else, and the reader reports about a
+page the way every other browser does.** This is the no-styling rule one layer out. A remark
+about a loaded page is an **infobar** (`reader::ui::notice_ui::bar`): docked under the URL and
+find bars and above the scroll area, which is a place no `ir::Block` can reach, with a painted
+severity icon at the left, one sentence, the actions as buttons, and a close. One bar per
+remark, stacked, the rewrite bar first. A failed navigation is an **error page**
+(`notice_ui::error_page`); the idle screen is a splash; a first load is one dim line; a
+transient status ("Copied URL", the hosts `I` is about to contact) is a toast, a dark pill above
+the strip for `notice::TOAST_FOR`, in `toast_bg` / `toast_fg`, the palette's one inversion.
+Firefox's notification bar, Chrome's infobar, GTK's InfoBar, Chrome's error page, and Material's
+snackbar are the models, on
+Jakob's law: a second browser should not invent a grammar for "something about this page". The
+load-bearing signal is position, then shape: the icon is a triangle, a circled `i`, or a
+crossed circle, which survives a screenshot and a monochrome eye, and `Severity::word` is the
+icon's accessible name and hover text, so a screen reader gets it too. Colour is support: a
+caution bar takes a pale tint (`caution_bg`, 1.15:1 from the page, and every ink on it clears
+the floor), an information bar the chrome ground, and
+`theme::every_notice_ink_is_legible_on_its_own_ground` holds that by walking `notice_ink`.
+A bar borrows no page idiom: not `heading_font`, not `body_font`, not the quote mark, not the
+code ground; the error page's heading is the named exception (`theme::notice_heading_font`).
+Every sentence names its actor as the subject, *hww* for what the reader did and the host for
+what the server did; `every_remark_names_its_actor` pins it. A bar can be closed, for the page
+it is about and no longer (`Chrome::dismissed`, cleared in `commit`), and the page-info panel
+keeps the record. The three inline exceptions (`[image]`, `Block::Embed`, `notice::PENDING`)
+are *positional*, marking one thing at one place, which a docked bar cannot do; they carry the
+bracket convention. `notice::PENDING` shows what the rule buys: the obvious mark for "this
+link's page is being fetched" is a coloured underline, which is the reader speaking inside the
+column, in a notice colour, in the page's own link idiom. `[loading]` says the same thing and
+borrows nothing. Wording lives in `src/reader/notice.rs`, outside `ui/`, so the fast CI job
+tests it.
 
 **The reading column lays out a window, not a page.** egui lays out every widget it is handed,
 every frame; only *painting* is clipped by the scroll area. A thousand-block changelog measured
@@ -238,13 +249,13 @@ back to.
 
 **A navigation does not blank the reading column.** The outgoing page stays, readable and
 scrollable, until a new document commits; `Page::Loading::from` is where it lives and
-`Page::take_shown` is how it is drawn. The loading band is therefore emitted only when there is no
+`Page::take_shown` is how it is drawn. The loading line is therefore emitted only when there is no
 page under it, which is `notice::loading` returning `None` on its third argument: the decision is
 in `notice.rs` and not in `ui/` for the usual reason, that the fast job is the only thing that
 reads it. Everything else the reader has to say about a fetch in flight goes in the chrome
 instead. The strip counts the seconds, and `notice_ui::progress_rule` draws what is left of the
 `fetch::TIMEOUT` budget. This is the column rule reaching the case where the honest answer is to
-say nothing in the column at all, and it is why `notice_ui` owns two functions rather than one.
+say nothing in the column at all.
 
 The corollary is that `navigate` sets up a *request* and `ReaderApp::commit` sets up a *page*. Any
 reset belonging to the arriving document (textures, collapsed threads, find position, and above
@@ -257,26 +268,54 @@ rule, and the repaint floor.
 different clock from colour, and mixing them meant adding a theme required reading layout code
 while colour drifted unwatched: `dim` was under AA on every ground but the page for as long as
 the euclidean-distance test that was supposed to catch it existed. Form is the measure, the
-family roles, the type scale, band geometry, panel separation, and which severity gets a heading.
-A palette is thirteen colours and `dark_mode`; a contrast floor is not a colour, so it is
-`Theme::floor()` and not a `Palette` field.
+family roles, the type scale, bar geometry, panel separation, the radius, and which severity
+gets a heading. A palette is sixteen colours and `dark_mode`; a contrast floor is not a colour,
+so it is `Theme::floor()` and not a `Palette` field.
 
 The chrome is **monospace and labelled**, the page is proportional and gets no chrome fills. One
 family is what tells a reader which of the two is speaking. `TextStyle::Small` therefore maps to
 `theme::small_font`, which is the chrome *size* in the *page's* family, because `.small()` is page
 text at most of its call sites; chrome asks for `theme::chrome_font` by name. The rule: the page's
-words take `Small`, the reader's take `chrome_font`.
+words take `Small`, the reader's take `chrome_font`. A chrome *label* (the site eyebrow over a
+title, a panel's title, a page-info group) is `theme::label_job`: uppercase with a little
+tracking, the chrome font and size, never smaller. The error page's heading is the one line of
+the reader's that is not monospace, and `theme::notice_heading_font` says why.
 
-**A docked panel takes `bg` and one `guide` edge; only a surface that floats over the page takes
-`chrome_bg`.** Position already separates a docked panel from the page, and a fill on top of
-position says it twice. `chrome_bg` has exactly four consumers, all floating: the hover-URL strip,
-the page-info panel, the help card, and `visuals.window_fill`, which dresses egui's tooltips.
-Anything else reaching for it is a docked surface that has drifted. `rule` and `guide` are two
-roles for a reason: `rule` is decoration (a separator, the code frame, the window stroke) and
-measures 1.41 / 1.41 / 1.48 against `bg`, while `guide` identifies structure (the blockquote bar,
-the thread indent, a panel edge, a band hairline, the border of a button or text field at rest)
-and is held to 3:1 against both `bg` and `chrome_bg`. Firming every divider in order to fix two
-bars was the alternative, and it was worse.
+**Over a sans page, the title and the first two heading levels are set in the serif.** Plex
+Serif is embedded for the serif reading choice, so the display face costs nothing, and a text
+face under a display face is the oldest pairing there is. `theme::heading_role` decides: a serif
+or mono page keeps its own family throughout, because a reader who chose one family chose it for
+the whole page; the title is the display role's bold; levels past three follow the body.
+`headings_take_the_display_role_only_over_a_sans_page` pins it. The document header is an
+eyebrow (site name, or host), the title, a byline row, and a `rule`; headings carry more air
+above than below (`heading_space_above`), inside the block so `measure::Heights` sees it. A
+quotation is a large serif opening mark hung in the indent, in `guide`, with the text upright;
+a link in prose is the link colour over a one-physical-pixel underline in `link_underline`
+(`link` at 65%, held to 3:1 over `bg` by `the_link_underline_is_visible`, which blends the way
+epaint does), and a story card's headline is the link colour with no underline, because the card
+is the affordance and nothing non-link surrounds it.
+
+**One radius, on what sits on the page or floats over it, and never on what spans the window.**
+`theme::RADIUS` is five points, installed on every egui control in `theme::apply` and taken by
+name by the frames drawn by hand: the code ground, the image frame, a comment's header row and
+its reply-count chip, a keycap, the outline's current entry, the floating panels. A bar, the
+strip, the URL and find bars, a rule, a guide, and the quote mark are edges, and an edge has no
+corner to round. Three read as square from reading distance and seven turns an 18 pt keycap into
+a pill; five is the one value that suits the cap and a 300 pt image alike.
+
+**Top chrome takes `chrome_bg` and one `guide` edge; the status strip stays on `bg`; a floating
+surface takes `chrome_bg`, a `guide` stroke, and the radius.** The URL bar, the find bar, the
+notice bars, and the outline panel are where input and reports live, and a ground under them is
+what says so; the strip reports and stays quiet on the page ground, segmented by `rule`
+hairlines. The floating set is the hover-URL strip, the page-info panel, the help card, and
+`visuals.window_fill`, which dresses egui's tooltips and the link context menu; the toast floats
+too but takes its own pair, because it has to be found in a second on any ground. `rule` and
+`guide` are two roles for a reason: `rule` is decoration (a separator, the strip's dividers, the
+hairline between story cards, the window stroke) and measures 1.41 / 1.41 / 1.48 against `bg`,
+while `guide` identifies structure (the quote mark, the thread indent, a panel edge, the outline's
+current-entry bar, the border of a button, a keycap, or a text field at rest) and is held to 3:1
+against both `bg` and `chrome_bg`. Firming every divider in order to fix two bars was the
+alternative, and it was worse.
 
 A control at rest has no fill, so its border is the whole affordance and it is a `guide`. The
 failure screen is where that bites: Retry, Retry without rewrite, and Copy URL are the only
@@ -322,7 +361,9 @@ and this file. The capability lives behind the `gui` feature, so the `hww` CLI r
 compile-time absence of it, and inside the reader it is allowed only because: the placeholder
 **names the host before the click**, the click is a deliberate user action, the load is
 counted alongside cookie attempts in the page-info panel (`p`, or the circled `i` at the right
-of the status strip), and nothing is ever auto-loaded, prefetched, or loaded on hover. `I`
+of the status strip), and nothing is ever auto-loaded, prefetched, or loaded on hover — except
+the page favicon beside the masthead eyebrow, which is chrome identity and is fetched as soon
+as the document names one. `I`
 (load all) still names the distinct hosts first. No image touches disk.
 
 **`referer(false)` remains.** `reqwest` never attaches a Referer on its own, on any request or
@@ -472,14 +513,18 @@ upload are merely compiled. Tests worth keeping named:
   existed the whole time and two strings shipped with `→` anyway, one of them a heading, tofu
   from the day it was written. Prose does not fail a build.
 - The contrast tests in `src/reader/ui/theme.rs`: `every_palette_meets_its_floor`,
-  `every_notice_ink_is_legible_on_its_own_ground`, `a_caution_band_is_a_different_surface`,
-  `guide_is_visible_where_it_is_drawn`, and `chrome_is_monospace`. They measure WCAG 2.2 relative
+  `every_notice_ink_is_legible_on_its_own_ground`,
+  `a_caution_bar_is_tinted_and_its_inks_clear_the_floor`, `the_link_underline_is_visible`,
+  `guide_is_visible_where_it_is_drawn`, `chrome_is_monospace`, and
+  `headings_take_the_display_role_only_over_a_sans_page`. They measure WCAG 2.2 relative
   luminance and they replaced `notice_fill_clears_every_page_colour`, which measured euclidean RGB
   against a floor of 24 and passed a band at 47.6 / 35.9 / 48.0 that was 1.29 / 1.19 / 1.34 in
   luminance. That is how a palette drifts under a passing test, and it is why the metric matters
   more than the threshold. `every_notice_ink_is_legible_on_its_own_ground` walks `notice_ink`
-  rather than listing pairs: `dim` is 3.10 on Light's `caution_bg`, so a hand-written list cannot
-  catch `aside` reverting to it.
+  rather than listing pairs: `dim` measured 3.10 on the old Light caution ground, which is the
+  kind of pair a hand-written list does not notice. The caution tint's own floor is 1.1, down
+  from the band's 1.5, because the ground stopped being the signal when the icon, the dock, and
+  the close arrived; what the test holds instead is every ink on it.
 
   These are admitted under `ui/` on the argument, not the precedent: `palette`, `notice_ink`,
   `chrome_font`, and `small_font` take no `egui::Context`, unlike `apply`, `measure_px`, and
@@ -593,7 +638,7 @@ Real, and worth knowing before re-discovering them:
   worth keeping: `→` was a gap in a particular set of faces and closed when the faces changed,
   while `ⓘ` is a gap in what text faces are *for*.
 - **Right-to-left text cannot work, and the tail is chosen so that it fails visibly; the
-  reader now says so.** `notice::rtl` puts a Caution band on any document with a run in
+  reader now says so.** `notice::rtl` puts a caution bar on any document with a run in
   U+0590–U+08FF, which is the honest completion of the choice below. epaint
   shapes with `harfrust`, so joining and marks are right, but it has no bidi: `epaint::text::font`
   carries `TODO(emilk): heed bidi characters` and `text_layout` notes that script-aware run

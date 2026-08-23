@@ -51,6 +51,12 @@ pub struct Setting {
     /// separately from `font` because a `FontId` names one family and an inline style needs the
     /// other three of that role's four.
     pub role: FontChoice,
+    /// Whether a link in these runs is underlined. True for prose, where the underline is the
+    /// one cue that says "link" to an eye that does not see the hue (WCAG 1.4.1: the link
+    /// colour is 2.1 / 1.4 from `fg`, short of the 3:1 a colour-only link needs); false for a
+    /// story card's headline, where nothing non-link surrounds it and the card is the
+    /// affordance, which is how every front page sets them.
+    pub underline: bool,
 }
 
 impl Setting {
@@ -59,6 +65,7 @@ impl Setting {
             font: theme::body_font(opts),
             color: pal.fg,
             role: opts.family,
+            underline: true,
         }
     }
 
@@ -68,14 +75,26 @@ impl Setting {
             font: theme::chrome_font(opts),
             color: pal.dim,
             role: FontChoice::Mono,
+            underline: true,
         }
     }
 
+    /// A heading at `level`, in the role `theme::heading_role` gives it: the serif over a sans
+    /// page for levels 1–3 (and the title), the body family past that.
     pub fn heading(opts: &ReadOpts, pal: &Palette, level: u8) -> Self {
         Self {
             font: theme::heading_font(opts, level),
             color: pal.fg,
-            role: opts.family,
+            role: theme::heading_role(opts, level),
+            underline: true,
+        }
+    }
+
+    /// A story card's headline: the smallest heading, linked without an underline.
+    pub fn headline(opts: &ReadOpts, pal: &Palette) -> Self {
+        Self {
+            underline: false,
+            ..Self::heading(opts, pal, 4)
         }
     }
 }
@@ -238,7 +257,17 @@ fn link_ui(
     offset: &mut usize,
 ) {
     let mut job = new_job();
-    let underline = Stroke::new(1.0, ctx.pal.link);
+    // One *physical* pixel in the underline tint, or nothing: a hairline in `link_underline`
+    // is the quiet underline long-form sites set (`theme::Palette::link_underline`), and a
+    // logical point on a 2x display is two device pixels, which reads heavy.
+    let underline = if set.underline {
+        Stroke::new(
+            (1.0 / ui.ctx().pixels_per_point()).max(0.5),
+            ctx.pal.link_underline,
+        )
+    } else {
+        Stroke::NONE
+    };
     // epaint draws an underline at the bottom of the glyph's *logical* rect, whose height is
     // the section's line height, so at a reading line height of 1.55 the rule lands most of a
     // line below the words, close enough to the next row to read as a stray horizontal line.
@@ -339,10 +368,12 @@ fn link_ui(
     }
     if resp.has_focus() {
         ctx.focus_href = Some(href.to_owned());
+        // Two points wide (WCAG 2.4.13's perimeter), two out from the words, and rounded
+        // with the one radius every control takes.
         ui.painter().rect_stroke(
             resp.rect.expand(2.0),
-            2.0,
-            Stroke::new(1.0, ctx.pal.link),
+            theme::RADIUS,
+            Stroke::new(2.0, ctx.pal.link),
             egui::StrokeKind::Outside,
         );
     }

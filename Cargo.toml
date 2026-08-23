@@ -7,8 +7,8 @@ default-run = "hww"
 
 [features]
 default = []
-# The reading GUI. Off by default so the `hww` CLI keeps compile-time absence of the one
-# network capability the reader adds — loading an image subresource on an explicit click.
+# The reading GUI. Off by default so the `hww` CLI keeps compile-time absence of the image
+# subresource path (article pictures on click, and the page favicon).
 gui = ["dep:eframe", "dep:image", "dep:winit"]
 # Local-only corpus tooling. Behind a feature because `rusqlite = { bundled }` compiles a C
 # SQLite that exists solely for `bin/corpus`.
@@ -35,7 +35,7 @@ eframe = { version = "0.36.1", default-features = false, features = ["wgpu", "x1
 # GNOME/Wayland). It cannot be done as `features = ["winit/default"]` on eframe: cargo rejects
 # a slash in a dependency's feature list unless eframe re-exports it, which it does not.
 winit = { version = "0.30", optional = true }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"], optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico"], optional = true }
 rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
 
 # An explicit [[bin]] whose `path` matches an auto-discovered file takes precedence and merges

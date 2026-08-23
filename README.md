@@ -76,7 +76,8 @@ provenance on stderr.
 
 Both binaries take `--no-rewrite` and `--no-profile` to switch off a per-site table, and
 `--show-rewrites` / `--show-profiles` to print one and exit. The reader lives behind the `gui` feature because it adds one network
-capability the CLI does not have, loading an image on an explicit click; in the `hww` binary
+capability the CLI does not have, loading an image subresource (article pictures on click, and
+the page favicon); in the `hww` binary
 that code is not compiled at all.
 
 For everyday use, build once and run the binary:
@@ -155,10 +156,11 @@ navigate. That strip never hides: the URL bar, outline, find bar, and help all d
 stays.
 
 What the reader has to say about a page divides on whether it can wait. Anything that would be
-mis-read otherwise is a notice: a band across the full width, outside the reading column, which
-no page can be, because the column is a fixed measure. Errors, a 4xx body shown anyway, an
-extraction that came back thin, a body that arrived truncated, and a rewrite rule that landed
-on the wrong host are all notices, and none of them is ever dressed as prose.
+mis-read otherwise is a notice: an infobar docked under the top chrome, where no page can be,
+with a severity icon, one sentence naming who did what, and a close, the shape every browser
+uses for it. A 4xx body shown anyway, an extraction that came back thin, a body that arrived
+truncated, a rewrite rule applied or landed on the wrong host are all bars; a failed navigation
+is an error page; and none of them is ever dressed as prose.
 
 The rest is accounting, and it lives behind the circled `i` (or `p`): encoding, bytes
 downloaded against characters extracted, the redirect chain, cookies discarded, images loaded
@@ -170,10 +172,11 @@ One centred reading column, measured in characters (`[` and `]`). Zoom is egui's
 light, sepia, dark, and follow-the-system (`d`).
 
 **Images are placeholders that name their host** (`[image] load from cdn.example.net`), and
-load only on an explicit click. They are never loaded automatically, on hover, or in advance.
-Each load is counted alongside cookie attempts in the page-info panel, and nothing is written
-to disk. Image requests, and only image requests, carry an origin-only `Referer`; documents carry
-none. See AGENTS.md for why that one header is worth its exception.
+load only on an explicit click. They are never loaded automatically, on hover, or in advance —
+except the page favicon beside the masthead eyebrow, which is fetched as soon as the document
+names one. Each load is counted alongside cookie attempts in the page-info panel, and nothing is
+written to disk. Image requests, and only image requests, carry an origin-only `Referer`;
+documents carry none. See AGENTS.md for why that one header is worth its exception.
 
 ## Building a corpus
 

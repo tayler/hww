@@ -14,13 +14,16 @@
 //! deliberate user action, the load is counted in the provenance strip, and the capability
 //! lives behind the `gui` feature, so the `hww` CLI retains compile-time absence of it.
 //!
-//! Nothing is auto-loaded, prefetched, or loaded on hover.
+//! Article images are never auto-loaded, prefetched, or loaded on hover. The one exception is
+//! the page favicon beside the masthead eyebrow: that is chrome identity, fetched as soon as
+//! the document names a URL (or the well-known `/favicon.ico` fallback), counted the same way,
+//! and omitted from the column until the bytes decode.
 
 use crate::ir;
 use crate::reader::image_decode::Decoded;
 use crate::reader::opts::ImagePolicy;
 use crate::reader::pageinfo::Counts;
-use crate::reader::ui::{Action, RenderCtx};
+use crate::reader::ui::{Action, RenderCtx, theme};
 use eframe::egui::{self, RichText, TextureHandle, Ui};
 use std::collections::{HashMap, HashSet};
 
@@ -200,11 +203,6 @@ enum Snapshot {
     Failed(String),
 }
 
-/// The compact strip a figure or an inline image shows before it is loaded.
-///
-/// One line, because no dimensions live in `ir::Image`, so a tall placeholder would reserve
-/// the wrong box and shift the page when it filled. One line shifts by almost nothing, and a
-/// revisit reserves the right box from [`ImageStore::reserved`].
 /// The first [`ALT_SHOWN`] characters of an alt, cut at a word and marked.
 fn short_alt(alt: &str) -> String {
     if alt.chars().count() <= ALT_SHOWN {
@@ -219,12 +217,22 @@ fn short_alt(alt: &str) -> String {
 /// is for; the full alt stays in the IR and in the caption if the page has one.
 const ALT_SHOWN: usize = 90;
 
+/// The frame a figure shows before it is loaded: a filled, rounded box the measure wide and a
+/// few lines tall, with `[image]`, the alt, and the one control, "load from host".
+///
+/// A few lines and not the image's height, because no dimensions live in `ir::Image`, so a
+/// taller placeholder would reserve the wrong box and shift the page when it filled; a revisit
+/// reserves the right box from [`ImageStore::reserved`]. The host is named *before* the click,
+/// which is the whole argument for allowing the request at all, and the ground is `code_bg`
+/// with a `rule` edge, which is what says "a picture goes here" on a page that has not fetched
+/// one, in the shape every reader app uses for it.
 pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     let alt_full = img.alt.as_deref().unwrap_or("").trim();
     let alt_short = short_alt(alt_full);
     let alt = alt_short.as_str();
     let host = super::inline_ui::image_host(img, &ctx.base);
     let pal = ctx.pal;
+    let font = theme::chrome_font(ctx.opts);
 
     if ctx.opts.images == ImagePolicy::Never {
         // Silently dropping the image is how a reader lies about a page: say it was there.
@@ -245,67 +253,77 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
         Some(State::Ready(_)) => Snapshot::Ready,
         None | Some(State::Offered) => Snapshot::Offered,
     };
-    match state {
-        Snapshot::Loading => {
-            ui.label(
-                RichText::new(format!("[image] loading from {host}…"))
-                    .color(pal.dim)
-                    .font(super::theme::chrome_font(ctx.opts)),
-            );
-        }
-        Snapshot::Failed(why) => {
-            let mut retry = false;
-            let mut focused = false;
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("[image] {why}: {host}")).color(pal.notice_fg));
-                let resp = ui.small_button("retry");
-                retry = resp.clicked();
-                focused = resp.has_focus();
+    if let Snapshot::Ready = state {
+        show_ready(ui, img, ctx);
+        return;
+    }
+    // A revisit knows the box; reserve it so the page does not jump when it fills.
+    let (w, h) = ctx.images.reserved(&img.src).unwrap_or((0, 0));
+    let min_h = if w > 0 && h > 0 {
+        ui.available_width().min(w as f32) * h as f32 / w as f32
+    } else {
+        theme::snap(ctx.opts.base_size_pt * 3.4)
+    };
+    let mut act = false;
+    let mut focused = false;
+    egui::Frame::new()
+        .fill(pal.code_bg)
+        .stroke(egui::Stroke::new(1.0, pal.rule))
+        .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(min_h - 20.0);
+            ui.style_mut().override_font_id = Some(font.clone());
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            ui.vertical_centered(|ui| {
+                ui.spacing_mut().item_spacing.y = theme::snap(ctx.opts.base_size_pt * 0.2);
+                match &state {
+                    Snapshot::Loading => {
+                        ui.label(RichText::new("[image]").color(pal.dim));
+                        ui.label(RichText::new(format!("loading from {host}…")).color(pal.dim));
+                    }
+                    Snapshot::Failed(why) => {
+                        ui.label(RichText::new(format!("[image] {why}")).color(pal.notice_fg));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&host).color(pal.dim));
+                            let resp = ui.small_button("retry");
+                            act = resp.clicked();
+                            focused = resp.has_focus();
+                        });
+                    }
+                    Snapshot::Offered | Snapshot::Ready => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.label(RichText::new("[image] ").color(pal.dim));
+                            if !alt.is_empty() {
+                                ui.label(RichText::new(alt).color(pal.fg));
+                            }
+                        });
+                        let resp = ui.add(
+                            egui::Button::new(
+                                RichText::new(format!("load from {host}"))
+                                    .color(pal.link)
+                                    .underline(),
+                            )
+                            .frame(false),
+                        );
+                        if resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        act = resp.clicked();
+                        focused = resp.has_focus();
+                    }
+                }
             });
-            // Reported like the offer's button: `i` then retries, and the block stays laid
-            // out while Tab rests here.
-            if focused {
-                ctx.focus_image = Some(img.src.clone());
-            }
-            if retry {
-                ctx.act(Action::LoadImage(img.src.clone()));
-            }
-        }
-        Snapshot::Ready => show_ready(ui, img, ctx),
-        Snapshot::Offered => {
-            // The host is named *before* the click, which is the whole argument for allowing
-            // the request at all.
-            let text = if alt.is_empty() {
-                format!("[image] load from {host}")
-            } else {
-                format!("[image] {alt} · load from {host}")
-            };
-            let (w, h) = ctx.images.reserved(&img.src).unwrap_or((0, 0));
-            // Smaller than the prose it interrupts: a placeholder is an offer, not a
-            // sentence, and at body size a photo-heavy page becomes a list of offers.
-            let resp = ui.add(
-                egui::Button::new(
-                    RichText::new(text)
-                        .color(pal.link)
-                        .font(super::theme::chrome_font(ctx.opts)),
-                )
-                .frame(false),
-            );
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            if resp.has_focus() {
-                ctx.focus_image = Some(img.src.clone());
-            }
-            if resp.clicked() {
-                ctx.act(Action::LoadImage(img.src.clone()));
-            }
-            // A revisit knows the box; reserve it so the page does not jump when it fills.
-            if w > 0 && h > 0 {
-                let width = ui.available_width().min(w as f32);
-                ui.add_space(width * h as f32 / w as f32);
-            }
-        }
+        });
+    // Reported like a link's focus: `i` then loads or retries, and the block stays laid out
+    // while Tab rests here.
+    if focused {
+        ctx.focus_image = Some(img.src.clone());
+    }
+    if act {
+        ctx.act(Action::LoadImage(img.src.clone()));
     }
 }
 
@@ -322,7 +340,7 @@ fn show_ready(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     ui.add(
         egui::Image::new(&ready.texture)
             .fit_to_exact_size(egui::vec2(max_w, height))
-            .corner_radius(0.0),
+            .corner_radius(egui::CornerRadius::same(theme::RADIUS)),
     );
     let mut note = format!("{} × {} · {host}", source.0, source.1);
     if let Some(p) = &partial {
@@ -358,9 +376,24 @@ pub fn thumbnail(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
         ui.add(
             egui::Image::new(&ready.texture)
                 .fit_to_exact_size(egui::vec2(w, h))
-                .corner_radius(0.0),
+                .corner_radius(egui::CornerRadius::same(theme::RADIUS)),
         );
     }
+}
+
+/// The page favicon beside the masthead eyebrow. Drawn only when ready: a missing or failed
+/// icon leaves the site label alone, which is what the line was before favicons existed.
+pub fn favicon(ui: &mut Ui, src: &str, ctx: &mut RenderCtx<'_>) {
+    let Some(State::Ready(ready)) = ctx.images.state(src) else {
+        return;
+    };
+    let h = theme::snap(ctx.opts.base_size_pt * 1.1);
+    let w = h * ready.width as f32 / ready.height.max(1) as f32;
+    ui.add(
+        egui::Image::new(&ready.texture)
+            .fit_to_exact_size(egui::vec2(w, h))
+            .corner_radius(egui::CornerRadius::same(theme::RADIUS)),
+    );
 }
 
 /// The one control an entry's thumbnail gets: a small dim `[image]` beside the time, which

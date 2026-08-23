@@ -415,7 +415,8 @@ pub struct FetchedImage {
 }
 
 impl Session {
-    /// Fetch an image on behalf of `page`. Reached only from an explicit click.
+    /// Fetch an image on behalf of `page`. Reached from an explicit click on an article
+    /// image, and from the masthead favicon auto-load.
     ///
     /// `page` is the document being read, and only its **origin** is disclosed; see
     /// [`fetch::Referer::PageOrigin`] for the whole argument.

@@ -8,10 +8,15 @@
 //! opens navigable instead of as forty screens of nesting.
 
 use crate::ir;
+use crate::reader::face::Face;
 use crate::reader::thread_tree::{self, ThreadTree};
 use crate::reader::ui::blocks::blocks_ui;
-use crate::reader::ui::{Action, RenderCtx};
+use crate::reader::ui::{Action, RenderCtx, fonts, theme};
 use eframe::egui::{self, RichText, Ui};
+
+/// The depth guide's width, in points. Two: one read as a hairline beside the header row's
+/// ground, and the guide is the thing a reply four deep is traced back by.
+const GUIDE: f32 = 2.0;
 
 pub fn thread_ui(ui: &mut Ui, comments: &[ir::Comment], ctx: &mut RenderCtx<'_>) {
     let tree = thread_tree::build(comments);
@@ -48,8 +53,9 @@ pub fn thread_ui(ui: &mut Ui, comments: &[ir::Comment], ctx: &mut RenderCtx<'_>)
             let guide = (indent > 0.0).then(|| {
                 ui.add_space(indent);
                 let shape = ui.painter().add(egui::Shape::Noop);
-                let (slot, _) = ui.allocate_exact_size(egui::vec2(1.0, 0.0), egui::Sense::hover());
-                ui.add_space(super::theme::snap(ctx.opts.base_size_pt * 0.5));
+                let (slot, _) =
+                    ui.allocate_exact_size(egui::vec2(GUIDE, 0.0), egui::Sense::hover());
+                ui.add_space(theme::snap(ctx.opts.base_size_pt * 0.5));
                 (shape, slot)
             });
             let reply = ui
@@ -67,7 +73,7 @@ pub fn thread_ui(ui: &mut Ui, comments: &[ir::Comment], ctx: &mut RenderCtx<'_>)
                     egui::Shape::rect_filled(
                         egui::Rect::from_min_max(
                             egui::pos2(slot.left(), reply.top()),
-                            egui::pos2(slot.left() + 1.0, reply.bottom()),
+                            egui::pos2(slot.left() + GUIDE, reply.bottom()),
                         ),
                         0.0,
                         ctx.pal.guide,
@@ -133,6 +139,10 @@ fn is_collapsed(tree: &ThreadTree, n: usize, ctx: &RenderCtx<'_>) -> bool {
     ctx.collapsed.contains(key) != tree.starts_collapsed(n)
 }
 
+/// The comment's header row: the disclosure, the author in the page's bold face, the
+/// timestamp, and, when the reply is folded, a chip with the count. On a faint `code_bg`
+/// ground the width of the comment, rounded with the one radius, so the row reads as the
+/// comment's head and the eye finds the next one down a long thread.
 fn header(
     ui: &mut Ui,
     comment: &ir::Comment,
@@ -143,40 +153,60 @@ fn header(
 ) {
     let node = &tree.nodes[n];
     let pal = ctx.pal;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = super::theme::snap(ctx.opts.base_size_pt * 0.35);
-        if !node.children.is_empty() {
-            let resp = disclosure(ui, collapsed, ctx.opts.base_size_pt, pal.dim);
-            if resp.clicked() {
-                ctx.act(Action::ToggleComment(node.key.clone()));
-            }
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            if resp.has_focus() {
-                ctx.focus_comment = Some(node.key.clone());
-            }
-        }
-        ui.label(
-            RichText::new(comment.author.as_deref().unwrap_or("anon"))
-                .color(pal.strong)
-                .small(),
-        );
-        if let Some(ts) = comment
-            .timestamp
-            .as_deref()
-            .filter(|t| !t.trim().is_empty())
-        {
-            ui.label(RichText::new(ts).color(pal.dim).small());
-        }
-        if collapsed && node.subtree_count > 1 {
-            let hidden = node.subtree_count - 1;
-            let word = if hidden == 1 { "reply" } else { "replies" };
-            ui.label(
-                RichText::new(format!("({hidden} {word} hidden)"))
-                    .color(pal.dim)
-                    .small(),
-            );
-        }
-    });
+    let small = theme::small_font(ctx.opts);
+    let bold = egui::FontId::new(
+        small.size,
+        fonts::family(Face::new(ctx.opts.family, true, false)),
+    );
+    egui::Frame::new()
+        .fill(pal.code_bg)
+        .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::snap(ctx.opts.base_size_pt * 0.35);
+                if !node.children.is_empty() {
+                    let resp = disclosure(ui, collapsed, ctx.opts.base_size_pt, pal.dim);
+                    if resp.clicked() {
+                        ctx.act(Action::ToggleComment(node.key.clone()));
+                    }
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if resp.has_focus() {
+                        ctx.focus_comment = Some(node.key.clone());
+                    }
+                }
+                ui.label(
+                    RichText::new(comment.author.as_deref().unwrap_or("anon"))
+                        .color(pal.strong)
+                        .font(bold),
+                );
+                if let Some(ts) = comment
+                    .timestamp
+                    .as_deref()
+                    .filter(|t| !t.trim().is_empty())
+                {
+                    ui.label(RichText::new(ts).color(pal.dim).font(small.clone()));
+                }
+                if collapsed && node.subtree_count > 1 {
+                    let hidden = node.subtree_count - 1;
+                    let word = if hidden == 1 { "reply" } else { "replies" };
+                    // A chip lifted onto the page ground, so it reads as a count and not as
+                    // the header's own words; positional, like every inline mark.
+                    egui::Frame::new()
+                        .fill(pal.bg)
+                        .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+                        .inner_margin(egui::Margin::symmetric(6, 0))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(format!("{hidden} {word}"))
+                                    .color(pal.dim)
+                                    .font(theme::chrome_font(ctx.opts)),
+                            );
+                        });
+                }
+            });
+        });
 }

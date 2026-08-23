@@ -251,6 +251,19 @@ const THIN: &str = r#"
 </body></html>
 "#;
 
+const RTL: &str = r#"
+<html><head><title>A page with Hebrew</title></head><body>
+<article>
+<h1>A page with Hebrew</h1>
+<p>A Latin paragraph long enough to be a paragraph on its own merits, then a Hebrew run that
+this reader cannot lay out: שלום עולם. The rest of this paragraph exists so the extracted
+text clears the floor: a thin page would raise a second caution about JavaScript, and the
+layout remark would share the panel with a diagnosis that is not this page's.</p>
+<p>Another paragraph of Latin, still about nothing in particular, so the character count
+cannot be mistaken for a page that failed to extract.</p>
+</article></body></html>
+"#;
+
 /// Two images from a loopback host: one that answers with a picture, one that answers 404.
 const IMAGES: &str = r#"
 <html><head><title>The photograph problem</title></head><body>
@@ -283,7 +296,7 @@ fn catalog(port: u16) -> Vec<Scene> {
         ),
         scene(
             "article",
-            "a page that arrived clean: no bands, no chrome",
+            "a page that arrived clean: no bars, no extra chrome",
             vec![page(ARTICLE_URL, ARTICLE)],
         ),
         scene(
@@ -305,6 +318,11 @@ fn catalog(port: u16) -> Vec<Scene> {
             "thin",
             "caution: little content extracted, may require JavaScript",
             vec![page("https://example.com/app", THIN)],
+        ),
+        scene(
+            "rtl",
+            "caution: right-to-left text this reader cannot lay out",
+            vec![page("https://example.com/he", RTL)],
         ),
         scene(
             "status-404",
@@ -333,27 +351,19 @@ fn catalog(port: u16) -> Vec<Scene> {
                 p.truncation = Truncation::Incomplete(41_820);
             })],
         ),
-        Scene {
-            steps: vec![Step::Page {
-                url: ARTICLE_URL.to_owned(),
-                rewrite: Some("[rewrote example.com -> text.example.com]".to_owned()),
-                body: ARTICLE.to_owned(),
-                tweak: |p| {
-                    p.rewritten_to = Some(url("https://text.example.com/2026/the-quiet-web"));
-                    p.rule_appears_dead = true;
-                    p.final_url = url("https://www.example.com/2026/the-quiet-web?src=redirect");
-                    p.hops = vec![url("https://text.example.com/2026/the-quiet-web")];
-                },
-            }],
-            ..scene(
-                "dead-rule",
-                "caution: a rewrite rule landed somewhere else, and is dead",
-                vec![],
-            )
-        },
+        scene(
+            "dead-rule",
+            "caution: a rewrite rule landed somewhere else, and is dead",
+            vec![page_with(ARTICLE_URL, ARTICLE, |p| {
+                p.rewritten_to = Some(url("https://text.example.com/2026/the-quiet-web"));
+                p.rule_appears_dead = true;
+                p.final_url = url("https://www.example.com/2026/the-quiet-web?src=redirect");
+                p.hops = vec![url("https://text.example.com/2026/the-quiet-web")];
+            })],
+        ),
         scene(
             "stacked-cautions",
-            "three bands at once: dead rule, truncation, and 404",
+            "rewrite bar and three cautions: dead rule, truncation, and 404",
             vec![page_with(ARTICLE_URL, ARTICLE, |p| {
                 p.rewritten_to = Some(url("https://text.example.com/2026/the-quiet-web"));
                 p.rule_appears_dead = true;
@@ -439,6 +449,11 @@ fn catalog(port: u16) -> Vec<Scene> {
             vec![page(ARTICLE_URL, ARTICLE), key(Key::Questionmark)],
         ),
         scene(
+            "toast",
+            "Copied URL as a pill above the strip",
+            vec![page(ARTICLE_URL, ARTICLE), key(Key::Y)],
+        ),
+        scene(
             "pageinfo",
             "the page info panel: hops, cookies, rewrite, profile, referer",
             vec![
@@ -468,6 +483,16 @@ fn catalog(port: u16) -> Vec<Scene> {
                 }),
                 key(Key::P),
             ],
+        ),
+        scene(
+            "pageinfo-thin",
+            "page info on a thin page: the extraction floor is in the record",
+            vec![page("https://example.com/app", THIN), key(Key::P)],
+        ),
+        scene(
+            "pageinfo-rtl",
+            "page info on an RTL page: layout stays in the record",
+            vec![page("https://example.com/he", RTL), key(Key::P)],
         ),
         scene(
             "find",

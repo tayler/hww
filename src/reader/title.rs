@@ -174,6 +174,7 @@ mod tests {
             byline: None,
             published: None,
             site_name: site.map(str::to_owned),
+            favicon: None,
             lang: None,
             blocks: head
                 .map(|(level, text)| ir::Block::Heading {
