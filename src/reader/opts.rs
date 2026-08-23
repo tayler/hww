@@ -152,7 +152,7 @@ impl Default for ReadOpts {
         Self {
             measure_chars: 70.0,
             base_size_pt: 17.0,
-            line_height: 1.55,
+            line_height: 1.35,
             paragraph_spacing: 0.85,
             family: FontChoice::Sans,
             theme: Theme::System,

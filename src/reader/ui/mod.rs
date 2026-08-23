@@ -44,7 +44,6 @@ pub struct RenderCtx<'a> {
     pub opts: &'a ReadOpts,
     /// The page being read, for resolving image `src` and naming hosts.
     pub base: Url,
-    pub line_height: f32,
     pub images: &'a mut images::ImageStore,
     pub collapsed: &'a HashSet<CommentKey>,
 
@@ -113,7 +112,6 @@ impl RenderCtx<'_> {
     ) -> RenderCtx<'a> {
         RenderCtx {
             pal,
-            line_height: theme::line_height_px(opts),
             opts,
             base,
             images,

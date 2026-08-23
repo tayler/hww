@@ -928,6 +928,9 @@ impl ReaderApp {
         if k(Modifiers::COMMAND, Key::L) {
             self.open_url_bar();
         }
+        if k(Modifiers::COMMAND, Key::F) {
+            self.open_find();
+        }
         // Alt+arrows on Linux and Windows, Cmd+[ / ] on macOS. Both bound rather than picking
         // a winner; the mouse side buttons work identically everywhere.
         if k(Modifiers::ALT, Key::ArrowLeft) || k(Modifiers::COMMAND, Key::OpenBracket) {
@@ -970,8 +973,7 @@ impl ReaderApp {
             self.chrome.info_open = !self.chrome.info_open;
         }
         if k(Modifiers::NONE, Key::Slash) {
-            self.chrome.find = Some(self.chrome.find.take().unwrap_or_default());
-            self.focus_find = true;
+            self.open_find();
         }
         if self.find_total > 0 && k(Modifiers::NONE, Key::N) {
             self.find_current = (self.find_current + 1) % self.find_total;
@@ -1033,6 +1035,11 @@ impl ReaderApp {
             .unwrap_or_default();
         self.chrome.url_bar = Some(current);
         self.focus_url_bar = true;
+    }
+
+    fn open_find(&mut self) {
+        self.chrome.find = Some(self.chrome.find.take().unwrap_or_default());
+        self.focus_find = true;
     }
 
     fn collapse_focused(&mut self) {
@@ -2167,7 +2174,10 @@ const HELP: &[(&str, &str)] = &[
     ("i / I", "load focused image · load all, naming their hosts"),
     ("t", "outline"),
     ("p", "page info: how this page arrived"),
-    ("/ then Enter / Shift+Enter", "find in page · next / previous match"),
+    (
+        "/ or Ctrl/Cmd+F · Enter / Shift+Enter",
+        "find in page · next / previous match",
+    ),
     ("z / Z", "collapse focused reply · collapse all"),
     ("y / Y", "copy page URL · copy focused link"),
     ("[ / ]", "narrow / widen the reading measure"),

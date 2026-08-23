@@ -332,16 +332,32 @@ pub fn snap(v: f32) -> f32 {
     v.round_ui()
 }
 
-/// Line height in points, shared by every section of every galley.
+/// Body line height in points: [`ReadOpts::line_height`] times the body size.
 ///
-/// This is what keeps baselines aligned across the several labels one paragraph is split into.
-/// A segment that forgets it sits a pixel off its neighbours, and the eye reads that as a
-/// broken line rather than as a subtle bug.
+/// This is the row `j`/`k` move by, and the floor [`line_height_for`] will not go under, so a
+/// caption keeps the page's rhythm. It is not the row a title wraps at; a title is 1.9× this
+/// size and used to inherit these pixels as its only leading, which is how descenders sat on
+/// the next line.
 pub fn line_height_px(opts: &ReadOpts) -> f32 {
     // Rounded, because epaint advises an even number of pixels per row for even text and
     // because a fractional row height accumulates into a visibly drifting baseline down a long
     // page.
     snap(opts.base_size_pt * opts.line_height)
+}
+
+/// Display leading, as a multiple of the face's own size. Prose is 1.55; a title at that
+/// ratio of 1.9× the body is double-spaced. Display type is set tighter than prose, not to
+/// the same pixels and not to the same multiple.
+const HEADING_LINE_HEIGHT: f32 = 1.2;
+
+/// Line height in points for text set at `size`.
+///
+/// Every section of one galley still shares one number, which is what keeps the several labels
+/// of a paragraph on one baseline. The body ratio is a floor, so a caption keeps the page's
+/// rhythm; a heading takes 1.2 of *its* size so a wrapped title has air without taking the
+/// body's 1.55.
+pub fn line_height_for(opts: &ReadOpts, size: f32) -> f32 {
+    line_height_px(opts).max(snap(size * HEADING_LINE_HEIGHT))
 }
 
 /// The reading column's width in points.
@@ -513,6 +529,9 @@ pub fn apply(ctx: &egui::Context, opts: &ReadOpts) -> Palette {
     // The reader draws its own focus affordance on links; egui's default is a thick blue box
     // that fights the text.
     visuals.widgets.active.bg_stroke = Stroke::new(1.0, pal.link);
+    // Browser cursor on every Button. Native toolkits keep the arrow; a second browser should
+    // not. `Visuals::dark`/`light` leave this `None`.
+    visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     style.visuals = visuals;
 
     style.text_styles = [
@@ -788,6 +807,22 @@ mod tests {
             fonts::family(Face::new(FontChoice::Serif, false, false))
         );
         assert!(heading_space_above(&opts, 2) > heading_space_above(&opts, 5));
+    }
+
+    /// A title is 1.9× the body. Wrapping it at the body's pixels is 0.82 of its own size,
+    /// which is how descenders sat on the next line. The body row stays the floor so a caption
+    /// keeps the page's rhythm.
+    #[test]
+    fn a_wrapped_title_takes_its_own_leading() {
+        let opts = ReadOpts::default();
+        let body = line_height_px(&opts);
+        let title = heading_font(&opts, 1).size;
+        let title_lh = line_height_for(&opts, title);
+        assert!(title_lh > body);
+        assert_eq!(title_lh, snap(title * HEADING_LINE_HEIGHT));
+        assert!(title_lh < snap(title * opts.line_height));
+        assert_eq!(line_height_for(&opts, opts.base_size_pt), body);
+        assert!(line_height_for(&opts, opts.base_size_pt * 0.8) >= body);
     }
 
     /// `Theme::System` is a redirect, not a palette. If it ever grew colours of its own they

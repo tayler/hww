@@ -289,7 +289,10 @@ the whole page; the title is the display role's bold; levels past three follow t
 `headings_take_the_display_role_only_over_a_sans_page` pins it. The document header is an
 eyebrow (site name, or host), the title, a byline row, and a `rule`; headings carry more air
 above than below (`heading_space_above`), inside the block so `measure::Heights` sees it. A
-quotation is a large serif opening mark hung in the indent, in `guide`, with the text upright;
+wrapped title takes `line_height_for` of its own size, not the body's pixels
+(`a_wrapped_title_takes_its_own_leading`): 1.2 of the heading, not the body's 1.55, and the
+body row is the floor so a caption keeps the page's rhythm. A quotation is a large serif opening mark hung in the indent, in `guide`, with
+the text upright;
 a link in prose is the link colour over a one-physical-pixel underline in `link_underline`
 (`link` at 65%, held to 3:1 over `bg` by `the_link_underline_is_visible`, which blends the way
 epaint does), and a story card's headline is the link colour with no underline, because the card

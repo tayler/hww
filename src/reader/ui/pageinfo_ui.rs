@@ -58,7 +58,8 @@ pub fn icon(ui: &mut Ui, pal: &Palette, opts: &ReadOpts) -> egui::Response {
             ink,
         );
     }
-    resp.on_hover_text("Page info (p)")
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Page info (p)")
 }
 
 /// The panel itself. `open` is `Chrome::info_open`, so `Esc`, `p`, and the window's own close

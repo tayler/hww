@@ -308,9 +308,6 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
                             )
                             .frame(false),
                         );
-                        if resp.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
                         act = resp.clicked();
                         focused = resp.has_focus();
                     }

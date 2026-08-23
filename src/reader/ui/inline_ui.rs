@@ -24,7 +24,8 @@
 //!
 //! The one genuine advantage of a single galley is guaranteed identical baselines, and the
 //! mitigation is one line: every section of every segment carries the same
-//! [`theme::line_height_px`] and the same `valign`.
+//! [`theme::line_height_for`] (the body's row, or the heading's own when the runs are a
+//! heading) and the same `valign`.
 //!
 //! The other thing a single galley would buy is full justification, which this cannot do, so
 //! there is deliberately no `justify` field in `ReadOpts`. If justification is ever wanted
@@ -179,8 +180,8 @@ fn append(
     ctx: &mut RenderCtx<'_>,
     offset: usize,
 ) {
-    let (pal, line_height) = (ctx.pal, ctx.line_height);
-    let base = format_for(style, set, &pal, line_height);
+    let pal = ctx.pal;
+    let base = format_for(style, set, &pal, ctx.opts);
     // Find highlighting splits a run into background-carrying pieces; with no query, this is
     // one piece and one section.
     for (piece, hit) in ctx.split_by_matches(text, offset) {
@@ -198,7 +199,7 @@ fn append(
                 // greyscale, which a second background never did.
                 //
                 // The weight comes from the run's own size, not from `base_size_pt`: a code run
-                // is at 0.92x and a level-1 heading at 1.65x, and one fixed weight looks heavy
+                // is at 0.92x and a level-1 heading at 1.9x, and one fixed weight looks heavy
                 // on the first and thin on the second. `background` is deliberately left alone,
                 // so a match inside a code run keeps `code_bg` and takes the underline on top.
                 fmt.underline = Stroke::new((fmt.font_id.size * 0.09).max(1.0), ctx.pal.notice_fg);
@@ -214,7 +215,7 @@ fn append(
     }
 }
 
-fn format_for(style: Style, set: &Setting, pal: &Palette, line_height: f32) -> TextFormat {
+fn format_for(style: Style, set: &Setting, pal: &Palette, opts: &ReadOpts) -> TextFormat {
     // Code is monospace whatever the page is set in, and smaller for the reason on
     // `theme::CODE_SCALE`.
     let (role, size) = if style.code {
@@ -237,7 +238,9 @@ fn format_for(style: Style, set: &Setting, pal: &Palette, line_height: f32) -> T
         // Shared by every section of every segment: this is what keeps the several labels of
         // one paragraph on one baseline. A segment that forgets it sits a pixel off its
         // neighbours, and the eye reads that as a broken line rather than as a subtle bug.
-        line_height: Some(line_height),
+        // Sized from the runs' face, not from the body: a title at 1.9× used to wrap at the
+        // body's pixels, which is 0.82 of its own size.
+        line_height: Some(theme::line_height_for(opts, set.font.size)),
         // TOP, everywhere, and the choice is load-bearing. epaint positions a glyph at
         // `font_ascent + valign_factor * (row_height - section_line_height)`. With TOP the
         // factor is zero, so every section sits on the same baseline *no matter what line
@@ -295,7 +298,7 @@ fn link_ui(
         *offset += text.len();
     }
     if ctx.opts.show_link_urls {
-        let mut fmt = format_for(Style::default(), set, &ctx.pal, ctx.line_height);
+        let mut fmt = format_for(Style::default(), set, &ctx.pal, ctx.opts);
         fmt.color = ctx.pal.dim;
         fmt.font_id.size *= 0.85;
         job.append(&format!(" <{href}>"), 0.0, fmt);
