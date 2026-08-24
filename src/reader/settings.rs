@@ -32,6 +32,13 @@ pub struct Settings {
     /// which is 1.5 lines of the default body and lands short of a step; three is the browser
     /// convention and is what `j`/`k` already moved.
     pub scroll_lines: f32,
+    /// Whether the menu bar is drawn.
+    ///
+    /// The one setting here that exists because of a chrome decision rather than a reading one.
+    /// Every other surface in this reader hides (the URL bar, the find bar, the outline, the
+    /// panels), and a menu bar that cannot costs a row of every page forever. `F10` reveals it
+    /// again, so turning it off is never a way to lose the reader's own controls.
+    pub show_menu_bar: bool,
 }
 
 impl Default for Settings {
@@ -41,6 +48,7 @@ impl Default for Settings {
             zoom_factor: 1.0,
             send_image_referer: true,
             scroll_lines: 3.0,
+            show_menu_bar: true,
         }
     }
 }
@@ -48,6 +56,22 @@ impl Default for Settings {
 impl Settings {
     pub const SCROLL_LINES_MIN: f32 = 0.5;
     pub const SCROLL_LINES_MAX: f32 = 20.0;
+
+    /// egui's `zoom_factor`, bounded so a slider has two ends.
+    ///
+    /// Wider than the reading-size band on purpose: this is the accessibility lever, and it is
+    /// the one that scales strokes, radii and fixed margins along with the type. A hand-edited
+    /// `0` would render a window of nothing.
+    ///
+    /// The two numbers are egui's own `MIN_ZOOM_FACTOR` / `MAX_ZOOM_FACTOR` (`gui_zoom.rs`),
+    /// and they have to be, because the reader implements no zoom of its own: `Ctrl`+`+`/`-`,
+    /// `Ctrl`+wheel and pinch are handled inside egui and reach this whole range whatever hww
+    /// says. A narrower band here would not stop them, it would only disagree with them, and
+    /// the disagreement is not inert — `Slider` defaults to `SliderClamping::Always`, so
+    /// merely *opening* the settings panel at a zoom outside the band would pull the value to
+    /// the nearest end and rezoom the window without anyone touching the control.
+    pub const ZOOM_MIN: f32 = 0.2;
+    pub const ZOOM_MAX: f32 = 5.0;
 
     /// [`Self::scroll_lines`] as something safe to multiply a line height by.
     ///
@@ -61,6 +85,18 @@ impl Settings {
         }
         self.scroll_lines
             .clamp(Self::SCROLL_LINES_MIN, Self::SCROLL_LINES_MAX)
+    }
+
+    /// [`Self::zoom_factor`] as something safe to hand to egui.
+    ///
+    /// The same argument as [`Self::scroll_lines`]: the file is hand-edited, and `0` is a blank
+    /// window while a negative is a window drawn inside out. Neither reads as a bad setting;
+    /// both read as a broken reader.
+    pub fn zoom_factor(&self) -> f32 {
+        if self.zoom_factor.is_nan() {
+            return Self::default().zoom_factor;
+        }
+        self.zoom_factor.clamp(Self::ZOOM_MIN, Self::ZOOM_MAX)
     }
 }
 
@@ -193,6 +229,7 @@ mod tests {
         want.zoom_factor = 1.25;
         want.send_image_referer = false;
         want.scroll_lines = 5.0;
+        want.show_menu_bar = false;
         save(&want).unwrap();
         let (got, err) = load();
         assert_eq!(got, want);
@@ -225,6 +262,10 @@ mod tests {
         assert!(s.send_image_referer);
         assert_eq!(s.scroll_lines, Settings::default().scroll_lines);
         assert_eq!(s.read, ReadOpts::default());
+        // The newest field, and the one an existing installation will be missing. Defaulting it
+        // to `false` would hide the menu bar for everybody who already has a settings file,
+        // which is precisely the population that would not know `F10` brings it back.
+        assert!(s.show_menu_bar);
     }
 
     /// A hand-edited file is the only way in, so the accessor and not the field is what the
@@ -244,5 +285,68 @@ mod tests {
             Settings::default().scroll_lines
         );
         assert_eq!(with(4.5).scroll_lines(), 4.5);
+    }
+
+    /// The same guard for zoom, which egui does not bound itself.
+    #[test]
+    fn a_hand_edited_zoom_cannot_blank_or_invert_the_window() {
+        let with = |v: f32| Settings {
+            zoom_factor: v,
+            ..Settings::default()
+        };
+        assert_eq!(with(0.0).zoom_factor(), Settings::ZOOM_MIN);
+        assert_eq!(with(-2.0).zoom_factor(), Settings::ZOOM_MIN);
+        assert_eq!(with(1e9).zoom_factor(), Settings::ZOOM_MAX);
+        assert_eq!(
+            with(f32::NAN).zoom_factor(),
+            Settings::default().zoom_factor
+        );
+        assert_eq!(with(1.25).zoom_factor(), 1.25);
+    }
+
+    /// Both bands contain the value the reader opens on. Same argument as
+    /// `every_range_contains_its_default` in `opts`: a slider whose range excludes its own
+    /// starting value moves the setting the instant the panel is drawn.
+    #[test]
+    fn every_settings_range_contains_its_default() {
+        let d = Settings::default();
+        assert!((Settings::ZOOM_MIN..=Settings::ZOOM_MAX).contains(&d.zoom_factor));
+        assert!(
+            (Settings::SCROLL_LINES_MIN..=Settings::SCROLL_LINES_MAX).contains(&d.scroll_lines)
+        );
+    }
+
+    /// The band has to cover everything egui's own zoom reaches, because hww implements no
+    /// zoom: `Ctrl`+`+`/`-`, `Ctrl`+wheel and pinch are handled inside egui and clamp to
+    /// `MIN_ZOOM_FACTOR` / `MAX_ZOOM_FACTOR` in its `gui_zoom.rs`, whatever this file says.
+    ///
+    /// Narrowing either end does not stop those keys, it only disagrees with them, and the
+    /// disagreement rezooms the window on its own: `Slider` defaults to
+    /// `SliderClamping::Always`, so opening the settings panel at a zoom outside the band pulls
+    /// the value to the nearest end and `prefs_ui` then reports it as a change the reader made.
+    /// The numbers are duplicated rather than imported because egui keeps them private.
+    #[test]
+    fn the_zoom_band_covers_everything_eguis_own_keys_reach() {
+        // egui's `MIN_ZOOM_FACTOR` / `MAX_ZOOM_FACTOR`, duplicated because it keeps them
+        // private. A zoom egui can produce has to survive the clamp untouched.
+        for z in [0.2, 0.5, 1.0, 3.0, 5.0] {
+            let s = Settings {
+                zoom_factor: z,
+                ..Settings::default()
+            };
+            assert_eq!(
+                s.zoom_factor(),
+                z,
+                "egui's own zoom reaches {z}; the band moved it"
+            );
+        }
+        // And the clamp still catches what egui never produces: the hand-edited file.
+        let edited = |v| Settings {
+            zoom_factor: v,
+            ..Settings::default()
+        };
+        assert_eq!(edited(0.0).zoom_factor(), Settings::ZOOM_MIN);
+        assert_eq!(edited(-1.0).zoom_factor(), Settings::ZOOM_MIN);
+        assert_eq!(edited(1e9).zoom_factor(), Settings::ZOOM_MAX);
     }
 }

@@ -34,6 +34,7 @@
 use eframe::egui::{self, Key, Modifiers};
 use hww::fetch::{FetchError, Truncation};
 use hww::html;
+use hww::reader::menu::Command;
 use hww::reader::opts::Theme;
 use hww::reader::settings::Settings;
 use hww::reader::ui::{Launch, ReaderApp};
@@ -70,6 +71,14 @@ enum Step {
     /// A real navigation started from a link in the page, as Enter on it does. What a click
     /// does, without needing to know where the link is drawn.
     Follow(String),
+    /// One menu command, as choosing it from the bar does.
+    ///
+    /// The same argument as [`Step::Follow`], one menu over: a synthetic Tab does not
+    /// reliably land focus inside an egui popup, so an item with no key of its own cannot be
+    /// reached by pressing keys at the window. Driving F10 and four Tabs photographs the
+    /// route as far as the open menu and then stops, which is a picture of the menu rather
+    /// than of what the item does.
+    Run(Command),
     Key(Modifiers, Key),
     Type(String),
     Wait(u32),
@@ -449,6 +458,35 @@ fn catalog(port: u16) -> Vec<Scene> {
             vec![page(ARTICLE_URL, ARTICLE), key(Key::Questionmark)],
         ),
         scene(
+            "about",
+            "the About card: all three sentences, not the first one in a toast",
+            // `Step::Run`, not F10 and a row of Tabs: Help, About hww is the item's only
+            // route, and a synthetic Tab does not land focus inside an egui popup, so the key
+            // route photographs an open menu and never the card. The card used to be a
+            // six-second toast carrying `ABOUT[0]` alone, which is why it has cover now: the
+            // two sentences that say what hww refuses to do were the unreachable ones.
+            vec![page(ARTICLE_URL, ARTICLE), Step::Run(Command::ShowAbout)],
+        ),
+        scene(
+            "settings",
+            "the settings panel: every setting, with a sentence about each",
+            vec![page(ARTICLE_URL, ARTICLE), key(Key::Comma)],
+        ),
+        scene(
+            "menubar",
+            "the View menu open: commands, their keys, and the live settings",
+            // F10 focuses the first title, Tab walks to View, Enter opens it. egui menus read
+            // no arrow keys, so this is the whole keyboard route and photographing it is also
+            // what checks that the route exists.
+            vec![
+                page(ARTICLE_URL, ARTICLE),
+                key(Key::F10),
+                key(Key::Tab),
+                key(Key::Tab),
+                key(Key::Enter),
+            ],
+        ),
+        scene(
             "toast",
             "Copied URL as a pill above the strip",
             vec![page(ARTICLE_URL, ARTICLE), key(Key::Y)],
@@ -728,7 +766,12 @@ impl Runner {
                 let url = Url::parse(&url).expect("a fixture URL parses");
                 self.app.present(url, None, Err(error));
             }
-            Step::Nav(_) | Step::Follow(_) | Step::Key(..) | Step::Type(_) | Step::Wait(_) => {
+            Step::Nav(_)
+            | Step::Follow(_)
+            | Step::Run(_)
+            | Step::Key(..)
+            | Step::Type(_)
+            | Step::Wait(_) => {
                 unreachable!("handled against the context")
             }
         }
@@ -766,6 +809,10 @@ impl Runner {
                         }
                         Step::Follow(href) => {
                             self.app.follow_link(&href);
+                            self.wait = 2;
+                        }
+                        Step::Run(command) => {
+                            self.app.run_command(ctx, command);
                             self.wait = 2;
                         }
                         Step::Nav(target) => {
@@ -1642,6 +1689,7 @@ fn clone_step(s: &Step) -> Step {
         Step::Wait(n) => Step::Wait(*n),
         Step::Nav(u) => Step::Nav(u.clone()),
         Step::Follow(u) => Step::Follow(u.clone()),
+        Step::Run(c) => Step::Run(*c),
         Step::Page {
             url,
             rewrite,

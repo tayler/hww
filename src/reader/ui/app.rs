@@ -40,22 +40,25 @@
 //! `Alt`+arrows and `Cmd`+`[`/`]` are bound rather than picking a winner.
 
 use crate::ir;
+use crate::reader::autoload;
 use crate::reader::history::History;
 use crate::reader::measure::{self, Heights};
-use crate::reader::notice::{self, Button, Notice};
+use crate::reader::menu::{self, Command};
+use crate::reader::notice::{self, Button, IMAGES_ARE_OFF, Notice};
 use crate::reader::outline::{self, OutlineEntry};
 use crate::reader::pageinfo;
+use crate::reader::prefs;
 use crate::reader::settings::{self, Settings};
 use crate::reader::thread_tree::CommentKey;
 use crate::reader::title;
 use crate::reader::ui::images::ImageStore;
 use crate::reader::ui::{
-    Action, Launch, RenderCtx, blocks, fonts, net, notice_ui, pageinfo_ui, theme,
+    Action, Launch, RenderCtx, blocks, fonts, menu_ui, net, notice_ui, pageinfo_ui, prefs_ui, theme,
 };
 use crate::session::{self, LoadError, LoadOptions, Loaded, Rewrite, Target};
 use eframe::egui::{self, Align, Key, Layout, Modifiers, RichText, Ui};
 use net::{Job, Msg, Net, ReqId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use url::Url;
 
@@ -182,10 +185,12 @@ struct Ready {
     /// so an image placeholder can be clicked on a page that is already being replaced. Stamping
     /// the job with `current` would hand that reply to whatever committed next, and if the two
     /// pages share an image `src`, which a logo, a sprite, or a CDN path routinely does on the
-    /// same site, the new page would display a picture nobody clicked on it. Article images are
-    /// never auto-loaded; this field is what keeps that true. The masthead favicon is the one
-    /// deliberate exception, and it is stamped with the same id so a late reply cannot land on
-    /// the next page.
+    /// same site, the new page would display a picture nobody asked for on it. That is the
+    /// whole job of this field, and the automatic policy makes it matter more rather than less:
+    /// `ReaderApp::autoload` plans against the page this id names, and the pool compares it
+    /// with `Net::mint_page`'s value to drop what was queued for a page that has been left.
+    /// The masthead favicon is stamped with the same id, so a late reply cannot land on the
+    /// next page.
     req: ReqId,
 }
 
@@ -195,7 +200,13 @@ struct Chrome {
     outline_open: bool,
     find: Option<String>,
     help_open: bool,
+    about_open: bool,
     info_open: bool,
+    settings_open: bool,
+    /// Set by `F10`, consumed by the next `menu_bar` draw. `MenuButton` takes
+    /// `ui.next_auto_id()`, so the title's id does not exist until the bar has been laid out
+    /// and focus has to be requested on the response rather than on an id known in advance.
+    focus_menu_bar: bool,
     /// Notice bars closed on the page on screen, by `Notice::key`. Cleared in `commit`, with
     /// every other per-page reset: a dismissal is about *this* page and no other.
     dismissed: HashSet<String>,
@@ -227,6 +238,18 @@ pub struct ReaderApp {
     hover_height: f32,
     chrome: Chrome,
     images: ImageStore,
+    /// Which blocks of the page on screen contain each image `src`. Built once when it
+    /// commits; see [`image_blocks`].
+    image_blocks: HashMap<String, Vec<usize>>,
+    /// How many times `ImagePolicy::Auto` has asked for each `src` on the page on screen.
+    ///
+    /// A count and not a set, because the LRU can drop a picture that is still on the page:
+    /// one refill is right and an unbounded number is a request loop. `autoload::MAX_ATTEMPTS`
+    /// holds the reasoning, and `autoload::plan` the other half of the pair.
+    auto_attempts: HashMap<String, u32>,
+    /// The hosts the automatic policy has already named on the page on screen, so "who is
+    /// being contacted" is answered once per host rather than once per picture.
+    auto_announced: HashSet<String>,
     /// How tall each block was the last time it was laid out, so the blocks off the window can
     /// be skipped. See `reader::measure` for why, and `ready_screen` for when it is ignored.
     heights: Heights,
@@ -285,6 +308,15 @@ pub struct ReaderApp {
     /// they were meant to be never fires. The snapshot is the value the guard wanted: focus was
     /// on a link when this frame began, so the widget carrying it has to be drawn again.
     focus_was_on_page: bool,
+    /// The href focus was on when this frame began, taken beside [`Self::focus_was_on_page`]
+    /// and for the same reason.
+    ///
+    /// The chrome is drawn *before* the page, so anything upstream of the render that asks
+    /// "is a link focused?" reads `focused_href` after the clear and gets `None` every time.
+    /// That is not a slow path the way the layout guard was; it is a menu item greyed for
+    /// good. `Shift+Y` worked the whole time only because `handle_keys` runs ahead of the
+    /// clear, which is what made the gap invisible.
+    focus_href_was: Option<String>,
     /// Which block the focused widget was found in this frame, and the frame before: the one
     /// block that must be laid out for egui to keep the focus, which is what used to cost the
     /// whole page for as long as a link had it.
@@ -345,6 +377,41 @@ fn scroll_step(settings: &Settings) -> f32 {
 /// returns `None` when accesskit is off, and the root node is the single id that always exists
 /// while it is on, so asking for *that* one reads the state rather than creating a node nobody
 /// wanted. The closure writes nothing.
+/// A floating card centred in the window: the help card's frame, now that two things want it.
+///
+/// An `Area` and not a `Window`. A `Window` brings a title bar egui paints from its own
+/// visuals, which is why this was the one piece of chrome that did not take the reader's
+/// palette. Two things `Window` was giving away for free have to be asked for: the order, or
+/// this draws under `hover_strip`, which is `Foreground`; and the constraint, or a card taller
+/// than a short window runs off the bottom edge with no way back.
+///
+/// `chrome_bg`, a `guide` stroke and `RADIUS`, which is what the invariant asks of every
+/// floating surface, and `chrome_font` overridden once so nothing inside has to remember that
+/// the reader speaks in the monospace.
+fn centred_card(
+    ctx: &egui::Context,
+    pal: &theme::Palette,
+    opts: &crate::reader::opts::ReadOpts,
+    id: &str,
+    add_contents: impl FnOnce(&mut Ui),
+) {
+    egui::Area::new(egui::Id::new(id))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .constrain(true)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(pal.chrome_bg)
+                .stroke(egui::Stroke::new(1.0, pal.guide))
+                .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+                .inner_margin(egui::Margin::symmetric(16, 14))
+                .show(ui, |ui| {
+                    ui.style_mut().override_font_id = Some(theme::chrome_font(opts));
+                    add_contents(ui);
+                });
+        });
+}
+
 fn accesskit_is_building(ctx: &egui::Context) -> bool {
     ctx.accesskit_node_builder(egui::accesskit_root_id(), |_| ())
         .is_some()
@@ -358,7 +425,10 @@ impl ReaderApp {
         // Before anything draws. `eframe` is built without `default_fonts`, so until this runs
         // there is no face registered at all and every string is blank rather than tofu.
         fonts::install(&cc.egui_ctx);
-        cc.egui_ctx.set_zoom_factor(launch.settings.zoom_factor);
+        // Through the accessor, not the field: this is the one place a hand-edited `0`, a
+        // negative, or a `NaN` reaches egui, which clamps none of them. `persist` writes the
+        // applied value back on the first frame, so the file heals itself.
+        cc.egui_ctx.set_zoom_factor(launch.settings.zoom_factor());
         apply_scroll_speed(&cc.egui_ctx, &launch.settings);
         let mut app = Self {
             net,
@@ -375,6 +445,9 @@ impl ReaderApp {
             hover_height: 0.0,
             chrome: Chrome::default(),
             images: ImageStore::default(),
+            image_blocks: HashMap::new(),
+            auto_attempts: HashMap::new(),
+            auto_announced: HashSet::new(),
             heights: Heights::default(),
             collapsed: HashSet::new(),
             collapsed_changes: 0,
@@ -394,6 +467,7 @@ impl ReaderApp {
             focused_comment: None,
             focused_other: false,
             focus_was_on_page: false,
+            focus_href_was: None,
             focus_block: None,
             focus_block_was: None,
             tab_frames: 0,
@@ -424,7 +498,9 @@ impl ReaderApp {
     /// them at dispatch is what used to clear the textures, collapse state, and scroll offset of
     /// the page the reader was still looking at.
     fn navigate(&mut self, url: Url, opts: LoadOptions, push: bool) {
-        let req = self.net.mint();
+        // `mint_page`, not `mint`: it also tells the pool which page is current, so the images
+        // queued on the one being left are dropped instead of run ahead of this fetch.
+        let req = self.net.mint_page();
         // The page on screen stays on screen. Taken rather than borrowed so a chain of
         // abandoned loads, Back pressed twice inside one slow fetch, carries the same page
         // forward instead of falling to blank on the second hop.
@@ -549,22 +625,95 @@ impl ReaderApp {
 
     // ---------------------------------------------------------------- images
 
+    /// One article image, by click, by `i`, or as one of `Shift+I`'s.
+    ///
+    /// The policy is enforced here rather than at each of those three, because here is where
+    /// they meet: this is the only path an *article* image reaches the network by. The
+    /// favicon takes `load_favicon` and answers to `allows_any_request` instead, which is the
+    /// whole difference between `Never` and `NoRequests`.
+    ///
+    /// Drawing already respects the setting (`images::placeholder` returns a dim line under
+    /// either policy), so before this guard the reader offered no control and still fetched
+    /// the moment a key was pressed — `Shift+I` on a `NoRequests` page contacted every image
+    /// host on it, which is the one thing that policy exists to promise it will not do.
     fn load_image(&mut self, ctx: &egui::Context, src: &str) {
-        let max_width =
-            (theme::measure_px(ctx, &self.settings.read) * ctx.pixels_per_point()).max(64.0) as u32;
-        self.request_image(src, max_width, true);
+        if !self.settings.read.images.offers_loading() {
+            self.flash(IMAGES_ARE_OFF.to_owned());
+            return;
+        }
+        self.request_image(src, self.column_texture_width(ctx), true, false);
+    }
+
+    /// The width every article image is decoded to: the reading column, in physical pixels.
+    ///
+    /// Shared by the click path and the automatic one rather than computed at each, so a
+    /// picture cannot arrive at a different size depending on who asked for it.
+    fn column_texture_width(&self, ctx: &egui::Context) -> u32 {
+        (theme::measure_px(ctx, &self.settings.read) * ctx.pixels_per_point()).max(64.0) as u32
+    }
+
+    /// Request the pictures near the reading position, under `ImagePolicy::Auto`.
+    ///
+    /// The fourth door onto `request_image`, beside `load_image`, `load_all_images`, and
+    /// `ensure_favicon`, and like them it answers the policy in its own name here rather than
+    /// leaving it to the caller: a door that is guarded at some call sites and not others reads
+    /// as guarded and is not. The caller's own test of the same question is an optimisation —
+    /// it skips walking the band's blocks under the other three policies — and not the
+    /// enforcement.
+    ///
+    /// `in_band` is what the column just drew inside `measure::Band`, so this is a screenful
+    /// either side of the window and not the document. `autoload::plan` holds the rest of the
+    /// reasoning, and is where the tests are.
+    fn autoload(&mut self, ctx: &egui::Context, base: &Url, in_band: &[String]) {
+        if !self.settings.read.images.loads_automatically() {
+            return;
+        }
+        let plan = autoload::plan(
+            base,
+            in_band,
+            &self.auto_attempts,
+            &self.auto_announced,
+            self.images.pending(),
+            &|src| self.images.state(src).is_some(),
+        );
+        if plan.is_empty() {
+            return;
+        }
+        // Ahead of the requests. They are queued jobs and nothing has been drawn, so the
+        // disclosure still precedes the bytes, which is the same order `load_all_images` keeps.
+        if !plan.hosts.is_empty() {
+            self.flash(notice::auto_images_from(&plan.hosts));
+            self.auto_announced.extend(plan.hosts);
+        }
+        let max_width = self.column_texture_width(ctx);
+        for src in plan.srcs {
+            // Counted whether or not the request survives: `request_image` declines a `src`
+            // already in flight, and an entry that never resolves must not be planned again on
+            // the next frame. `Msg::ImageDropped` is the one thing that takes a count back.
+            *self.auto_attempts.entry(src.clone()).or_default() += 1;
+            self.request_image(&src, max_width, false, true);
+        }
     }
 
     /// The masthead favicon: same path as an article image, but quiet and small. Kicked from
     /// [`Self::ensure_favicon`] once a page is on screen; a toast would fire on every
     /// navigation, and a column-width decode is wasted on a 16-px mark.
     fn load_favicon(&mut self, src: &str) {
-        self.request_image(src, 64, false);
+        self.request_image(src, 64, false, false);
     }
 
     /// Start the favicon fetch for the page on screen, once. Failures stay silent: the eyebrow
     /// label does not need a retry control for a missing mark.
+    ///
+    /// This is the one image request the reader makes without being asked, which is why it is
+    /// the one `ImagePolicy::NoRequests` exists to stop. `Never` deliberately does not: it turns
+    /// off *article* images, and it meant that before the third policy arrived. A reader who
+    /// wants nothing contacted now has a way to say so, and until this guard was here there was
+    /// no such way at all — the mark went out on every page whatever the setting said.
     fn ensure_favicon(&mut self) {
+        if !self.settings.read.images.allows_any_request() {
+            return;
+        }
         let Some(src) = self.shown().and_then(|r| r.loaded.doc.favicon.clone()) else {
             return;
         };
@@ -574,7 +723,7 @@ impl ReaderApp {
         self.load_favicon(&src);
     }
 
-    fn request_image(&mut self, src: &str, max_width: u32, announce: bool) {
+    fn request_image(&mut self, src: &str, max_width: u32, announce: bool, automatic: bool) {
         // The visible page, and *its* request id rather than `self.current`: see `Ready::req`.
         let Some(ready) = self.shown() else {
             return;
@@ -590,10 +739,12 @@ impl ReaderApp {
         };
         let host = url.host_str().unwrap_or("?").to_owned();
         self.images.begin(src);
-        self.images.hosts.insert(host.clone());
-        if self.settings.send_image_referer {
-            self.images.referer_requests += 1;
-        }
+        // Recorded here, where the host is known and where the reader is told it, and taken
+        // back by `ImageStore::forget` if the pool answers `Msg::ImageDropped` for it. A
+        // counter moved for a request that never left is the panel claiming a disclosure that
+        // did not happen.
+        self.images
+            .record_request(src, &host, self.settings.send_image_referer);
         // Decode straight to the reading column: without this, "load images" on a photo-heavy
         // page is a GPU-memory denial of service driven by untrusted input.
         self.net.submit(Job::Image {
@@ -604,6 +755,7 @@ impl ReaderApp {
             referrer: base,
             max_width,
             send_referer: self.settings.send_image_referer,
+            automatic,
         });
         if announce {
             self.flash(format!("loading one image from {host}"));
@@ -611,6 +763,12 @@ impl ReaderApp {
     }
 
     fn load_all_images(&mut self, ctx: &egui::Context) {
+        // Ahead of the walk, so the answer is one line rather than one per image on the page.
+        // `load_image` guards too, and has to: it is also the click and `i` path.
+        if !self.settings.read.images.offers_loading() {
+            self.flash(IMAGES_ARE_OFF.to_owned());
+            return;
+        }
         let Some(ready) = self.shown() else {
             return;
         };
@@ -697,6 +855,23 @@ impl ReaderApp {
                         Err(e) => self.images.fail(&src, e.to_string()),
                     }
                 }
+                Msg::ImageDropped { page, src } => {
+                    // Same staleness test as `Msg::Image`, and it is nearly always false here:
+                    // a job is dropped because its page stopped being current, so the page it
+                    // names is usually already gone. It matters in the case that is left — a
+                    // navigation that failed and put the reader back on nothing — where the
+                    // placeholder has to go back to offering itself rather than sit on
+                    // `Loading` for a request no worker still holds.
+                    if self.shown().map(|r| r.req) != Some(page) {
+                        continue;
+                    }
+                    // Takes back the entry and the disclosure the queued job had recorded.
+                    self.images.forget(&src);
+                    // Nothing was requested, so nothing was attempted: if this picture is
+                    // still in the band the automatic policy may plan it again, with its full
+                    // allowance intact.
+                    self.auto_attempts.remove(&src);
+                }
                 Msg::Panicked { req, page } => {
                     if self.current != Some(page) {
                         continue;
@@ -738,19 +913,23 @@ impl ReaderApp {
             .history
             .current()
             .and_then(|u| u.fragment().map(str::to_owned));
-        let req = self.current.unwrap_or_else(|| self.net.mint());
+        let req = self.current.unwrap_or_else(|| self.net.mint_page());
         // Before the page is installed, so `jump_to_fragment` below overrides the reset rather
         // than being overridden by it.
         self.commit();
         // The strip line lasts until the navigation ends. The page is up; the rewrite bar
         // owns the remark from here.
         self.rewrite_notice = None;
-        self.page = Page::Ready(Box::new(Ready {
+        let page = Ready {
             loaded,
             outline,
             masthead,
             req,
-        }));
+        };
+        // After `commit`, which cleared the outgoing page's index, and before the page is
+        // installed, which is the last moment the document is not behind `self.page`.
+        self.image_blocks = image_blocks(&page.loaded.doc);
+        self.page = Page::Ready(Box::new(page));
         if let Some(f) = fragment {
             self.jump_to_fragment(&f);
         }
@@ -775,7 +954,7 @@ impl ReaderApp {
         rewrite_notice: Option<String>,
         result: Result<Loaded, LoadError>,
     ) {
-        self.current = Some(self.net.mint());
+        self.current = Some(self.net.mint_page());
         self.rewrite_notice = rewrite_notice;
         self.history = History::new();
         self.history.push(url.clone());
@@ -806,6 +985,12 @@ impl ReaderApp {
     fn commit(&mut self) {
         // Textures die with the page they were loaded for; the disclosure counters do not.
         self.images.clear_textures();
+        // All three are about the page being replaced. `auto_announced` in particular: naming
+        // a host is a statement about *this* page, so carrying it forward would let a second
+        // page contact a host the reader was told about once, on an article they have left.
+        self.image_blocks.clear();
+        self.auto_attempts.clear();
+        self.auto_announced.clear();
         self.heights.clear();
         self.collapsed.clear();
         self.find_current = 0;
@@ -859,14 +1044,28 @@ impl ReaderApp {
             .memory(|m| m.focused())
             .is_some_and(|id| id == egui::Id::new(URL_BAR_ID) || id == egui::Id::new(FIND_ID));
 
+        // While a menu or a context menu is open, egui owns the keyboard. It closes a popup on
+        // `Escape` in its own `popup.rs`, and it never sees the key because this function runs
+        // before any panel is drawn and takes `Escape` unconditionally two lines below. Without
+        // this guard an open menu could not be dismissed, and every bare letter below would fire
+        // its page action underneath it: `q` would quit out from under an open File menu.
+        //
+        // This was already true of the link context menu before there was a menu bar. The bar is
+        // what makes it constant rather than obscure.
+        if egui::Popup::is_any_open(ctx) {
+            return;
+        }
+
         let esc = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
         if esc {
             // Never the status strip.
             self.chrome.url_bar = None;
             self.chrome.find = None;
             self.chrome.help_open = false;
+            self.chrome.about_open = false;
             self.chrome.outline_open = false;
             self.chrome.info_open = false;
+            self.chrome.settings_open = false;
             ctx.memory_mut(|m| m.surrender_focus(egui::Id::new(URL_BAR_ID)));
             return;
         }
@@ -941,7 +1140,7 @@ impl ReaderApp {
         }
         // `?` arrives as its own logical key, shift included.
         if k(Modifiers::NONE, Key::Questionmark) {
-            self.chrome.help_open = !self.chrome.help_open;
+            self.toggle_help();
         }
 
         // --- unshifted bindings
@@ -1018,9 +1217,32 @@ impl ReaderApp {
         if k(Modifiers::NONE, Key::Q) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        // `,` is the settings key everywhere else, and `Cmd+,` is the macOS convention, so both
+        // are bound rather than picking one.
+        if k(Modifiers::NONE, Key::Comma) || k(Modifiers::COMMAND, Key::Comma) {
+            self.chrome.settings_open = !self.chrome.settings_open;
+        }
+        // The GTK and Windows convention for reaching a menu bar. It reveals the bar first, so
+        // hiding it is never a way to lose it.
+        if k(Modifiers::NONE, Key::F10) {
+            if !self.settings.show_menu_bar {
+                self.settings.show_menu_bar = true;
+                self.settings_dirty = true;
+            }
+            self.chrome.focus_menu_bar = true;
+        }
         // Enter follows the focused link. egui's own Tab order does the cycling, because links
         // and comment toggles (and nothing else) are made focusable.
-        if k(Modifiers::NONE, Key::Enter)
+        //
+        // The focus test comes **first**, and that ordering is the whole of it: `consume_key`
+        // takes the event whether or not the arm that follows does anything, so testing it
+        // before `focused_href` swallowed every Enter in the program. Nothing noticed while the
+        // page held the only focusable widgets. It stopped being invisible when the menu bar
+        // arrived: Enter is how egui activates a focused button, so `F10` then Tab reached a
+        // menu title that could not be opened, and the same was true of every chrome button
+        // Tab could reach. Consume it only when there is a link to follow.
+        if self.focused_href.is_some()
+            && k(Modifiers::NONE, Key::Enter)
             && let Some(h) = self.focused_href.clone()
         {
             self.follow_link(&h);
@@ -1082,42 +1304,84 @@ impl ReaderApp {
     }
 }
 
+fn walk_blocks(blocks: &[ir::Block], out: &mut Vec<String>) {
+    for b in blocks {
+        match b {
+            ir::Block::Figure { image, .. } => out.push(image.src.clone()),
+            ir::Block::Paragraph(inlines) | ir::Block::Heading { inlines, .. } => {
+                walk_inlines(inlines, out)
+            }
+            ir::Block::List { items, .. } => items.iter().for_each(|i| walk_blocks(i, out)),
+            ir::Block::Quote { blocks, .. } => walk_blocks(blocks, out),
+            ir::Block::Table { headers, rows } => {
+                headers.iter().for_each(|c| walk_inlines(c, out));
+                rows.iter().flatten().for_each(|c| walk_inlines(c, out));
+            }
+            ir::Block::Thread(cs) => cs.iter().for_each(|c| walk_blocks(&c.blocks, out)),
+            // Entry thumbnails draw once loaded (`blocks::entries_ui`), so `I` loads them
+            // with the rest and the page-info panel counts them.
+            ir::Block::Entries(es) => es.iter().for_each(|e| {
+                out.extend(e.image.as_ref().map(|i| i.src.clone()));
+                walk_inlines(&e.title, out);
+                walk_blocks(&e.summary, out);
+            }),
+            ir::Block::Code { .. } | ir::Block::Rule | ir::Block::Embed { .. } => {}
+        }
+    }
+}
+
+fn walk_inlines(inlines: &[ir::Inline], out: &mut Vec<String>) {
+    for i in inlines {
+        match i {
+            ir::Inline::Image(img) => out.push(img.src.clone()),
+            ir::Inline::Emph(v) | ir::Inline::Strong(v) => walk_inlines(v, out),
+            ir::Inline::Link { inlines, .. } => walk_inlines(inlines, out),
+            ir::Inline::Text(_) | ir::Inline::Code(_) | ir::Inline::Break => {}
+        }
+    }
+}
+
+/// Every image `src` in one top-level block, in document order, repeats kept.
+///
+/// The unit the band works in: the reading column decides block by block what is near the
+/// window, so what a block contains is what "near the window" can mean for a picture.
+/// `autoload::plan` does the deduplicating, because a `src` repeated across two in-band blocks
+/// has to collapse the same way a `src` repeated inside one does.
+fn block_image_srcs(b: &ir::Block) -> Vec<String> {
+    let mut out = Vec::new();
+    walk_blocks(std::slice::from_ref(b), &mut out);
+    out
+}
+
+/// Which top-level blocks contain each image `src`.
+///
+/// Built once when a page commits and read when a picture resolves, so the height of the block
+/// it landed in can be forgotten without the reader walking the document to find out which one
+/// that was. A `src` maps to more than one block whenever a page reuses it, which a logo, a
+/// sprite, or a repeated byline portrait routinely does.
+///
+/// This is *not* how the automatic policy decides what is near the window, and must not become
+/// it: a feed is one `ir::Block::Entries` and a discussion is one `ir::Block::Thread`, so a
+/// single block that touches the band can carry every picture on the page — which would make
+/// the bound `reader::autoload` exists to keep no bound at all. `RenderCtx::autoload_srcs`
+/// gathers those where each one draws instead.
+///
+/// The document favicon is absent. It draws in the masthead, which no remembered height covers.
+fn image_blocks(doc: &ir::Document) -> HashMap<String, Vec<usize>> {
+    let mut map: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, b) in doc.blocks.iter().enumerate() {
+        for src in block_image_srcs(b) {
+            let at = map.entry(src).or_default();
+            // Repeats within one block are one entry; the same `src` in two blocks is two.
+            if at.last() != Some(&i) {
+                at.push(i);
+            }
+        }
+    }
+    map
+}
+
 fn collect_image_srcs(doc: &ir::Document) -> Vec<String> {
-    fn walk_blocks(blocks: &[ir::Block], out: &mut Vec<String>) {
-        for b in blocks {
-            match b {
-                ir::Block::Figure { image, .. } => out.push(image.src.clone()),
-                ir::Block::Paragraph(inlines) | ir::Block::Heading { inlines, .. } => {
-                    walk_inlines(inlines, out)
-                }
-                ir::Block::List { items, .. } => items.iter().for_each(|i| walk_blocks(i, out)),
-                ir::Block::Quote { blocks, .. } => walk_blocks(blocks, out),
-                ir::Block::Table { headers, rows } => {
-                    headers.iter().for_each(|c| walk_inlines(c, out));
-                    rows.iter().flatten().for_each(|c| walk_inlines(c, out));
-                }
-                ir::Block::Thread(cs) => cs.iter().for_each(|c| walk_blocks(&c.blocks, out)),
-                // Entry thumbnails draw once loaded (`blocks::entries_ui`), so `I` loads them
-                // with the rest and the page-info panel counts them.
-                ir::Block::Entries(es) => es.iter().for_each(|e| {
-                    out.extend(e.image.as_ref().map(|i| i.src.clone()));
-                    walk_inlines(&e.title, out);
-                    walk_blocks(&e.summary, out);
-                }),
-                ir::Block::Code { .. } | ir::Block::Rule | ir::Block::Embed { .. } => {}
-            }
-        }
-    }
-    fn walk_inlines(inlines: &[ir::Inline], out: &mut Vec<String>) {
-        for i in inlines {
-            match i {
-                ir::Inline::Image(img) => out.push(img.src.clone()),
-                ir::Inline::Emph(v) | ir::Inline::Strong(v) => walk_inlines(v, out),
-                ir::Inline::Link { inlines, .. } => walk_inlines(inlines, out),
-                ir::Inline::Text(_) | ir::Inline::Code(_) | ir::Inline::Break => {}
-            }
-        }
-    }
     let mut out = Vec::new();
     walk_blocks(&doc.blocks, &mut out);
     // `Vec::dedup` only drops *adjacent* duplicates, and a page that reuses one `src` in two
@@ -1150,7 +1414,7 @@ impl eframe::App for ReaderApp {
             || self.focused_comment.is_some()
             || self.focused_other;
         self.focus_block_was = self.focus_block.take();
-        self.focused_href = None;
+        self.focus_href_was = self.focused_href.take();
         self.focused_image = None;
         self.focused_comment = None;
         self.focused_other = false;
@@ -1168,6 +1432,10 @@ impl eframe::App for ReaderApp {
         // Order matters: the strip is laid out first so it keeps its line at the bottom no
         // matter what the rest of the chrome does. It is the one thing that never hides.
         self.status_strip(ui, &pal);
+        // Above the URL bar, so the window reads top to bottom as menus, address, page. A top
+        // panel takes its place from the order it is added in, so this line's position is the
+        // layout.
+        self.menu_bar(ui, &pal);
         self.url_bar(ui, &pal);
         self.find_bar(ui, &pal);
         // Under the bars and above the page, docked: the one place a remark about the page
@@ -1181,7 +1449,9 @@ impl eframe::App for ReaderApp {
         self.hover_strip(ui, &pal);
         self.toast(&ctx, &pal);
         self.help_overlay(&ctx, &pal);
+        self.about_overlay(&ctx, &pal);
         self.info_panel(&ctx, &pal);
+        self.settings_panel(&ctx, &pal);
 
         if let Some(text) = self.pending_copy.take() {
             ctx.copy_text(text);
@@ -1248,6 +1518,152 @@ impl ReaderApp {
     }
 
     // ---------------------------------------------------------------- chrome
+
+    /// The menu bar, and the one command it produced.
+    ///
+    /// Drawn from `reader::menu`, which holds the table; this supplies the live state the bar
+    /// needs to grey an item that would fire on nothing and to tick the ones that reflect a
+    /// setting.
+    fn menu_bar(&mut self, ui: &mut Ui, pal: &theme::Palette) {
+        if !self.settings.show_menu_bar {
+            return;
+        }
+        let enable = menu_ui::Enable {
+            page: self.shown().is_some(),
+            focused_link: self.focus_href_was.is_some(),
+            thread: self.shown().is_some_and(|r| {
+                r.loaded
+                    .doc
+                    .blocks
+                    .iter()
+                    .any(|b| matches!(b, ir::Block::Thread(_)))
+            }),
+            back: self.history.can_go_back(),
+            forward: self.history.can_go_forward(),
+        };
+        let checks = menu_ui::Checks {
+            link_addresses: self.settings.read.show_link_urls,
+            outline: self.chrome.outline_open,
+            page_info: self.chrome.info_open,
+            menu_bar: self.settings.show_menu_bar,
+        };
+        let bar = menu_ui::bar(ui, pal, &self.settings, enable, checks);
+        panel_edge(ui, bar.rect, Side::Bottom, pal);
+
+        // `F10` asked for focus and the id only exists now that the bar has been laid out.
+        if self.chrome.focus_menu_bar {
+            self.chrome.focus_menu_bar = false;
+            if let Some(resp) = &bar.focus_first {
+                resp.request_focus();
+            }
+        }
+        if let Some(command) = bar.command {
+            self.run_command(ui.ctx(), command);
+        }
+    }
+
+    /// Apply one menu command. Every arm is something a key already does, so this is a second
+    /// door onto the same rooms rather than a second implementation of any of them.
+    ///
+    /// Public for `bin/shot.rs`, on the same argument as [`Self::follow_link`]: a synthetic Tab
+    /// does not reliably land focus inside an egui popup, so a command reachable *only* from
+    /// the menu bar (`About hww` is the one) has no keyboard route the harness can drive and
+    /// would otherwise be the one piece of chrome with no picture at all. It runs what the
+    /// menu item runs, so the scene still photographs the real path.
+    pub fn run_command(&mut self, ctx: &egui::Context, command: Command) {
+        match command {
+            Command::OpenLocation => self.open_url_bar(),
+            Command::Reload => self.reload(self.opts),
+            Command::ReloadBare => {
+                self.reload(LoadOptions::BARE);
+                self.flash("reloaded bare: no rewrite rule, no site profile".to_owned());
+            }
+            Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Command::CopyPageUrl => {
+                if let Some(u) = self
+                    .shown()
+                    .map(|r| r.loaded.prov.final_url.clone())
+                    .or_else(|| self.history.current().cloned())
+                {
+                    self.copy(u.as_str());
+                    self.flash("page URL copied".to_owned());
+                }
+            }
+            Command::CopyFocusedLink => match self.focus_href_was.clone() {
+                Some(h) => {
+                    self.copy(&h);
+                    self.flash(format!("copied {h}"));
+                }
+                None => self.flash("no link focused; Tab to one first".to_owned()),
+            },
+            Command::Find => self.open_find(),
+            Command::OpenSettings => self.chrome.settings_open = true,
+            Command::ZoomIn => {
+                ctx.set_zoom_factor((ctx.zoom_factor() + 0.1).min(Settings::ZOOM_MAX))
+            }
+            Command::ZoomOut => {
+                ctx.set_zoom_factor((ctx.zoom_factor() - 0.1).max(Settings::ZOOM_MIN))
+            }
+            Command::ZoomReset => ctx.set_zoom_factor(1.0),
+            Command::Narrower => {
+                self.settings.read.narrow();
+                self.settings_dirty = true;
+            }
+            Command::Wider => {
+                self.settings.read.widen();
+                self.settings_dirty = true;
+            }
+            Command::SetTheme(i) => self.set_field(prefs::FieldId::Theme, i),
+            Command::SetTypeface(i) => self.set_field(prefs::FieldId::Typeface, i),
+            Command::SetImages(i) => self.set_field(prefs::FieldId::Images, i),
+            Command::ToggleLinkAddresses => {
+                self.settings.read.show_link_urls = !self.settings.read.show_link_urls;
+                self.settings_dirty = true;
+            }
+            Command::ToggleOutline => self.chrome.outline_open = !self.chrome.outline_open,
+            Command::TogglePageInfo => self.chrome.info_open = !self.chrome.info_open,
+            Command::ToggleMenuBar => {
+                self.settings.show_menu_bar = !self.settings.show_menu_bar;
+                self.settings_dirty = true;
+                if !self.settings.show_menu_bar {
+                    self.flash("menu bar hidden; F10 brings it back".to_owned());
+                }
+            }
+            Command::CollapseAllReplies => self.collapse_all(),
+            Command::Back => self.go_back(),
+            Command::Forward => self.go_forward(),
+            Command::ShowHelp => self.toggle_help(),
+            Command::ShowAbout => {
+                self.chrome.about_open = true;
+                self.chrome.help_open = false;
+            }
+        }
+    }
+
+    /// Write one `prefs` field by index, and mark the settings dirty.
+    fn set_field(&mut self, field: prefs::FieldId, index: usize) {
+        prefs::set(&mut self.settings, field, prefs::Value::Index(index));
+        self.settings_dirty = true;
+    }
+
+    /// The settings panel, and whatever it changed.
+    fn settings_panel(&mut self, ctx: &egui::Context, pal: &theme::Palette) {
+        if !self.chrome.settings_open {
+            return;
+        }
+        let mut open = true;
+        let events = prefs_ui::panel(ctx, pal, &mut self.settings, self.strip_height, &mut open);
+        self.chrome.settings_open = open;
+        for event in events {
+            match event {
+                prefs_ui::Event::Changed => self.settings_dirty = true,
+                // Zoom is egui's, and `persist` copies the context's value *into* the settings
+                // every frame. Writing the field alone would be overwritten before it took
+                // effect, so the panel reports the number and this hands it to egui.
+                prefs_ui::Event::ZoomSet(z) => ctx.set_zoom_factor(z),
+            }
+        }
+    }
 
     /// The one piece of chrome that never hides. See the module doc.
     fn status_strip(&mut self, ui: &mut Ui, pal: &theme::Palette) {
@@ -1360,7 +1776,7 @@ impl ReaderApp {
             Some(StripAction::Forward) => self.go_forward(),
             Some(StripAction::OpenUrlBar) => self.open_url_bar(),
             Some(StripAction::ToggleInfo) => self.chrome.info_open = !self.chrome.info_open,
-            Some(StripAction::ToggleHelp) => self.chrome.help_open = !self.chrome.help_open,
+            Some(StripAction::ToggleHelp) => self.toggle_help(),
             None => {}
         }
     }
@@ -1710,54 +2126,82 @@ impl ReaderApp {
         self.chrome.info_open = open;
     }
 
+    /// `?`, the menu item, and the strip's control all reach the help card, and all three go
+    /// through here so the About card closes behind it.
+    ///
+    /// Both are `centred_card`, anchored `CENTER_CENTER`: opened together they stack, and the
+    /// one underneath is unreachable rather than merely untidy.
+    fn toggle_help(&mut self) {
+        self.chrome.help_open = !self.chrome.help_open;
+        if self.chrome.help_open {
+            self.chrome.about_open = false;
+        }
+    }
+
     fn help_overlay(&mut self, ctx: &egui::Context, pal: &theme::Palette) {
         if !self.chrome.help_open {
             return;
         }
-        // An `Area` and not a `Window`. A `Window` brings a title bar egui paints from its own
-        // visuals, which is why this was the one piece of chrome that did not take the reader's
-        // palette. Two things `Window` was giving away for free have to be asked for: the order,
-        // or this draws under `hover_strip`, which is `Foreground`; and the constraint, or a
-        // help table taller than a short window runs off the bottom edge with no way back.
-        egui::Area::new(egui::Id::new("hww-help"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .constrain(true)
-            .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(pal.chrome_bg)
-                    .stroke(egui::Stroke::new(1.0, pal.guide))
-                    .corner_radius(egui::CornerRadius::same(theme::RADIUS))
-                    .inner_margin(egui::Margin::symmetric(16, 14))
-                    .show(ui, |ui| {
-                        let opts = self.settings.read.clone();
-                        ui.style_mut().override_font_id = Some(theme::chrome_font(&opts));
-                        // The keys as keycaps (`notice_ui::keycap`), the one convention for
-                        // "press this" the reader has; the rest of the card is the list it was.
-                        egui::Grid::new("hww-help")
-                            .num_columns(2)
-                            .spacing([
-                                theme::snap(opts.base_size_pt),
-                                theme::snap(opts.base_size_pt * 0.45),
-                            ])
-                            .show(ui, |ui| {
-                                for (keys, what) in HELP {
-                                    ui.horizontal(|ui| notice_ui::keycaps(ui, pal, &opts, keys));
-                                    ui.label(*what);
-                                    ui.end_row();
-                                }
-                            });
-                        ui.add_space(theme::snap(opts.base_size_pt * 0.3));
-                        ui.separator();
-                        ui.label(
-                    RichText::new(
-                        "Ctrl means Cmd on macOS. Zoom is egui's: Ctrl +/-/0, Ctrl+wheel, pinch.",
-                    )
-                    .color(pal.dim)
-                    .font(theme::chrome_font(&self.settings.read)),
+        let opts = self.settings.read.clone();
+        centred_card(ctx, pal, &opts, "hww-help", |ui| {
+            // The keys as keycaps (`notice_ui::keycap`), the one convention for
+            // "press this" the reader has; the rest of the card is the list it was.
+            egui::Grid::new("hww-help")
+                .num_columns(2)
+                .spacing([
+                    theme::snap(opts.base_size_pt),
+                    theme::snap(opts.base_size_pt * 0.45),
+                ])
+                .show(ui, |ui| {
+                    for (keys, what) in menu::HELP {
+                        ui.horizontal(|ui| notice_ui::keycaps(ui, pal, &opts, keys));
+                        ui.label(*what);
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(theme::snap(opts.base_size_pt * 0.3));
+            ui.separator();
+            ui.label(
+                RichText::new(
+                    "Ctrl means Cmd on macOS. Zoom is egui's: Ctrl +/-/0, Ctrl+wheel, pinch.",
+                )
+                .color(pal.dim)
+                .font(theme::chrome_font(&opts)),
+            );
+        });
+    }
+
+    /// Help, About hww: [`menu::ABOUT`], all of it.
+    ///
+    /// It was a `flash` of `ABOUT[0]` alone, which put the one uncontroversial sentence in a
+    /// six-second pill and left the two that say what the program actually refuses to do
+    /// unreachable from the running reader. They are `pub const`, so nothing warned. A card
+    /// rather than a longer toast, because three sentences is reading rather than status, and
+    /// the reader already has a floating surface shaped for it.
+    fn about_overlay(&mut self, ctx: &egui::Context, pal: &theme::Palette) {
+        if !self.chrome.about_open {
+            return;
+        }
+        let opts = self.settings.read.clone();
+        centred_card(ctx, pal, &opts, "hww-about", |ui| {
+            ui.set_max_width(theme::snap(opts.base_size_pt * 26.0));
+            ui.label(theme::label_job("About hww", &opts, pal.dim));
+            ui.add_space(theme::snap(opts.base_size_pt * 0.5));
+            for line in menu::ABOUT {
+                ui.label(
+                    RichText::new(*line)
+                        .color(pal.fg)
+                        .font(theme::chrome_font(&opts)),
                 );
-                    });
-            });
+                ui.add_space(theme::snap(opts.base_size_pt * 0.4));
+            }
+            ui.separator();
+            ui.label(
+                RichText::new("Escape closes this.")
+                    .color(pal.dim)
+                    .font(theme::chrome_font(&opts)),
+            );
+        });
     }
 
     // ---------------------------------------------------------------- the page
@@ -1987,12 +2431,31 @@ impl ReaderApp {
             opts: self.settings.read.clone(),
             measure: ui.max_rect().width(),
             pixels_per_point: ui.ctx().pixels_per_point(),
-            images: self.images.changes(),
             find: self.find_open(),
             pending_link: self.pending_link.map(|id| id.value()),
             collapsed: self.collapsed_changes,
         });
+        // After `under`, which may have cleared the table wholesale, and before anything is
+        // drawn from it. A picture that arrived, failed, was dropped, or was evicted since the
+        // last frame re-sizes the block it sits in and leaves every other block alone; this is
+        // what keeps that local, instead of making one arrival cost the whole page.
+        for src in self.images.take_changed() {
+            for i in self.image_blocks.get(&src).into_iter().flatten() {
+                self.heights.forget(*i);
+            }
+        }
+        // Only worth gathering under the policy that uses it. `ReaderApp::autoload` asks the
+        // same question again and is the enforcement; this one skips the work.
+        //
+        // `current == req` is "nothing newer is loading". Planning pictures for the outgoing
+        // page while a navigation is in flight would queue jobs the pool is about to discard,
+        // and each discard hands the `src` back to be planned again on the next frame.
+        let auto =
+            self.settings.read.images.loads_automatically() && self.current == Some(ready.req);
         let base = ready.loaded.prov.final_url.clone();
+        // A second handle, because `RenderCtx` takes ownership of the first and the automatic
+        // policy needs the same base to resolve a `src` against after the column is drawn.
+        let auto_base = base.clone();
         let mut ctx = RenderCtx::new(
             theme::palette(self.settings.read.theme, theme::system_is_dark(ui.ctx())),
             &self.settings.read,
@@ -2017,6 +2480,10 @@ impl ReaderApp {
         let scroll_to = self.scroll_to_block.take();
         let clip_top = ui.clip_rect().top();
         let band = measure::Band::around(clip_top, ui.clip_rect().bottom());
+        // Unconditionally, unlike `ctx.band`, which is cleared for any block laid out whole:
+        // "may this block be skipped" and "is this picture near the window" are different
+        // questions, and only the first one is allowed to have no answer.
+        ctx.autoload_band = auto.then_some(band);
         self.top_block = None;
         for (i, b) in doc.blocks.iter().enumerate() {
             // The article's <h1> is usually also its <title>, and its "By Name" is already
@@ -2066,6 +2533,9 @@ impl ReaderApp {
 
         self.heights
             .restore_comments(std::mem::take(&mut ctx.comment_heights));
+        // Gathered where each picture drew, at every nesting depth, so a feed card or a comment
+        // is judged by where *it* landed and not by the one block that holds the lot.
+        let in_band = std::mem::take(&mut ctx.autoload_srcs);
         self.find_total = ctx.find_seen;
         self.find_scroll = false;
         self.focused_href = ctx.focus_href.clone();
@@ -2089,6 +2559,11 @@ impl ReaderApp {
         // on the same line of control flow.
         if clicked.is_some() && self.current != before {
             self.pending_link = clicked;
+        }
+        // Last, and only if this frame did not start a navigation: a click that is leaving the
+        // page has just made every picture on it something nobody is going to look at.
+        if auto && self.current == before && !in_band.is_empty() {
+            self.autoload(ui.ctx(), &auto_base, &in_band);
         }
     }
 
@@ -2156,35 +2631,6 @@ enum StripAction {
     ToggleHelp,
 }
 
-/// Written with the glyphs egui's embedded fonts actually carry. `→` is not one of them; it
-/// renders as tofu, while `←`, `↑`, and `↓` are, which is why this table looks asymmetric and
-/// is meant to.
-const HELP: &[(&str, &str)] = &[
-    ("j k ↓ ↑", "scroll"),
-    ("Space / PgDn", "page down · Shift+Space pages up"),
-    ("g / G", "top / bottom"),
-    ("Ctrl+L or o", "URL bar · Enter navigates"),
-    ("Tab / Shift+Tab", "cycle links · Enter follows"),
-    ("Alt+Left / Backspace", "back"),
-    ("Alt+Right", "forward · the mouse side buttons do both"),
-    (
-        "r / R",
-        "reload · reload bare: no rewrite rule, no site profile",
-    ),
-    ("i / I", "load focused image · load all, naming their hosts"),
-    ("t", "outline"),
-    ("p", "page info: how this page arrived"),
-    (
-        "/ or Ctrl/Cmd+F · Enter / Shift+Enter",
-        "find in page · next / previous match",
-    ),
-    ("z / Z", "collapse focused reply · collapse all"),
-    ("y / Y", "copy page URL · copy focused link"),
-    ("[ / ]", "narrow / widen the reading measure"),
-    ("d", "cycle theme"),
-    ("? / Esc / q", "this help · dismiss chrome · quit"),
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2212,6 +2658,57 @@ mod tests {
             },
             req: ReqId::for_test(req),
         })
+    }
+
+    /// The fourth, and the argument again rather than the precedent.
+    ///
+    /// [`image_blocks`] and [`block_image_srcs`] are `ir::Document` in and a map out, with no
+    /// `egui` anywhere; they live here only because their caller does. Their failure is the
+    /// kind that hides: the index feeds `Heights::forget`, so a `src` mapped to the wrong block
+    /// forgets a block that did not change and keeps one that did, and what a reader sees is a
+    /// page that shifts by a few points under them when a picture lands somewhere else. A
+    /// screenshot of either frame is correct, and nothing else in this file would notice.
+    #[test]
+    fn every_picture_maps_to_the_blocks_that_contain_it() {
+        let url = Url::parse("https://example.com/a").expect("a fixture URL parses");
+        let doc = crate::html::extract(
+            "<article><h1>Title</h1>\
+             <p>One <img src=\"/logo.png\" alt=\"a\"> and <img src=\"/logo.png\" alt=\"b\">.</p>\
+             <p>Plain words.</p>\
+             <figure><img src=\"/photo.jpg\" alt=\"c\"></figure>\
+             <p>A repeat of <img src=\"/logo.png\" alt=\"d\">.</p></article>",
+            &url,
+        );
+        let map = image_blocks(&doc);
+        // The extractor absolutises every `src` against the page, which is why
+        // `autoload::plan` resolves rather than assumes and why these are spelled out.
+        let logo = map
+            .get("https://example.com/logo.png")
+            .expect("the logo is on the page");
+        let photo = map
+            .get("https://example.com/photo.jpg")
+            .expect("the photo is on the page");
+        assert_eq!(
+            logo.len(),
+            2,
+            "twice in one block is one entry, in two is two"
+        );
+        assert_eq!(photo.len(), 1);
+        assert_ne!(logo[0], photo[0], "a shared block index");
+        // Every index names a block that really carries the `src`, which is the half a
+        // hand-written map gets wrong.
+        for (src, blocks) in &map {
+            for i in blocks {
+                assert!(
+                    block_image_srcs(&doc.blocks[*i]).contains(src),
+                    "block {i} does not contain {src}"
+                );
+            }
+        }
+        // And nothing on the page is missing from it.
+        for src in collect_image_srcs(&doc) {
+            assert!(map.contains_key(&src), "{src} is in no block");
+        }
     }
 
     fn loading_pushed(from: Option<Box<Ready>>, pushed: bool) -> Page {

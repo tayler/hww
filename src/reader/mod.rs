@@ -16,6 +16,9 @@
 //! The module is named `reader` rather than `gui` because the pure half is renderer-agnostic:
 //! a future speech or e-ink backend reuses it unchanged.
 
+/// Which pictures `ImagePolicy::Auto` asks for. No egui types, so the fast CI job tests it,
+/// which is the point: the mistakes are set arithmetic and none of them show in a screenshot.
+pub mod autoload;
 /// Which face an inline style is set in. No egui types, so the fast CI job tests it.
 pub mod face;
 pub mod history;
@@ -23,6 +26,9 @@ pub mod inline;
 /// How tall each block of the page was last time it was laid out, so a page longer than the
 /// window costs a window's worth of layout. No egui types, so the fast CI job tests it.
 pub mod measure;
+/// The menu bar as data, and the help card's table. No egui types, so the fast CI job tests
+/// both, which is why the help table moved out of `ui::app` to live here.
+pub mod menu;
 /// What the reader has to say about a page, and how loud. No egui types, so the fast CI
 /// job tests it.
 pub mod notice;
@@ -31,6 +37,10 @@ pub mod outline;
 /// How a page arrived, as labelled rows for the page-info panel. No egui types, so the fast
 /// CI job tests it. `notice`'s quiet half: what does not rise to interrupting the column.
 pub mod pageinfo;
+/// Every setting as a labelled control with a sentence about it, for the settings panel. No
+/// egui types, so the fast CI job tests it, and the test that matters walks the serialized
+/// `Settings` so a field added without a control fails the build.
+pub mod prefs;
 pub mod settings;
 pub mod thread_tree;
 pub mod title;

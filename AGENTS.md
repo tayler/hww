@@ -45,6 +45,11 @@ The full screenshot catalog is a separate regression run:
 
 It owns the display and its window must remain visible. Do not run it as an incidental check.
 
+Scenes drive real paths through four public hooks: `ReaderApp::new`, `present`, `follow_link`,
+and `run_command`. A synthetic Tab does not reliably land focus, so anything reachable only by
+tabbing to it, a link in the page or a menu item with no key of its own, needs a hook rather
+than key steps; key steps photograph an open popup and never what the item does.
+
 ## Extraction
 
 The merge order in `html::extract_traced` is load-bearing. Read its module documentation before
@@ -66,8 +71,26 @@ outside `reader/ui/` and is tested. `reader/image_decode` parses untrusted binar
 not move under `ui/`. `reader/face` chooses family names; `reader/ui/fonts` registers bytes.
 
 The reading column contains page content only. Page remarks are infobars, error pages, or
-toasts; their wording lives in `reader/notice.rs`. Positional markers such as `[image]`,
-`Block::Embed`, and `notice::PENDING` are the exceptions.
+toasts. Positional markers such as `[image]`, `Block::Embed`, and `notice::PENDING` are the
+exceptions.
+
+Reader-facing wording stays outside `ui/` so the default job tests it: page remarks in
+`reader/notice.rs`, menu and help rows in `reader/menu.rs`, setting labels and notes in
+`reader/prefs.rs`. Use only glyphs the embedded faces carry and check `fonts/`, not the desktop
+font. `ⓘ`, `⏵`, `▸`, `☰`, and `⚙` are absent; they are hand-painted or substituted.
+
+Every setting is reachable from the panel. A field added to `Settings` or `ReadOpts` must also be
+added to `prefs::fields()` and to both exhaustive matches in `prefs::get` and `prefs::set`;
+`every_setting_is_exposed` walks the serialized form, so a struct field claimed by no `Field`
+fails the build. Values handed to egui go through their accessor rather than the raw field, and
+`Settings::zoom_factor` must span at least egui's own zoom range, or opening the panel rezooms
+the window untouched.
+
+A serialized enum that can gain a variant needs an unknown-value fallback (`theme_or_system`,
+`images_or_default`): `#[serde(default)]` covers a missing field, not an unparseable one, and
+without it an older binary loses every other setting in the file on the next write. Ask policy
+enums a named question (`ImagePolicy::offers_loading`, `allows_any_request`), never equality
+against one variant, which silently treats a new variant as the most permissive answer.
 
 `reader::measure` skips off-band blocks. Anything that walks widgets, including find, Tab,
 focus, selection, and AccessKit, must retain the guards in `ReaderApp::lays_out_whole_page`.
@@ -134,8 +157,9 @@ named `hww-shot` scenes for visual behavior. A pure function under `ui/` may be 
 failure is otherwise invisible, but make that argument at the test rather than citing precedent.
 
 Do not relax tests that enforce IR purity, hostname boundaries, profile soundness, origin-only
-Referer, parser word boundaries, shared inline flattening, font registration, contrast, iterative
-thread traversal, or layout-band boundaries.
+Referer, parser word boundaries, shared inline flattening, font registration, glyph coverage,
+contrast, settings exposure, menu and help agreement, iterative thread traversal, or layout-band
+boundaries.
 
 ## Portability and style
 

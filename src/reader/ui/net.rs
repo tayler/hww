@@ -16,6 +16,24 @@
 //! cancellation real: it drags in tokio and rewrites `fetch.rs`, the file the charter guards
 //! most closely.
 //!
+//! What *can* be cancelled is a job that has not started. The queue is one FIFO drained by
+//! [`WORKERS`] threads with no priority lane, so a page whose images were loaded in bulk puts
+//! however many of them ahead of the reader's next click, each with its own 30 s ceiling; the
+//! click then waits on pictures nobody will ever see. [`Net::mint_page`] publishes the current
+//! navigation to the pool, and a worker that pulls an *automatic* [`Job::Image`] stamped with
+//! an older page answers [`Msg::ImageDropped`] instead of fetching. In-flight requests are
+//! untouched — those are still correlation, not cancellation — but the backlog behind them
+//! drains in microseconds. `ImageDropped` says "never requested" rather than "failed", so the
+//! placeholder goes back to offering itself instead of showing an error for a fetch that never
+//! happened, and the disclosure it had already recorded is taken back.
+//!
+//! Only the automatic ones. A picture the reader clicked, or `i`, or `Shift+I`, is a thing
+//! somebody asked for on a page that is still on screen and still being read; the outgoing page
+//! stays visible and stays clickable by design, and a navigation that fails leaves the reader
+//! on it. Discarding those would be answering a request with silence. What the automatic policy
+//! queues is speculative by construction — nobody asked for that particular picture — so it is
+//! the half that can be thrown away.
+//!
 //! # Panic containment
 //!
 //! Image decoding is untrusted-input parsing. "Treat a dead thread as a failed load" is not a
@@ -62,6 +80,13 @@ impl ReqId {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         ReqId(NEXT.fetch_add(1, Ordering::Relaxed))
     }
+
+    /// The id as a plain integer, for the one place it has to live in an `AtomicU64`: the
+    /// current page, shared with the pool. Ids start at 1, so the zero a fresh [`Net`] holds
+    /// matches no page and is not mistaken for one.
+    fn raw(self) -> u64 {
+        self.0
+    }
 }
 
 pub enum Job {
@@ -87,6 +112,9 @@ pub enum Job {
         max_width: u32,
         /// The settings toggle, carried to the fetch rather than applied to the report.
         send_referer: bool,
+        /// Queued by `ImagePolicy::Auto` rather than by a click, `i`, or `Shift+I`, and so
+        /// discardable when the page it belongs to stops being current. See the module doc.
+        automatic: bool,
     },
 }
 
@@ -132,6 +160,17 @@ pub enum Msg {
         /// the untrusted-input path most likely to fail.
         cookies: usize,
         result: Result<Decoded, ImageError>,
+    },
+    /// An image job that was still queued when its page stopped being the current one, and so
+    /// was never dispatched.
+    ///
+    /// Distinct from a failed fetch on purpose. Nothing was requested, nothing was disclosed,
+    /// and no host was contacted, so the counters must not move and the placeholder must not
+    /// say that loading was tried. The UI forgets the entry, which puts it back to offering
+    /// itself if the page it belongs to is still the one on screen.
+    ImageDropped {
+        page: ReqId,
+        src: String,
     },
     /// A worker unwound. Carries the page so the UI can stop waiting on it.
     Panicked {
@@ -186,6 +225,7 @@ fn spawn_worker(
     msg_tx: mpsc::Sender<Msg>,
     session: Arc<Session>,
     ctx: egui::Context,
+    page: Arc<AtomicU64>,
 ) -> Result<(), LoadError> {
     let respawn = RespawnOnPanic {
         i,
@@ -193,6 +233,7 @@ fn spawn_worker(
         msg_tx: msg_tx.clone(),
         session: Arc::clone(&session),
         ctx: ctx.clone(),
+        page: Arc::clone(&page),
         armed: true,
     };
     std::thread::Builder::new()
@@ -211,6 +252,25 @@ fn spawn_worker(
                     respawn.armed = false;
                     return;
                 };
+                // Before the fetch and before the guard: a picture the automatic policy
+                // queued on a page that is no longer current is answered, not fetched. A
+                // picture somebody asked for is fetched whatever page it belongs to. See the
+                // module doc for why those differ.
+                if let Job::Image {
+                    page,
+                    src,
+                    automatic: true,
+                    ..
+                } = &job
+                    && page.raw() != respawn.page.load(Ordering::Relaxed)
+                {
+                    let _ = respawn.msg_tx.send(Msg::ImageDropped {
+                        page: *page,
+                        src: src.clone(),
+                    });
+                    respawn.ctx.request_repaint();
+                    continue;
+                }
                 let mut guard = ReplyGuard {
                     req: job.req(),
                     page: job.page(),
@@ -233,6 +293,9 @@ struct RespawnOnPanic {
     msg_tx: mpsc::Sender<Msg>,
     session: Arc<Session>,
     ctx: egui::Context,
+    /// The current page, shared with every worker and with [`Net`]. Read before an image job
+    /// is dispatched; see the module doc.
+    page: Arc<AtomicU64>,
     armed: bool,
 }
 
@@ -250,6 +313,7 @@ impl Drop for RespawnOnPanic {
             self.msg_tx.clone(),
             Arc::clone(&self.session),
             self.ctx.clone(),
+            Arc::clone(&self.page),
         );
     }
 }
@@ -258,6 +322,8 @@ pub struct Net {
     jobs: mpsc::Sender<Job>,
     msgs: mpsc::Receiver<Msg>,
     session: Arc<Session>,
+    /// The navigation the reader is on, published to the pool by [`Net::mint_page`].
+    page: Arc<AtomicU64>,
 }
 
 impl Net {
@@ -266,6 +332,7 @@ impl Net {
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (msg_tx, msgs) = mpsc::channel::<Msg>();
         let job_rx = Arc::new(Mutex::new(job_rx));
+        let page = Arc::new(AtomicU64::new(0));
 
         for i in 0..WORKERS {
             spawn_worker(
@@ -274,18 +341,32 @@ impl Net {
                 msg_tx.clone(),
                 Arc::clone(&session),
                 ctx.clone(),
+                Arc::clone(&page),
             )?;
         }
         Ok(Self {
             jobs,
             msgs,
             session,
+            page,
         })
     }
 
-    /// A fresh id. Every navigation gets one; everything older is stale by definition.
+    /// A fresh id for a subresource of the page being read.
     pub fn mint(&self) -> ReqId {
         ReqId::next()
+    }
+
+    /// A fresh id for a *navigation*, published to the pool as it is minted.
+    ///
+    /// Minting and publishing are one call rather than two so that a second place that starts a
+    /// navigation cannot forget the second half and leave the pool discarding every image on
+    /// the page it just put up. `ReaderApp::present`, the screenshot tool's injection point, is
+    /// exactly that second place.
+    pub fn mint_page(&self) -> ReqId {
+        let req = ReqId::next();
+        self.page.store(req.raw(), Ordering::Relaxed);
+        req
     }
 
     pub fn submit(&self, job: Job) {
@@ -334,6 +415,7 @@ fn run_job(session: &Session, job: Job, tx: &mpsc::Sender<Msg>, ctx: &egui::Cont
             referrer,
             max_width,
             send_referer,
+            automatic: _,
         } => {
             let (cookies, result) = load_image(session, &url, &referrer, max_width, send_referer);
             let _ = tx.send(Msg::Image {

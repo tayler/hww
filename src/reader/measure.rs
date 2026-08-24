@@ -8,9 +8,15 @@
 //! hand egui empty space of that height for as long as the block is outside the window.
 //!
 //! A remembered height is a *measurement*, so anything that changes what a block would
-//! measure throws the whole table away: the column width, the zoom, the reading settings, and
-//! the image store, because a placeholder that becomes a photograph is a different height. A
-//! stale entry that survived would read as the page jumping when its block scrolls back in.
+//! measure throws the whole table away: the column width, the zoom, and the reading settings.
+//! A stale entry that survived would read as the page jumping when its block scrolls back in.
+//!
+//! An image is the one such change that is *local*. A placeholder becoming a photograph is a
+//! different height for one block and no different for any other, and it used to be in the key
+//! above, so a page loading thirty pictures re-measured every block thirty times — the cost
+//! rising with the square of how much the reader asked for, and worst under the policy that
+//! asks for the most. [`Heights::forget`] drops the blocks that actually moved; `ReaderApp`
+//! maps a changed `src` to them.
 //!
 //! The table lives here rather than in `ui/` because the arithmetic is the part that can be
 //! wrong, and it needs no `egui::Context`: what the reader hands in is four floats.
@@ -26,9 +32,6 @@ pub struct Layout {
     pub measure: f32,
     /// egui's zoom, which scales every height without changing the settings.
     pub pixels_per_point: f32,
-    /// `ui::images::ImageStore::changes`: a load or a failure re-sizes the block it lands in,
-    /// and `I` starts loads in blocks that are nowhere near the window.
-    pub images: u64,
     /// Whether a find query is being drawn, because a match is drawn at a tighter line height
     /// than the page reads at: a galley row made entirely of matched text is *shorter* while
     /// the find bar is open. Those heights are measured (a non-empty query lays the page out
@@ -82,6 +85,26 @@ impl Heights {
 
     pub fn restore_comments(&mut self, comments: HashMap<(usize, usize), f32>) {
         self.comments = comments;
+    }
+
+    /// Forget one block's height, and the comment heights inside it.
+    ///
+    /// For a change that re-sizes one block and leaves the rest of the page alone, which in
+    /// practice means an image arriving, failing, being dropped, or being evicted. Anything
+    /// that would change what *every* block measures belongs in [`Layout`] instead, where it
+    /// clears the table wholesale; the two are not interchangeable, and putting a local change
+    /// in the key is what this method exists to undo.
+    ///
+    /// A block that has never been measured is not an error: an image can resolve in a block
+    /// that has not been near the window since the page committed.
+    pub fn forget(&mut self, i: usize) {
+        if let Some(h) = self.h.get_mut(i) {
+            *h = None;
+        }
+        // A thread is one block and many comments, and the picture is in one of them. Which
+        // one is not worth tracking: a comment height is cheap to re-measure and the block
+        // above it is being re-measured anyway.
+        self.comments.retain(|(block, _), _| *block != i);
     }
 
     /// What block `i` measured last time it was laid out, if it has been.
@@ -139,7 +162,6 @@ mod tests {
             opts: ReadOpts::default(),
             measure,
             pixels_per_point: 1.0,
-            images: 0,
             find: false,
             pending_link: None,
             collapsed: 0,
@@ -164,15 +186,45 @@ mod tests {
         assert_eq!(h.get(3), None);
     }
 
+    /// The point of `forget`: one picture costs one block, not the page.
     #[test]
-    fn a_loaded_image_forgets_every_height() {
+    fn a_loaded_image_forgets_only_its_own_block() {
         let mut h = Heights::default();
-        let mut l = layout(600.0);
-        h.under(&l);
+        h.under(&layout(600.0));
         h.set(3, 42.0);
-        l.images += 1;
-        h.under(&l);
+        h.set(4, 17.0);
+        h.forget(3);
         assert_eq!(h.get(3), None);
+        assert_eq!(h.get(4), Some(17.0), "a neighbour was forgotten too");
+    }
+
+    /// A thread is one block and many comments, so forgetting the block has to take the
+    /// comment heights inside it with it — and leave every other block's alone.
+    #[test]
+    fn forgetting_a_block_takes_its_comment_heights_and_no_others() {
+        let mut h = Heights::default();
+        h.under(&layout(600.0));
+        let mut comments = h.take_comments();
+        comments.insert((3, 0), 12.0);
+        comments.insert((3, 9), 34.0);
+        comments.insert((4, 0), 56.0);
+        h.restore_comments(comments);
+        h.forget(3);
+        let left = h.take_comments();
+        assert_eq!(left.get(&(3, 0)), None);
+        assert_eq!(left.get(&(3, 9)), None);
+        assert_eq!(left.get(&(4, 0)), Some(&56.0));
+    }
+
+    /// An image can resolve in a block that has not been laid out since the page committed.
+    #[test]
+    fn forgetting_an_unmeasured_block_is_not_an_error() {
+        let mut h = Heights::default();
+        h.under(&layout(600.0));
+        h.set(1, 42.0);
+        h.forget(0);
+        h.forget(99);
+        assert_eq!(h.get(1), Some(42.0));
     }
 
     #[test]
