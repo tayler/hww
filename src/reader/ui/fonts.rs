@@ -16,8 +16,7 @@
 //! with `harfrust`, so joining and marks work, but it has no bidi (`epaint::text::font`,
 //! `TODO(emilk): heed bidi characters`), which means a Hebrew or Arabic run renders in logical
 //! order: backwards. `DejaVuSans` has those glyphs and would turn a visible failure into a
-//! confident, plausible, wrong one, which is the substituted-hotlink-image argument in AGENTS.md
-//! wearing different clothes. The serif cut carries everything above and no RTL script at all;
+//! confident, plausible, wrong one. The serif cut carries everything above and no RTL script;
 //! the seven codepoints it maps in Hebrew Presentation Forms are the Latin `ﬀ ﬁ ﬂ` ligatures.
 //! Do not swap it for the sans cut, and do not add an RTL face until epaint reorders runs.
 //!

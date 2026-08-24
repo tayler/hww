@@ -176,7 +176,8 @@ load only on an explicit click. They are never loaded automatically, on hover, o
 except the page favicon beside the masthead eyebrow, which is fetched as soon as the document
 names one. Each load is counted alongside cookie attempts in the page-info panel, and nothing is
 written to disk. Image requests, and only image requests, carry an origin-only `Referer`;
-documents carry none. See AGENTS.md for why that one header is worth its exception.
+documents carry none. `fetch::Referer::PageOrigin` documents why that one header is worth its
+exception.
 
 ## Building a corpus
 

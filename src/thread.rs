@@ -472,7 +472,7 @@ fn collect(node: NodeRef<'_, Node>, out: &mut String) {
 
 /// Sum of text in a block list, for deciding thread-vs-article.
 ///
-/// One of the three shared text-length counters (see `AGENTS.md`). It used to build a
+/// One of the three shared text-length counters. It used to build a
 /// throwaway `Document` per comment just to reach `text_len`, which cloned every block tree
 /// it measured.
 pub fn comments_text_len(cs: &[Comment]) -> usize {
