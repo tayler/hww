@@ -2,7 +2,7 @@
 //!
 //! Every source format (HTML, gemtext, RSS, gopher, Markdown) maps *into* this, and every
 //! renderer consumes *only* this. That is what makes a multi-protocol reader one program
-//! instead of five, and what lets a GUI, TUI, speech, or e-ink backend be interchangeable.
+//! instead of five, and what lets a GUI, speech, or e-ink backend be interchangeable.
 //!
 //! **Invariant: the IR carries no styling.** No colors, fonts, widths, alignment, or spacing.
 //! Presentation belongs entirely to the renderer, and therefore to the reader. If you ever

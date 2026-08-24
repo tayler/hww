@@ -13,7 +13,7 @@ A reading client for the non-app web: stripped HTML, feeds, gemini, gopher, and 
 JavaScript, the CSS cascade, ads, third-party requests, and cookies are all absent. It is a
 *second* browser, not a Chrome replacement; single-page apps render blank, and that is
 expected. The HTML path works end to end, in a CLI that prints text and in a keyboard-driven
-reading GUI; feeds, gemini, gopher, Markdown, TUI, and archive are not started.
+reading GUI; feeds, gemini, gopher, Markdown, and archive are not started.
 
 The archive (saving a page and reading it back offline) is deliberately **not** started. It
 is a second doctrine: reading history at rest, a directory to protect, an eviction policy,
@@ -103,7 +103,7 @@ Everything funnels through the IR:
                         render.rs (text)                       reader/ (GUI)
 
 `src/ir.rs` is the contract. Every future format (gemtext, RSS, gopher, Markdown) maps *into*
-it and every future renderer (TUI, GUI, speech, e-ink) consumes *only* it. Adding a format is
+it and every future renderer (GUI, speech, e-ink) consumes *only* it. Adding a format is
 a new module producing `ir::Document`; adding a renderer is a new module consuming it. Neither
 touches the other. That is what makes a multi-protocol reader one program instead of five.
 `reader/` is the second renderer, and it cashed that promise in: it consumes `ir::Document`

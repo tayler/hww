@@ -34,7 +34,7 @@ cargo run --features gui --bin hww-gui -- [--no-rewrite] <url> # the reader
 | `reader` | Reading model: inline runs, outline, history, threads, image decoding, notices |
 | GUI | egui reader: links, back/forward, outline, find, threads, images. **Linux verified**; macOS and Windows are believed to build and are not tested |
 | feeds, gemini, gopher, markdown | not started |
-| TUI, archive | not started |
+| archive | not started |
 
 ## Running
 

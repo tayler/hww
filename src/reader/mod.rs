@@ -13,8 +13,8 @@
 //! but it takes `&[u8]` and returns pixels, so `cargo test --features gui` covers the format
 //! matrix, the ceilings, and the partial-decode paths with fixture bytes and no window.
 //!
-//! The module is named `reader` rather than `gui` because the pure half is exactly what a
-//! future TUI reuses.
+//! The module is named `reader` rather than `gui` because the pure half is renderer-agnostic:
+//! a future speech or e-ink backend reuses it unchanged.
 
 /// Which face an inline style is set in. No egui types, so the fast CI job tests it.
 pub mod face;
