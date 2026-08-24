@@ -8,9 +8,11 @@ mod blocks;
 pub mod fonts;
 pub mod images;
 mod inline_ui;
+mod menu_ui;
 pub mod net;
 mod notice_ui;
 mod pageinfo_ui;
+mod prefs_ui;
 pub mod theme;
 mod thread_ui;
 

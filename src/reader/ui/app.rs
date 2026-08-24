@@ -42,15 +42,17 @@
 use crate::ir;
 use crate::reader::history::History;
 use crate::reader::measure::{self, Heights};
-use crate::reader::notice::{self, Button, Notice};
+use crate::reader::menu::{self, Command};
+use crate::reader::notice::{self, Button, IMAGES_ARE_OFF, Notice};
 use crate::reader::outline::{self, OutlineEntry};
 use crate::reader::pageinfo;
+use crate::reader::prefs;
 use crate::reader::settings::{self, Settings};
 use crate::reader::thread_tree::CommentKey;
 use crate::reader::title;
 use crate::reader::ui::images::ImageStore;
 use crate::reader::ui::{
-    Action, Launch, RenderCtx, blocks, fonts, net, notice_ui, pageinfo_ui, theme,
+    Action, Launch, RenderCtx, blocks, fonts, menu_ui, net, notice_ui, pageinfo_ui, prefs_ui, theme,
 };
 use crate::session::{self, LoadError, LoadOptions, Loaded, Rewrite, Target};
 use eframe::egui::{self, Align, Key, Layout, Modifiers, RichText, Ui};
@@ -195,7 +197,13 @@ struct Chrome {
     outline_open: bool,
     find: Option<String>,
     help_open: bool,
+    about_open: bool,
     info_open: bool,
+    settings_open: bool,
+    /// Set by `F10`, consumed by the next `menu_bar` draw. `MenuButton` takes
+    /// `ui.next_auto_id()`, so the title's id does not exist until the bar has been laid out
+    /// and focus has to be requested on the response rather than on an id known in advance.
+    focus_menu_bar: bool,
     /// Notice bars closed on the page on screen, by `Notice::key`. Cleared in `commit`, with
     /// every other per-page reset: a dismissal is about *this* page and no other.
     dismissed: HashSet<String>,
@@ -285,6 +293,15 @@ pub struct ReaderApp {
     /// they were meant to be never fires. The snapshot is the value the guard wanted: focus was
     /// on a link when this frame began, so the widget carrying it has to be drawn again.
     focus_was_on_page: bool,
+    /// The href focus was on when this frame began, taken beside [`Self::focus_was_on_page`]
+    /// and for the same reason.
+    ///
+    /// The chrome is drawn *before* the page, so anything upstream of the render that asks
+    /// "is a link focused?" reads `focused_href` after the clear and gets `None` every time.
+    /// That is not a slow path the way the layout guard was; it is a menu item greyed for
+    /// good. `Shift+Y` worked the whole time only because `handle_keys` runs ahead of the
+    /// clear, which is what made the gap invisible.
+    focus_href_was: Option<String>,
     /// Which block the focused widget was found in this frame, and the frame before: the one
     /// block that must be laid out for egui to keep the focus, which is what used to cost the
     /// whole page for as long as a link had it.
@@ -345,6 +362,41 @@ fn scroll_step(settings: &Settings) -> f32 {
 /// returns `None` when accesskit is off, and the root node is the single id that always exists
 /// while it is on, so asking for *that* one reads the state rather than creating a node nobody
 /// wanted. The closure writes nothing.
+/// A floating card centred in the window: the help card's frame, now that two things want it.
+///
+/// An `Area` and not a `Window`. A `Window` brings a title bar egui paints from its own
+/// visuals, which is why this was the one piece of chrome that did not take the reader's
+/// palette. Two things `Window` was giving away for free have to be asked for: the order, or
+/// this draws under `hover_strip`, which is `Foreground`; and the constraint, or a card taller
+/// than a short window runs off the bottom edge with no way back.
+///
+/// `chrome_bg`, a `guide` stroke and `RADIUS`, which is what the invariant asks of every
+/// floating surface, and `chrome_font` overridden once so nothing inside has to remember that
+/// the reader speaks in the monospace.
+fn centred_card(
+    ctx: &egui::Context,
+    pal: &theme::Palette,
+    opts: &crate::reader::opts::ReadOpts,
+    id: &str,
+    add_contents: impl FnOnce(&mut Ui),
+) {
+    egui::Area::new(egui::Id::new(id))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .constrain(true)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(pal.chrome_bg)
+                .stroke(egui::Stroke::new(1.0, pal.guide))
+                .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+                .inner_margin(egui::Margin::symmetric(16, 14))
+                .show(ui, |ui| {
+                    ui.style_mut().override_font_id = Some(theme::chrome_font(opts));
+                    add_contents(ui);
+                });
+        });
+}
+
 fn accesskit_is_building(ctx: &egui::Context) -> bool {
     ctx.accesskit_node_builder(egui::accesskit_root_id(), |_| ())
         .is_some()
@@ -358,7 +410,10 @@ impl ReaderApp {
         // Before anything draws. `eframe` is built without `default_fonts`, so until this runs
         // there is no face registered at all and every string is blank rather than tofu.
         fonts::install(&cc.egui_ctx);
-        cc.egui_ctx.set_zoom_factor(launch.settings.zoom_factor);
+        // Through the accessor, not the field: this is the one place a hand-edited `0`, a
+        // negative, or a `NaN` reaches egui, which clamps none of them. `persist` writes the
+        // applied value back on the first frame, so the file heals itself.
+        cc.egui_ctx.set_zoom_factor(launch.settings.zoom_factor());
         apply_scroll_speed(&cc.egui_ctx, &launch.settings);
         let mut app = Self {
             net,
@@ -394,6 +449,7 @@ impl ReaderApp {
             focused_comment: None,
             focused_other: false,
             focus_was_on_page: false,
+            focus_href_was: None,
             focus_block: None,
             focus_block_was: None,
             tab_frames: 0,
@@ -549,7 +605,22 @@ impl ReaderApp {
 
     // ---------------------------------------------------------------- images
 
+    /// One article image, by click, by `i`, or as one of `Shift+I`'s.
+    ///
+    /// The policy is enforced here rather than at each of those three, because here is where
+    /// they meet: this is the only path an *article* image reaches the network by. The
+    /// favicon takes `load_favicon` and answers to `allows_any_request` instead, which is the
+    /// whole difference between `Never` and `NoRequests`.
+    ///
+    /// Drawing already respects the setting (`images::placeholder` returns a dim line under
+    /// either policy), so before this guard the reader offered no control and still fetched
+    /// the moment a key was pressed — `Shift+I` on a `NoRequests` page contacted every image
+    /// host on it, which is the one thing that policy exists to promise it will not do.
     fn load_image(&mut self, ctx: &egui::Context, src: &str) {
+        if !self.settings.read.images.offers_loading() {
+            self.flash(IMAGES_ARE_OFF.to_owned());
+            return;
+        }
         let max_width =
             (theme::measure_px(ctx, &self.settings.read) * ctx.pixels_per_point()).max(64.0) as u32;
         self.request_image(src, max_width, true);
@@ -564,7 +635,16 @@ impl ReaderApp {
 
     /// Start the favicon fetch for the page on screen, once. Failures stay silent: the eyebrow
     /// label does not need a retry control for a missing mark.
+    ///
+    /// This is the one image request the reader makes without being asked, which is why it is
+    /// the one `ImagePolicy::NoRequests` exists to stop. `Never` deliberately does not: it turns
+    /// off *article* images, and it meant that before the third policy arrived. A reader who
+    /// wants nothing contacted now has a way to say so, and until this guard was here there was
+    /// no such way at all — the mark went out on every page whatever the setting said.
     fn ensure_favicon(&mut self) {
+        if !self.settings.read.images.allows_any_request() {
+            return;
+        }
         let Some(src) = self.shown().and_then(|r| r.loaded.doc.favicon.clone()) else {
             return;
         };
@@ -611,6 +691,12 @@ impl ReaderApp {
     }
 
     fn load_all_images(&mut self, ctx: &egui::Context) {
+        // Ahead of the walk, so the answer is one line rather than one per image on the page.
+        // `load_image` guards too, and has to: it is also the click and `i` path.
+        if !self.settings.read.images.offers_loading() {
+            self.flash(IMAGES_ARE_OFF.to_owned());
+            return;
+        }
         let Some(ready) = self.shown() else {
             return;
         };
@@ -859,14 +945,28 @@ impl ReaderApp {
             .memory(|m| m.focused())
             .is_some_and(|id| id == egui::Id::new(URL_BAR_ID) || id == egui::Id::new(FIND_ID));
 
+        // While a menu or a context menu is open, egui owns the keyboard. It closes a popup on
+        // `Escape` in its own `popup.rs`, and it never sees the key because this function runs
+        // before any panel is drawn and takes `Escape` unconditionally two lines below. Without
+        // this guard an open menu could not be dismissed, and every bare letter below would fire
+        // its page action underneath it: `q` would quit out from under an open File menu.
+        //
+        // This was already true of the link context menu before there was a menu bar. The bar is
+        // what makes it constant rather than obscure.
+        if egui::Popup::is_any_open(ctx) {
+            return;
+        }
+
         let esc = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
         if esc {
             // Never the status strip.
             self.chrome.url_bar = None;
             self.chrome.find = None;
             self.chrome.help_open = false;
+            self.chrome.about_open = false;
             self.chrome.outline_open = false;
             self.chrome.info_open = false;
+            self.chrome.settings_open = false;
             ctx.memory_mut(|m| m.surrender_focus(egui::Id::new(URL_BAR_ID)));
             return;
         }
@@ -941,7 +1041,7 @@ impl ReaderApp {
         }
         // `?` arrives as its own logical key, shift included.
         if k(Modifiers::NONE, Key::Questionmark) {
-            self.chrome.help_open = !self.chrome.help_open;
+            self.toggle_help();
         }
 
         // --- unshifted bindings
@@ -1018,9 +1118,32 @@ impl ReaderApp {
         if k(Modifiers::NONE, Key::Q) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        // `,` is the settings key everywhere else, and `Cmd+,` is the macOS convention, so both
+        // are bound rather than picking one.
+        if k(Modifiers::NONE, Key::Comma) || k(Modifiers::COMMAND, Key::Comma) {
+            self.chrome.settings_open = !self.chrome.settings_open;
+        }
+        // The GTK and Windows convention for reaching a menu bar. It reveals the bar first, so
+        // hiding it is never a way to lose it.
+        if k(Modifiers::NONE, Key::F10) {
+            if !self.settings.show_menu_bar {
+                self.settings.show_menu_bar = true;
+                self.settings_dirty = true;
+            }
+            self.chrome.focus_menu_bar = true;
+        }
         // Enter follows the focused link. egui's own Tab order does the cycling, because links
         // and comment toggles (and nothing else) are made focusable.
-        if k(Modifiers::NONE, Key::Enter)
+        //
+        // The focus test comes **first**, and that ordering is the whole of it: `consume_key`
+        // takes the event whether or not the arm that follows does anything, so testing it
+        // before `focused_href` swallowed every Enter in the program. Nothing noticed while the
+        // page held the only focusable widgets. It stopped being invisible when the menu bar
+        // arrived: Enter is how egui activates a focused button, so `F10` then Tab reached a
+        // menu title that could not be opened, and the same was true of every chrome button
+        // Tab could reach. Consume it only when there is a link to follow.
+        if self.focused_href.is_some()
+            && k(Modifiers::NONE, Key::Enter)
             && let Some(h) = self.focused_href.clone()
         {
             self.follow_link(&h);
@@ -1150,7 +1273,7 @@ impl eframe::App for ReaderApp {
             || self.focused_comment.is_some()
             || self.focused_other;
         self.focus_block_was = self.focus_block.take();
-        self.focused_href = None;
+        self.focus_href_was = self.focused_href.take();
         self.focused_image = None;
         self.focused_comment = None;
         self.focused_other = false;
@@ -1168,6 +1291,10 @@ impl eframe::App for ReaderApp {
         // Order matters: the strip is laid out first so it keeps its line at the bottom no
         // matter what the rest of the chrome does. It is the one thing that never hides.
         self.status_strip(ui, &pal);
+        // Above the URL bar, so the window reads top to bottom as menus, address, page. A top
+        // panel takes its place from the order it is added in, so this line's position is the
+        // layout.
+        self.menu_bar(ui, &pal);
         self.url_bar(ui, &pal);
         self.find_bar(ui, &pal);
         // Under the bars and above the page, docked: the one place a remark about the page
@@ -1181,7 +1308,9 @@ impl eframe::App for ReaderApp {
         self.hover_strip(ui, &pal);
         self.toast(&ctx, &pal);
         self.help_overlay(&ctx, &pal);
+        self.about_overlay(&ctx, &pal);
         self.info_panel(&ctx, &pal);
+        self.settings_panel(&ctx, &pal);
 
         if let Some(text) = self.pending_copy.take() {
             ctx.copy_text(text);
@@ -1248,6 +1377,152 @@ impl ReaderApp {
     }
 
     // ---------------------------------------------------------------- chrome
+
+    /// The menu bar, and the one command it produced.
+    ///
+    /// Drawn from `reader::menu`, which holds the table; this supplies the live state the bar
+    /// needs to grey an item that would fire on nothing and to tick the ones that reflect a
+    /// setting.
+    fn menu_bar(&mut self, ui: &mut Ui, pal: &theme::Palette) {
+        if !self.settings.show_menu_bar {
+            return;
+        }
+        let enable = menu_ui::Enable {
+            page: self.shown().is_some(),
+            focused_link: self.focus_href_was.is_some(),
+            thread: self.shown().is_some_and(|r| {
+                r.loaded
+                    .doc
+                    .blocks
+                    .iter()
+                    .any(|b| matches!(b, ir::Block::Thread(_)))
+            }),
+            back: self.history.can_go_back(),
+            forward: self.history.can_go_forward(),
+        };
+        let checks = menu_ui::Checks {
+            link_addresses: self.settings.read.show_link_urls,
+            outline: self.chrome.outline_open,
+            page_info: self.chrome.info_open,
+            menu_bar: self.settings.show_menu_bar,
+        };
+        let bar = menu_ui::bar(ui, pal, &self.settings, enable, checks);
+        panel_edge(ui, bar.rect, Side::Bottom, pal);
+
+        // `F10` asked for focus and the id only exists now that the bar has been laid out.
+        if self.chrome.focus_menu_bar {
+            self.chrome.focus_menu_bar = false;
+            if let Some(resp) = &bar.focus_first {
+                resp.request_focus();
+            }
+        }
+        if let Some(command) = bar.command {
+            self.run_command(ui.ctx(), command);
+        }
+    }
+
+    /// Apply one menu command. Every arm is something a key already does, so this is a second
+    /// door onto the same rooms rather than a second implementation of any of them.
+    ///
+    /// Public for `bin/shot.rs`, on the same argument as [`Self::follow_link`]: a synthetic Tab
+    /// does not reliably land focus inside an egui popup, so a command reachable *only* from
+    /// the menu bar (`About hww` is the one) has no keyboard route the harness can drive and
+    /// would otherwise be the one piece of chrome with no picture at all. It runs what the
+    /// menu item runs, so the scene still photographs the real path.
+    pub fn run_command(&mut self, ctx: &egui::Context, command: Command) {
+        match command {
+            Command::OpenLocation => self.open_url_bar(),
+            Command::Reload => self.reload(self.opts),
+            Command::ReloadBare => {
+                self.reload(LoadOptions::BARE);
+                self.flash("reloaded bare: no rewrite rule, no site profile".to_owned());
+            }
+            Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Command::CopyPageUrl => {
+                if let Some(u) = self
+                    .shown()
+                    .map(|r| r.loaded.prov.final_url.clone())
+                    .or_else(|| self.history.current().cloned())
+                {
+                    self.copy(u.as_str());
+                    self.flash("page URL copied".to_owned());
+                }
+            }
+            Command::CopyFocusedLink => match self.focus_href_was.clone() {
+                Some(h) => {
+                    self.copy(&h);
+                    self.flash(format!("copied {h}"));
+                }
+                None => self.flash("no link focused; Tab to one first".to_owned()),
+            },
+            Command::Find => self.open_find(),
+            Command::OpenSettings => self.chrome.settings_open = true,
+            Command::ZoomIn => {
+                ctx.set_zoom_factor((ctx.zoom_factor() + 0.1).min(Settings::ZOOM_MAX))
+            }
+            Command::ZoomOut => {
+                ctx.set_zoom_factor((ctx.zoom_factor() - 0.1).max(Settings::ZOOM_MIN))
+            }
+            Command::ZoomReset => ctx.set_zoom_factor(1.0),
+            Command::Narrower => {
+                self.settings.read.narrow();
+                self.settings_dirty = true;
+            }
+            Command::Wider => {
+                self.settings.read.widen();
+                self.settings_dirty = true;
+            }
+            Command::SetTheme(i) => self.set_field(prefs::FieldId::Theme, i),
+            Command::SetTypeface(i) => self.set_field(prefs::FieldId::Typeface, i),
+            Command::SetImages(i) => self.set_field(prefs::FieldId::Images, i),
+            Command::ToggleLinkAddresses => {
+                self.settings.read.show_link_urls = !self.settings.read.show_link_urls;
+                self.settings_dirty = true;
+            }
+            Command::ToggleOutline => self.chrome.outline_open = !self.chrome.outline_open,
+            Command::TogglePageInfo => self.chrome.info_open = !self.chrome.info_open,
+            Command::ToggleMenuBar => {
+                self.settings.show_menu_bar = !self.settings.show_menu_bar;
+                self.settings_dirty = true;
+                if !self.settings.show_menu_bar {
+                    self.flash("menu bar hidden; F10 brings it back".to_owned());
+                }
+            }
+            Command::CollapseAllReplies => self.collapse_all(),
+            Command::Back => self.go_back(),
+            Command::Forward => self.go_forward(),
+            Command::ShowHelp => self.toggle_help(),
+            Command::ShowAbout => {
+                self.chrome.about_open = true;
+                self.chrome.help_open = false;
+            }
+        }
+    }
+
+    /// Write one `prefs` field by index, and mark the settings dirty.
+    fn set_field(&mut self, field: prefs::FieldId, index: usize) {
+        prefs::set(&mut self.settings, field, prefs::Value::Index(index));
+        self.settings_dirty = true;
+    }
+
+    /// The settings panel, and whatever it changed.
+    fn settings_panel(&mut self, ctx: &egui::Context, pal: &theme::Palette) {
+        if !self.chrome.settings_open {
+            return;
+        }
+        let mut open = true;
+        let events = prefs_ui::panel(ctx, pal, &mut self.settings, self.strip_height, &mut open);
+        self.chrome.settings_open = open;
+        for event in events {
+            match event {
+                prefs_ui::Event::Changed => self.settings_dirty = true,
+                // Zoom is egui's, and `persist` copies the context's value *into* the settings
+                // every frame. Writing the field alone would be overwritten before it took
+                // effect, so the panel reports the number and this hands it to egui.
+                prefs_ui::Event::ZoomSet(z) => ctx.set_zoom_factor(z),
+            }
+        }
+    }
 
     /// The one piece of chrome that never hides. See the module doc.
     fn status_strip(&mut self, ui: &mut Ui, pal: &theme::Palette) {
@@ -1360,7 +1635,7 @@ impl ReaderApp {
             Some(StripAction::Forward) => self.go_forward(),
             Some(StripAction::OpenUrlBar) => self.open_url_bar(),
             Some(StripAction::ToggleInfo) => self.chrome.info_open = !self.chrome.info_open,
-            Some(StripAction::ToggleHelp) => self.chrome.help_open = !self.chrome.help_open,
+            Some(StripAction::ToggleHelp) => self.toggle_help(),
             None => {}
         }
     }
@@ -1710,54 +1985,82 @@ impl ReaderApp {
         self.chrome.info_open = open;
     }
 
+    /// `?`, the menu item, and the strip's control all reach the help card, and all three go
+    /// through here so the About card closes behind it.
+    ///
+    /// Both are `centred_card`, anchored `CENTER_CENTER`: opened together they stack, and the
+    /// one underneath is unreachable rather than merely untidy.
+    fn toggle_help(&mut self) {
+        self.chrome.help_open = !self.chrome.help_open;
+        if self.chrome.help_open {
+            self.chrome.about_open = false;
+        }
+    }
+
     fn help_overlay(&mut self, ctx: &egui::Context, pal: &theme::Palette) {
         if !self.chrome.help_open {
             return;
         }
-        // An `Area` and not a `Window`. A `Window` brings a title bar egui paints from its own
-        // visuals, which is why this was the one piece of chrome that did not take the reader's
-        // palette. Two things `Window` was giving away for free have to be asked for: the order,
-        // or this draws under `hover_strip`, which is `Foreground`; and the constraint, or a
-        // help table taller than a short window runs off the bottom edge with no way back.
-        egui::Area::new(egui::Id::new("hww-help"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .constrain(true)
-            .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(pal.chrome_bg)
-                    .stroke(egui::Stroke::new(1.0, pal.guide))
-                    .corner_radius(egui::CornerRadius::same(theme::RADIUS))
-                    .inner_margin(egui::Margin::symmetric(16, 14))
-                    .show(ui, |ui| {
-                        let opts = self.settings.read.clone();
-                        ui.style_mut().override_font_id = Some(theme::chrome_font(&opts));
-                        // The keys as keycaps (`notice_ui::keycap`), the one convention for
-                        // "press this" the reader has; the rest of the card is the list it was.
-                        egui::Grid::new("hww-help")
-                            .num_columns(2)
-                            .spacing([
-                                theme::snap(opts.base_size_pt),
-                                theme::snap(opts.base_size_pt * 0.45),
-                            ])
-                            .show(ui, |ui| {
-                                for (keys, what) in HELP {
-                                    ui.horizontal(|ui| notice_ui::keycaps(ui, pal, &opts, keys));
-                                    ui.label(*what);
-                                    ui.end_row();
-                                }
-                            });
-                        ui.add_space(theme::snap(opts.base_size_pt * 0.3));
-                        ui.separator();
-                        ui.label(
-                    RichText::new(
-                        "Ctrl means Cmd on macOS. Zoom is egui's: Ctrl +/-/0, Ctrl+wheel, pinch.",
-                    )
-                    .color(pal.dim)
-                    .font(theme::chrome_font(&self.settings.read)),
+        let opts = self.settings.read.clone();
+        centred_card(ctx, pal, &opts, "hww-help", |ui| {
+            // The keys as keycaps (`notice_ui::keycap`), the one convention for
+            // "press this" the reader has; the rest of the card is the list it was.
+            egui::Grid::new("hww-help")
+                .num_columns(2)
+                .spacing([
+                    theme::snap(opts.base_size_pt),
+                    theme::snap(opts.base_size_pt * 0.45),
+                ])
+                .show(ui, |ui| {
+                    for (keys, what) in menu::HELP {
+                        ui.horizontal(|ui| notice_ui::keycaps(ui, pal, &opts, keys));
+                        ui.label(*what);
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(theme::snap(opts.base_size_pt * 0.3));
+            ui.separator();
+            ui.label(
+                RichText::new(
+                    "Ctrl means Cmd on macOS. Zoom is egui's: Ctrl +/-/0, Ctrl+wheel, pinch.",
+                )
+                .color(pal.dim)
+                .font(theme::chrome_font(&opts)),
+            );
+        });
+    }
+
+    /// Help, About hww: [`menu::ABOUT`], all of it.
+    ///
+    /// It was a `flash` of `ABOUT[0]` alone, which put the one uncontroversial sentence in a
+    /// six-second pill and left the two that say what the program actually refuses to do
+    /// unreachable from the running reader. They are `pub const`, so nothing warned. A card
+    /// rather than a longer toast, because three sentences is reading rather than status, and
+    /// the reader already has a floating surface shaped for it.
+    fn about_overlay(&mut self, ctx: &egui::Context, pal: &theme::Palette) {
+        if !self.chrome.about_open {
+            return;
+        }
+        let opts = self.settings.read.clone();
+        centred_card(ctx, pal, &opts, "hww-about", |ui| {
+            ui.set_max_width(theme::snap(opts.base_size_pt * 26.0));
+            ui.label(theme::label_job("About hww", &opts, pal.dim));
+            ui.add_space(theme::snap(opts.base_size_pt * 0.5));
+            for line in menu::ABOUT {
+                ui.label(
+                    RichText::new(*line)
+                        .color(pal.fg)
+                        .font(theme::chrome_font(&opts)),
                 );
-                    });
-            });
+                ui.add_space(theme::snap(opts.base_size_pt * 0.4));
+            }
+            ui.separator();
+            ui.label(
+                RichText::new("Escape closes this.")
+                    .color(pal.dim)
+                    .font(theme::chrome_font(&opts)),
+            );
+        });
     }
 
     // ---------------------------------------------------------------- the page
@@ -2155,35 +2458,6 @@ enum StripAction {
     ToggleInfo,
     ToggleHelp,
 }
-
-/// Written with the glyphs egui's embedded fonts actually carry. `→` is not one of them; it
-/// renders as tofu, while `←`, `↑`, and `↓` are, which is why this table looks asymmetric and
-/// is meant to.
-const HELP: &[(&str, &str)] = &[
-    ("j k ↓ ↑", "scroll"),
-    ("Space / PgDn", "page down · Shift+Space pages up"),
-    ("g / G", "top / bottom"),
-    ("Ctrl+L or o", "URL bar · Enter navigates"),
-    ("Tab / Shift+Tab", "cycle links · Enter follows"),
-    ("Alt+Left / Backspace", "back"),
-    ("Alt+Right", "forward · the mouse side buttons do both"),
-    (
-        "r / R",
-        "reload · reload bare: no rewrite rule, no site profile",
-    ),
-    ("i / I", "load focused image · load all, naming their hosts"),
-    ("t", "outline"),
-    ("p", "page info: how this page arrived"),
-    (
-        "/ or Ctrl/Cmd+F · Enter / Shift+Enter",
-        "find in page · next / previous match",
-    ),
-    ("z / Z", "collapse focused reply · collapse all"),
-    ("y / Y", "copy page URL · copy focused link"),
-    ("[ / ]", "narrow / widen the reading measure"),
-    ("d", "cycle theme"),
-    ("? / Esc / q", "this help · dismiss chrome · quit"),
-];
 
 #[cfg(test)]
 mod tests {

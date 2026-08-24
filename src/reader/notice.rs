@@ -79,6 +79,15 @@ pub use crate::fetch::TIMEOUT;
 /// all: it marks one link at one place, and a bar docked above the page cannot point.
 pub const PENDING: &str = "[loading]";
 
+/// What the reader says when a key asks for a picture the image setting has ruled out.
+///
+/// `i` and `Shift+I` are bound whatever the setting says, and the page under a declining
+/// policy draws a dim `[image] not shown` rather than a control, so there is nothing on screen
+/// for the key to be refused *by*. A keypress that does nothing and says nothing reads as a
+/// broken binding; this says which setting decided, in the reader's own vocabulary, and it
+/// lives out here with the rest of the wording so the fast job tests it.
+pub const IMAGES_ARE_OFF: &str = "hww is set not to load images; change Images in Settings.";
+
 /// How long a transient status stays up: "Copied URL", "loading 2 images from …", "no link
 /// focused". The Material range is four to ten seconds; six, because the one message in the set
 /// that matters is the disclosure of which hosts `I` is about to contact, and a reader looking

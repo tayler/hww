@@ -31,10 +31,10 @@ cargo run --features gui --bin hww-gui -- [--no-rewrite] <url> # the reader
 | `session` | The pipeline in one place; the rewrite notice reported before dispatch |
 | `render` | Plain text |
 | `ir` | Document / Block / Inline / Thread / Comment / Entries / Entry |
-| `reader` | Reading model: inline runs, outline, history, threads, image decoding, notices |
-| GUI | egui reader: links, back/forward, outline, find, threads, images. **Linux verified**; macOS and Windows are believed to build and are not tested |
+| `reader` | Reading model: inline runs, outline, history, threads, image decoding, notices, the menu bar and every setting as data |
+| GUI | egui reader: links, back/forward, outline, find, threads, images, menu bar, settings panel. **Linux verified**; macOS and Windows are believed to build and are not tested |
 | feeds, gemini, gopher, markdown | not started |
-| TUI, archive | not started |
+| archive | not started |
 
 ## Running
 
@@ -149,11 +149,12 @@ one function that owns the pipeline and reports the rewrite before it dispatches
 
     cargo run --features gui --bin hww-gui -- <url>
 
-Keyboard first, but nothing is keyboard-only: `?` lists the keys, and the status strip along
-the bottom carries back/forward, a clickable URL, and a circled `i` so a mouse alone can
-navigate. That strip never hides: the URL bar, outline, find bar, and help all dismiss on
-`Esc`, but a rewrite notice has to be on screen *before* the request goes out, so the strip
-stays.
+Keyboard first, but nothing is keyboard-only: `?` lists the keys, a menu bar across the top
+carries every command with the key that already does it, and the status strip along the bottom
+carries back/forward, a clickable URL, and a circled `i` so a mouse alone can navigate. That
+strip never hides: the URL bar, outline, find bar, menus, and help all dismiss on `Esc`, but a
+rewrite notice has to be on screen *before* the request goes out, so the strip stays. The bar
+itself can go (`View` ▸ `Menu bar`), and `F10` brings it back and focuses it.
 
 What the reader has to say about a page divides on whether it can wait. Anything that would be
 mis-read otherwise is a notice: an infobar docked under the top chrome, where no page can be,
@@ -169,14 +170,42 @@ text beside the URL.
 
 One centred reading column, measured in characters (`[` and `]`). Zoom is egui's own, so
 `Ctrl`+`+`/`-`/`0`, `Ctrl`+wheel, and trackpad pinch behave the way a browser does. Themes are
-light, sepia, dark, and follow-the-system (`d`).
+light, sepia, dark, and follow-the-system (`d`), plus a high-contrast pair that the `d` cycle
+leaves out and the settings panel reaches.
 
 **Images are placeholders that name their host** (`[image] load from cdn.example.net`), and
 load only on an explicit click. They are never loaded automatically, on hover, or in advance —
 except the page favicon beside the masthead eyebrow, which is fetched as soon as the document
-names one. Each load is counted alongside cookie attempts in the page-info panel, and nothing is
-written to disk. Image requests, and only image requests, carry an origin-only `Referer`;
-documents carry none. See AGENTS.md for why that one header is worth its exception.
+names one. Three policies, and the favicon is what separates the last two: *Ask first* offers
+to load each picture, *Article images off* marks where each one was and offers nothing, and
+*No image requests* fetches nothing at all, the site icon included. Each load is counted
+alongside cookie attempts in the page-info panel, and nothing is written to disk. Image
+requests, and only image requests, carry an origin-only `Referer`; documents carry none.
+`fetch::Referer::PageOrigin` documents why that one header is worth its exception.
+
+## Settings
+
+`,` or `Edit` ▸ `Settings...` opens a panel over the page, and everything the reader has is in
+it: line width, text size, line and paragraph spacing, typeface, theme, image policy, link
+addresses, zoom, scroll step, reply indent and its depth limit, the menu bar, and whether an
+image request names the site it is loading for. Each carries a sentence saying what it does and
+the key that also does it; each group has a `reset`, and the panel has a `reset all`.
+
+Thirteen settings existed before the panel did and three of them were reachable. The rest
+needed a text editor and the knowledge that there was a file to edit, which nothing in the
+reader or this README mentioned. The list is data, and a test walks it against the settings
+struct, so a setting that exists and cannot be reached fails the build rather than going
+quietly missing.
+
+The file is the only thing that survives a run:
+
+    ${XDG_CONFIG_HOME:-~/.config}/hww/settings.json     # ~/Library/Application Support/hww on
+                                                        # macOS, %APPDATA%\hww on Windows
+
+It stays hand-editable, and the panel names its path at the foot. A value it cannot parse costs
+that one setting rather than the file: an unknown theme or image policy falls back to the
+default, everything else is kept, and a number outside its range is clamped instead of
+believed.
 
 ## Building a corpus
 
@@ -199,9 +228,10 @@ not `example.com`), inline flattening, thread reconstruction, outline and fragme
 history, title de-duplication, image decoding and its ceilings, and the origin-only `Referer`.
 
 Regressions worth keeping named: comment bodies stripped as chrome; styling leaking into the
-IR; a whitespace-only node between two inline elements welding two words together; and the
-text renderer's markdown output, which is checked against a verbatim copy of the walker it
-replaced.
+IR; a whitespace-only node between two inline elements welding two words together; a setting
+the panel cannot reach; a menu item the help card does not list; a reader-facing string needing
+a glyph no shipped face carries; and the text renderer's markdown output, which is checked
+against a verbatim copy of the walker it replaced.
 
 ## License
 

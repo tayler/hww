@@ -21,7 +21,6 @@
 
 use crate::ir;
 use crate::reader::image_decode::Decoded;
-use crate::reader::opts::ImagePolicy;
 use crate::reader::pageinfo::Counts;
 use crate::reader::ui::{Action, RenderCtx, theme};
 use eframe::egui::{self, RichText, TextureHandle, Ui};
@@ -234,8 +233,10 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     let pal = ctx.pal;
     let font = theme::chrome_font(ctx.opts);
 
-    if ctx.opts.images == ImagePolicy::Never {
+    if !ctx.opts.images.offers_loading() {
         // Silently dropping the image is how a reader lies about a page: say it was there.
+        // Both policies that decline to load still get this line; what separates them is
+        // whether the favicon is fetched, which is `ensure_favicon`'s business, not this one's.
         let label = if alt.is_empty() {
             "[image] not shown".to_owned()
         } else {
@@ -396,7 +397,7 @@ pub fn favicon(ui: &mut Ui, src: &str, ctx: &mut RenderCtx<'_>) {
 /// The one control an entry's thumbnail gets: a small dim `[image]` beside the time, which
 /// loads that one picture, and nothing once it is loaded. `Never` shows nothing at all.
 pub fn load_control(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
-    if ctx.opts.images == ImagePolicy::Never
+    if !ctx.opts.images.offers_loading()
         || matches!(ctx.images.state(&img.src), Some(State::Ready(_)))
     {
         return;
@@ -423,6 +424,14 @@ pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>)
             let w = h * ready.width as f32 / ready.height.max(1) as f32;
             ui.add(egui::Image::new(&ready.texture).fit_to_exact_size(egui::vec2(w, h)));
         }
+        // A policy that declines to load gets a label, not a button: the click was already
+        // guarded, but a `Button` still takes Tab focus and still writes `focus_image`, so `i`
+        // landed on a picture the setting had ruled out and the block placeholder two
+        // functions up had stopped offering. The mark stays either way — saying nothing is how
+        // a reader lies about a page.
+        _ if !ctx.opts.images.offers_loading() => {
+            ui.label(RichText::new(format!("[{alt}]")).color(pal.dim).italics());
+        }
         _ => {
             let resp = ui.add(
                 egui::Button::new(RichText::new(format!("[{alt}]")).color(pal.dim)).frame(false),
@@ -430,7 +439,7 @@ pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>)
             if resp.has_focus() {
                 ctx.focus_image = Some(img.src.clone());
             }
-            if resp.clicked() && ctx.opts.images != ImagePolicy::Never {
+            if resp.clicked() {
                 ctx.act(Action::LoadImage(img.src.clone()));
             }
         }

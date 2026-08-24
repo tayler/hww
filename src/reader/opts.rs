@@ -115,9 +115,69 @@ where
 pub enum ImagePolicy {
     /// Show a one-line strip naming the host. Loads only on an explicit click or `i`.
     Placeholder,
-    /// Never offer to load. The strip still says an image was there; silently dropping
-    /// content is how a reader lies about a page.
+    /// Never offer to load an article image. The strip still says an image was there;
+    /// silently dropping content is how a reader lies about a page.
+    ///
+    /// This does **not** stop the page favicon, which `ui::app::ensure_favicon` fetches as
+    /// chrome identity. That was true before this variant had a neighbour and it is kept true
+    /// deliberately: renaming or re-scoping `Never` would change what existing `settings.json`
+    /// files mean, and the failure mode is silent. A reader who wants no image request at all
+    /// wants [`ImagePolicy::NoRequests`].
     Never,
+    /// No image request at all, the favicon included.
+    ///
+    /// The distinction `Never` cannot make: one third-party request per page still leaves, and
+    /// it carries the origin `Referer` when that is on, so "no article images" and "nothing
+    /// contacted" are two different choices and now say so.
+    NoRequests,
+}
+
+impl ImagePolicy {
+    /// Every policy, for the tests that must not be allowed to miss one.
+    pub const ALL: [ImagePolicy; 3] = [
+        ImagePolicy::Placeholder,
+        ImagePolicy::Never,
+        ImagePolicy::NoRequests,
+    ];
+
+    /// Whether a placeholder may offer to load the picture it marks.
+    ///
+    /// The call sites used to test `== ImagePolicy::Never`, which is why this exists: an
+    /// equality check against one variant compiles unchanged when a third arrives and silently
+    /// treats it as [`ImagePolicy::Placeholder`], which is the most permissive answer. A
+    /// `matches!` here puts the decision in one tested file instead of four untested ones.
+    pub fn offers_loading(self) -> bool {
+        matches!(self, ImagePolicy::Placeholder)
+    }
+
+    /// Whether hww may request any image at all, the page favicon included.
+    pub fn allows_any_request(self) -> bool {
+        !matches!(self, ImagePolicy::NoRequests)
+    }
+}
+
+/// An `images` value this binary does not know falls back to the default, for exactly the
+/// reason [`theme_or_system`] exists.
+///
+/// `ReadOpts` is `#[serde(default)]`, which covers a *missing* field and not an unparseable
+/// one. Without this, a binary predating [`ImagePolicy::NoRequests`] reading a file that names
+/// it loses every other setting in the file, and then writes the defaults back over it on the
+/// first `d`, `[`, or `]`. Adding a variant to a serialized enum is what makes that a live path
+/// rather than a hypothetical one.
+fn images_or_default<'de, D>(d: D) -> Result<ImagePolicy, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Known(ImagePolicy),
+        Unknown(serde::de::IgnoredAny),
+    }
+    Ok(match Wire::deserialize(d)? {
+        Wire::Known(p) => p,
+        Wire::Unknown(_) => ReadOpts::default().images,
+    })
 }
 
 /// Presentation settings for the reading column.
@@ -139,6 +199,7 @@ pub struct ReadOpts {
     pub theme: Theme,
     /// Show a link's target inline, the way `render::TextOpts::show_links` does.
     pub show_link_urls: bool,
+    #[serde(deserialize_with = "images_or_default")]
     pub images: ImagePolicy,
     /// Points of indent per reply level in a thread.
     pub indent_per_depth: f32,
@@ -167,6 +228,37 @@ impl Default for ReadOpts {
 impl ReadOpts {
     pub const MEASURE_MIN: f32 = 45.0;
     pub const MEASURE_MAX: f32 = 110.0;
+
+    // The bounds below exist because a slider needs two ends and the panel is not the place to
+    // decide them: a literal in `ui/` is a number no test can reach, and every one of these is
+    // a typographic judgement rather than an implementation detail. They live beside the fields
+    // they bound, next to the defaults they have to contain.
+
+    /// Body size in points. Ten is the floor at which `chrome_font`'s own 11 pt minimum takes
+    /// over, so below it the reader's labels stop tracking the page; twenty-eight is already
+    /// large-print, and `zoom_factor` is the right tool past it.
+    pub const SIZE_MIN: f32 = 10.0;
+    pub const SIZE_MAX: f32 = 28.0;
+
+    /// Multiples of the font size. Under 1.0 the lines collide; past 2.2 the paragraph stops
+    /// reading as one block.
+    pub const LINE_HEIGHT_MIN: f32 = 1.0;
+    pub const LINE_HEIGHT_MAX: f32 = 2.2;
+
+    /// Zero is a real choice here, not a broken one: it sets paragraphs solid, the way a
+    /// printed novel does, and the indent is not this reader's to add.
+    pub const PARAGRAPH_SPACING_MIN: f32 = 0.0;
+    pub const PARAGRAPH_SPACING_MAX: f32 = 2.5;
+
+    /// Points per reply level. Zero flattens a discussion to a list, which is legible and is
+    /// somebody's preference; past 48 a third-level reply has lost half the window.
+    pub const INDENT_MIN: f32 = 0.0;
+    pub const INDENT_MAX: f32 = 48.0;
+
+    /// Levels before the indent stops accumulating. Zero means never indent at all, which is
+    /// the same page `INDENT_MIN` gives and is reachable from either end on purpose.
+    pub const MAX_INDENT_MIN: u16 = 0;
+    pub const MAX_INDENT_MAX: u16 = 24;
 
     /// `[` and `]`. hww's own reading knob, the one a browser does not have.
     pub fn widen(&mut self) {
@@ -288,6 +380,121 @@ mod tests {
             let back: ReadOpts = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
             assert_eq!(back.theme, t);
         }
+    }
+
+    /// Both questions answered for every policy, so a fourth option cannot inherit an answer.
+    ///
+    /// The table is written out rather than derived: deriving it from the same `matches!` the
+    /// implementation uses would assert only that the function equals itself. What is pinned is
+    /// the *intent* — which policy loads article images, and which one lets any request out at
+    /// all — and `ALL` is what makes a forgotten variant a failure here.
+    #[test]
+    fn every_policy_answers_both_questions() {
+        let expected = [
+            (ImagePolicy::Placeholder, true, true),
+            (ImagePolicy::Never, false, true),
+            (ImagePolicy::NoRequests, false, false),
+        ];
+        assert_eq!(expected.len(), ImagePolicy::ALL.len());
+        for (policy, offers, requests) in expected {
+            assert!(
+                ImagePolicy::ALL.contains(&policy),
+                "{policy:?} is not in ALL"
+            );
+            assert_eq!(policy.offers_loading(), offers, "{policy:?} offers_loading");
+            assert_eq!(
+                policy.allows_any_request(),
+                requests,
+                "{policy:?} allows_any_request"
+            );
+        }
+    }
+
+    /// The favicon is the whole reason `NoRequests` exists: it is the one image request that
+    /// `Never` does not stop, so the two policies must not agree about it.
+    #[test]
+    fn never_still_allows_the_favicon_and_no_requests_does_not() {
+        assert!(ImagePolicy::Never.allows_any_request());
+        assert!(!ImagePolicy::NoRequests.allows_any_request());
+        // And neither offers to load an article image, which is what they do share.
+        assert!(!ImagePolicy::Never.offers_loading());
+        assert!(!ImagePolicy::NoRequests.offers_loading());
+    }
+
+    /// An `images` value this binary has never heard of costs the policy, not the file.
+    ///
+    /// The mirror of `an_unknown_theme_does_not_take_the_rest_of_the_settings_with_it`, and it
+    /// became load-bearing the moment `ImagePolicy` grew a third variant: an older binary will
+    /// meet `"NoRequests"` in a file written by this one.
+    #[test]
+    fn an_unknown_image_policy_does_not_take_the_rest_of_the_settings_with_it() {
+        let o: ReadOpts =
+            serde_json::from_str(r#"{"images": "Telepathy", "measure_chars": 80.0}"#).unwrap();
+        assert_eq!(o.images, ReadOpts::default().images);
+        assert_eq!(o.measure_chars, 80.0);
+    }
+
+    /// And every policy this binary does know still round-trips.
+    #[test]
+    fn every_image_policy_round_trips_through_json() {
+        for p in ImagePolicy::ALL {
+            let o = ReadOpts {
+                images: p,
+                ..Default::default()
+            };
+            let back: ReadOpts = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+            assert_eq!(back.images, p);
+        }
+    }
+
+    /// Every bound contains the default it bounds. A slider whose range excludes the value it
+    /// opens on snaps the setting the moment the panel is drawn, which reads as the panel
+    /// changing a setting nobody touched.
+    #[test]
+    fn every_range_contains_its_default() {
+        let d = ReadOpts::default();
+        let bands = [
+            (
+                "measure_chars",
+                d.measure_chars,
+                ReadOpts::MEASURE_MIN,
+                ReadOpts::MEASURE_MAX,
+            ),
+            (
+                "base_size_pt",
+                d.base_size_pt,
+                ReadOpts::SIZE_MIN,
+                ReadOpts::SIZE_MAX,
+            ),
+            (
+                "line_height",
+                d.line_height,
+                ReadOpts::LINE_HEIGHT_MIN,
+                ReadOpts::LINE_HEIGHT_MAX,
+            ),
+            (
+                "paragraph_spacing",
+                d.paragraph_spacing,
+                ReadOpts::PARAGRAPH_SPACING_MIN,
+                ReadOpts::PARAGRAPH_SPACING_MAX,
+            ),
+            (
+                "indent_per_depth",
+                d.indent_per_depth,
+                ReadOpts::INDENT_MIN,
+                ReadOpts::INDENT_MAX,
+            ),
+        ];
+        for (name, value, min, max) in bands {
+            assert!(min < max, "{name}: empty band");
+            assert!(
+                (min..=max).contains(&value),
+                "{name}: default {value} is outside {min}..={max}"
+            );
+        }
+        assert!(
+            (ReadOpts::MAX_INDENT_MIN..=ReadOpts::MAX_INDENT_MAX).contains(&d.max_thread_indent)
+        );
     }
 
     /// Settings round-trip through the on-disk JSON, and an older file missing a field still
