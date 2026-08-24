@@ -115,13 +115,36 @@ HTTPS-to-HTTP downgrade refusal, byte and redirect caps, and timeouts in `src/fe
 Keep `FetchError::LikelyBlocked` distinct from generic transport errors. Only a document
 read-timeout is the measured bot-block signal; a subresource timeout is `FetchError::Timeout`.
 
-Article images are a third-party capability behind `gui`. They load only after a control names
-the host and the user acts, are counted in page info, and never touch disk. Never auto-load,
-prefetch, or load on hover. The favicon is the one automatic request and is chrome identity;
-`ImagePolicy::NoRequests` stops that one too. Enforce the policy at the choke points,
-`ReaderApp::load_image` for article images and `ensure_favicon` for the favicon, rather than at
-each key, click, and placeholder: a policy checked at some call sites and not others reads as
-kept and is not.
+Article images are a third-party capability behind `gui`. They are counted in page info and
+never touch disk. Never prefetch and never load on hover. Under every policy but
+`ImagePolicy::Auto` they load only after a control names the host and the user acts; `Auto` is
+opt-in, is not the default, names each host once per page before the bytes, and is bounded by
+`measure::Band` rather than by the document, so what it fetches is a screenful and not a
+gallery. `reader::autoload` owns that decision and is where its tests are. The favicon is
+automatic under every policy but `NoRequests`, which stops that one too.
+
+Enforce the policy at the choke points — `ReaderApp::load_image`, `load_all_images`,
+`autoload`, and `ensure_favicon` — rather than at each key, click, and placeholder: a policy
+checked at some call sites and not others reads as kept and is not. A gate outside a choke
+point is an optimisation, never the enforcement, and says so where it stands.
+
+The job queue in `reader::ui::net` is one FIFO with no priority lane, so anything that enqueues
+in bulk enqueues ahead of the reader's next click. `Net::mint_page` publishes the current
+navigation to the pool and a stale `Job::Image` marked `automatic` is answered with
+`Msg::ImageDropped` instead of fetched. Only `automatic` ones: a click, `i`, or `Shift+I` is a
+request somebody made on a page that is still on screen, and the outgoing page stays visible and
+clickable by design. `ImageDropped` means *never requested*, so `ImageStore::forget` takes back
+the host and `Referer` the queued job had already recorded, and the placeholder goes back to
+offering itself rather than claiming a host refused it.
+
+`autoload` must be bounded by where a picture *draws*, never by the top-level block that
+contains it: a feed is one `Block::Entries` and a discussion is one `Block::Thread`, so
+block-level banding covers the whole page for exactly the two shapes that carry the most
+pictures. `RenderCtx::note_unloaded_image` is the hook, and `autoload::MAX_ATTEMPTS` is what
+keeps an LRU eviction inside the band from becoming a request loop.
+
+An image resolving re-sizes one block. Keep it out of `measure::Layout`, whose every field
+throws away the whole table, and use `Heights::forget` with `ReaderApp::image_blocks`.
 
 Keep `referer(false)` on the client. Document requests carry no Referer. Image requests alone
 may set an origin-only Referer built from `Url::origin()`, never a path. The setting remains

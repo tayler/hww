@@ -100,6 +100,18 @@ pub struct RenderCtx<'a> {
     pub band: Option<crate::reader::measure::Band>,
     /// Which top-level block is being drawn, the first half of a comment-height key.
     pub block: usize,
+    /// Where `ImagePolicy::Auto` may fetch, or `None` under every other policy.
+    ///
+    /// Deliberately not [`RenderCtx::band`], which is `None` whenever a block is laid out
+    /// whole and is therefore no answer to "is this near the window".
+    pub autoload_band: Option<crate::reader::measure::Band>,
+    /// The `src`s of unloaded pictures drawn inside [`RenderCtx::autoload_band`] this frame.
+    ///
+    /// Gathered where each picture draws rather than from the block that contains it. A feed is
+    /// one `ir::Block::Entries` and a discussion is one `ir::Block::Thread`, so "which top-level
+    /// blocks touch the band" answers *the whole page* for exactly the two shapes that carry
+    /// the most pictures — which is the bound `reader::autoload` exists to keep.
+    pub autoload_srcs: Vec<String>,
     /// The comment heights for the frame, lent by `measure::Heights`.
     pub comment_heights: HashMap<(usize, usize), f32>,
 }
@@ -136,7 +148,28 @@ impl RenderCtx<'_> {
             focus_other: false,
             band: None,
             block: 0,
+            autoload_band: None,
+            autoload_srcs: Vec::new(),
             comment_heights: HashMap::new(),
+        }
+    }
+
+    /// Record an unloaded picture about to be drawn at `y`, if the automatic policy is on and
+    /// `y` is inside its band.
+    ///
+    /// The top edge alone, because a placeholder's height is not known until it is drawn and
+    /// every placeholder is a few lines tall. The band already reaches a full window past the
+    /// viewport in both directions, which is far more than that error.
+    ///
+    /// Called by the three places an unloaded picture draws — `images::placeholder`,
+    /// `images::inline_placeholder`, and `images::load_control` for a feed card — and by
+    /// nothing else. A picture already loaded is not recorded: `autoload::plan` would drop it,
+    /// and a page of loaded pictures should not walk a list of them every frame.
+    pub fn note_unloaded_image(&mut self, y: f32, src: &str) {
+        if let Some(band) = self.autoload_band
+            && !band.skips(y, 0.0)
+        {
+            self.autoload_srcs.push(src.to_owned());
         }
     }
 

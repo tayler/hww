@@ -88,6 +88,20 @@ pub const PENDING: &str = "[loading]";
 /// lives out here with the rest of the wording so the fast job tests it.
 pub const IMAGES_ARE_OFF: &str = "hww is set not to load images; change Images in Settings.";
 
+/// What the reader says the first time the automatic image policy contacts a host on a page.
+///
+/// The one remark `ImagePolicy::Auto` owes. Under every other policy a control names the host
+/// and the reader clicks it, so the naming is on screen already; here nobody clicked, and a
+/// setting chosen once on some earlier day is not a disclosure of who is being contacted now.
+/// It is per host and per page rather than per picture — forty pictures from one CDN is one
+/// answer to "who" — and it is said as the jobs are queued, before any bytes have arrived.
+///
+/// Out here with the rest of the wording, so the fast job tests it.
+pub fn auto_images_from(hosts: &[String]) -> String {
+    debug_assert!(!hosts.is_empty(), "a disclosure that names nobody");
+    format!("loading images from {}", hosts.join(", "))
+}
+
 /// How long a transient status stays up: "Copied URL", "loading 2 images from …", "no link
 /// focused". The Material range is four to ten seconds; six, because the one message in the set
 /// that matters is the disclosure of which hosts `I` is about to contact, and a reader looking
@@ -520,6 +534,20 @@ pub fn host_and_path(url: &Url) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The automatic policy's one disclosure names every host it is about to contact, and
+    /// reads as a sentence whether that is one host or several.
+    #[test]
+    fn the_automatic_disclosure_names_its_hosts() {
+        assert_eq!(
+            super::auto_images_from(&["cdn.example.net".to_owned()]),
+            "loading images from cdn.example.net"
+        );
+        assert_eq!(
+            super::auto_images_from(&["a.example.net".to_owned(), "b.example.org".to_owned()]),
+            "loading images from a.example.net, b.example.org"
+        );
+    }
+
     use super::*;
     use crate::fetch::FetchError;
 

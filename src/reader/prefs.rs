@@ -264,8 +264,8 @@ const TYPEFACES: &[Choice] = &[
     choice_note("Serif", "IBM Plex Serif."),
     choice_note(
         "Mono",
-        "IBM Plex Mono. No italic monospace is shipped, so emphasis in this one is slanted by \
-         the renderer rather than drawn.",
+        "IBM Plex Mono. Equal-width characters can make code easier to scan, but ordinary prose \
+         may look more mechanical.",
     ),
 ];
 
@@ -280,33 +280,49 @@ const THEMES: &[Choice] = &[
     choice("Light"),
     choice_note(
         "Sepia",
-        "Warm paper, at a deliberately gentler contrast than Light rather than a tint of it.",
+        "Uses warm, softer colours that may be more comfortable for long reading, with less \
+         contrast than Light.",
     ),
     choice("Dark"),
     choice_note(
         "High contrast (light)",
-        "Holds every colour to a 7:1 contrast ratio instead of 4.5:1.",
+        "Makes text and controls stand out more clearly on a light background, though the \
+         stronger contrast may feel harsher.",
     ),
-    choice_note("High contrast (dark)", "The same, dark."),
+    choice_note(
+        "High contrast (dark)",
+        "Makes text and controls stand out more clearly on a dark background, though the \
+         stronger contrast may feel harsher.",
+    ),
 ];
 
-/// The three image policies, described by what each one *keeps*. A reader that silently drops a
+/// The four image policies, described by what each one *keeps*. A reader that silently drops a
 /// picture is lying about the page, so every option here still marks where one was; what
-/// changes is whether it offers to fetch it, and whether anything is fetched at all.
+/// changes is whether it fetches on its own, whether it offers to fetch at all, and whether
+/// anything leaves the machine.
+///
+/// Listed most permissive first, and the second is the default: the option that fetches
+/// without being asked is the one a reader has to reach for, not the one they land on.
 const IMAGES: &[Choice] = &[
     choice_note(
+        "Load automatically",
+        "Shows article pictures without interrupting you for approval, but uses more data and \
+         shares more information.",
+    ),
+    choice_note(
         "Ask first",
-        "Shows a strip naming the site each picture would come from. Nothing is fetched until \
-         you click it, or press i for the focused one or I for all of them.",
+        "Lets you choose which pictures load, reducing data use and the information shared, but \
+         requires your approval before pictures appear.",
     ),
     choice_note(
         "Article images off",
-        "Marks where each picture was but offers no way to load it. The small site icon beside \
-         the page title is still fetched.",
+        "Saves data and shares less information, but article pictures cannot be viewed. The \
+         small site icon still loads.",
     ),
     choice_note(
         "No image requests",
-        "Nothing is fetched at all, the site icon included.",
+        "Uses no data for pictures and shares no information through picture requests, but \
+         neither article pictures nor the small site icon appear.",
     ),
 ];
 
@@ -392,9 +408,8 @@ pub fn fields() -> Vec<Field> {
             group: G::Text,
             label: "Typeface",
             note: Some(
-                "Over a sans page the title and the headings are set in the serif, which is \
-                 the oldest pairing in typography. A serif or mono page keeps one typeface \
-                 throughout.",
+                "Changes the look of page text. Sans uses contrasting serif headings, while \
+                 Serif and Mono keep the same typeface throughout.",
             ),
             keys: "",
             control: Choice(TYPEFACES),
@@ -411,7 +426,10 @@ pub fn fields() -> Vec<Field> {
             id: F::Images,
             group: G::Page,
             label: "Images",
-            note: None,
+            note: Some(
+                "Loading pictures gives the (potentially 3rd-party) services that deliver the \
+                 pictures some information about your visit.",
+            ),
             keys: "i I",
             control: Choice(IMAGES),
         },
@@ -420,8 +438,8 @@ pub fn fields() -> Vec<Field> {
             group: G::Page,
             label: "Show link addresses",
             note: Some(
-                "Prints each link's address after the link text, smaller and dimmer, like \
-                 the quiet web <https://example.com/>.",
+                "Helps you check where links lead before opening them, but adds extra text to \
+                 the page.",
             ),
             keys: "",
             control: Toggle,
@@ -505,12 +523,10 @@ pub fn fields() -> Vec<Field> {
             group: G::Privacy,
             label: "Send the site name when loading images",
             note: Some(
-                "Article pictures usually sit on a different server from the article. When hww \
-                 asks for one, this tells that server which site the picture was on: the domain \
-                 only, never the address of the page you are reading. Many servers refuse, or \
-                 substitute a different picture without saying so, and a substituted \
-                 picture cannot be told from the real one. Requests for pages themselves never \
-                 send it.",
+                "Leave this on to help article pictures load correctly. Turn it off to share less \
+                 information with the (potentially 3rd-party) services that deliver the pictures, \
+                 though some pictures may be missing or incorrect. This setting affects picture \
+                 requests only.",
             ),
             keys: "",
             control: Toggle,
@@ -539,9 +555,10 @@ pub fn get(s: &Settings, id: FieldId) -> Value {
             Theme::ContrastDark => 5,
         }),
         FieldId::Images => Value::Index(match s.read.images {
-            ImagePolicy::Placeholder => 0,
-            ImagePolicy::Never => 1,
-            ImagePolicy::NoRequests => 2,
+            ImagePolicy::Auto => 0,
+            ImagePolicy::Placeholder => 1,
+            ImagePolicy::Never => 2,
+            ImagePolicy::NoRequests => 3,
         }),
         FieldId::ShowLinkAddresses => Value::Bool(s.read.show_link_urls),
         FieldId::Zoom => Value::Num(s.zoom_factor),
@@ -612,9 +629,10 @@ pub fn set(s: &mut Settings, id: FieldId, v: Value) {
         }
         FieldId::Images => {
             s.read.images = match v.index() {
-                Some(0) => ImagePolicy::Placeholder,
-                Some(1) => ImagePolicy::Never,
-                Some(2) => ImagePolicy::NoRequests,
+                Some(0) => ImagePolicy::Auto,
+                Some(1) => ImagePolicy::Placeholder,
+                Some(2) => ImagePolicy::Never,
+                Some(3) => ImagePolicy::NoRequests,
                 _ => s.read.images,
             }
         }
@@ -900,6 +918,40 @@ mod tests {
         s.send_image_referer = false;
         reset_all(&mut s);
         assert_eq!(s, Settings::default());
+    }
+
+    /// Every policy has an index of its own, in both directions.
+    ///
+    /// `set` falls through to "leave it as it was" on an index it does not recognise and `get`
+    /// is exhaustive, so a variant added to the policy without an arm here compiles, and then
+    /// the panel silently refuses to select it. `every_field_round_trips_and_touches_nothing_else`
+    /// only ever tries one alternate index per field, so it cannot see that.
+    #[test]
+    fn every_image_policy_has_its_own_index() {
+        let mut seen: Vec<usize> = Vec::new();
+        for p in ImagePolicy::ALL {
+            let mut s = Settings::default();
+            s.read.images = p;
+            let Value::Index(i) = get(&s, FieldId::Images) else {
+                panic!("{p:?}: Images did not read back as a choice");
+            };
+            assert!(!seen.contains(&i), "{p:?} shares index {i}");
+            seen.push(i);
+            // Start somewhere else, or the fall-through arm passes by doing nothing.
+            let mut back = Settings::default();
+            back.read.images = if p == ImagePolicy::Auto {
+                ImagePolicy::NoRequests
+            } else {
+                ImagePolicy::Auto
+            };
+            set(&mut back, FieldId::Images, Value::Index(i));
+            assert_eq!(back.read.images, p, "index {i} does not select {p:?}");
+        }
+        assert_eq!(
+            seen.len(),
+            IMAGES.len(),
+            "an option the panel draws that no policy owns, or the reverse"
+        );
     }
 
     /// Rows come out grouped and in reading order, so `prefs_ui` draws a heading on every change

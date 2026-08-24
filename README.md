@@ -76,8 +76,8 @@ provenance on stderr.
 
 Both binaries take `--no-rewrite` and `--no-profile` to switch off a per-site table, and
 `--show-rewrites` / `--show-profiles` to print one and exit. The reader lives behind the `gui` feature because it adds one network
-capability the CLI does not have, loading an image subresource (article pictures on click, and
-the page favicon); in the `hww` binary
+capability the CLI does not have, loading an image subresource (article pictures, on click or
+under the opt-in automatic policy, and the page favicon); in the `hww` binary
 that code is not compiled at all.
 
 For everyday use, build once and run the binary:
@@ -173,15 +173,22 @@ One centred reading column, measured in characters (`[` and `]`). Zoom is egui's
 light, sepia, dark, and follow-the-system (`d`), plus a high-contrast pair that the `d` cycle
 leaves out and the settings panel reaches.
 
-**Images are placeholders that name their host** (`[image] load from cdn.example.net`), and
-load only on an explicit click. They are never loaded automatically, on hover, or in advance —
-except the page favicon beside the masthead eyebrow, which is fetched as soon as the document
-names one. Three policies, and the favicon is what separates the last two: *Ask first* offers
-to load each picture, *Article images off* marks where each one was and offers nothing, and
-*No image requests* fetches nothing at all, the site icon included. Each load is counted
-alongside cookie attempts in the page-info panel, and nothing is written to disk. Image
-requests, and only image requests, carry an origin-only `Referer`; documents carry none.
-`fetch::Referer::PageOrigin` documents why that one header is worth its exception.
+**Images are placeholders that name their host** (`[image] load from cdn.example.net`), and by
+default load only on an explicit click. They are never loaded on hover or in advance — except
+the page favicon beside the masthead eyebrow, which is fetched as soon as the document names
+one. Four policies. *Ask first* is the default and offers to load each picture; *Load
+automatically* fetches the pictures near what you are reading and roughly a screenful ahead,
+naming each new host as it goes and leaving the rest of the page until you scroll towards it;
+*Article images off* marks where each one was and offers nothing; *No image requests* fetches
+nothing at all, the site icon included, which is what separates it from the one above. Each
+load is counted alongside cookie attempts in the page-info panel, and nothing is written to
+disk. Image requests, and only image requests, carry an origin-only `Referer`; documents carry
+none. `fetch::Referer::PageOrigin` documents why that one header is worth its exception.
+
+The automatic policy is bounded by the layout band rather than by the document, and by a
+ceiling on outstanding requests (`reader::autoload::MAX_OUTSTANDING`), because the worker pool
+is shared with navigation: a page that queued two hundred pictures would leave the next click
+waiting behind them.
 
 ## Settings
 

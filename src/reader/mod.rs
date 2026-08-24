@@ -16,6 +16,9 @@
 //! The module is named `reader` rather than `gui` because the pure half is exactly what a
 //! future TUI reuses.
 
+/// Which pictures `ImagePolicy::Auto` asks for. No egui types, so the fast CI job tests it,
+/// which is the point: the mistakes are set arithmetic and none of them show in a screenshot.
+pub mod autoload;
 /// Which face an inline style is set in. No egui types, so the fast CI job tests it.
 pub mod face;
 pub mod history;

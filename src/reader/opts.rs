@@ -115,6 +115,17 @@ where
 pub enum ImagePolicy {
     /// Show a one-line strip naming the host. Loads only on an explicit click or `i`.
     Placeholder,
+    /// Load the pictures near the reading position without being asked, a screenful ahead.
+    ///
+    /// The one policy that contacts an image host with no click behind it, which is why it is
+    /// opt-in and why [`ImagePolicy::Placeholder`] remains the default. It is bounded by the
+    /// layout band rather than by the document: a gallery of two hundred pictures requests the
+    /// handful near the window and the rest only as they are scrolled towards, so the request
+    /// queue never grows past what is about to be looked at. Everything downstream is
+    /// unchanged — the same choke point, the same host disclosure, the same counters in the
+    /// page-info panel — so what this setting moves is who presses the button, not what the
+    /// reader admits to fetching.
+    Auto,
     /// Never offer to load an article image. The strip still says an image was there;
     /// silently dropping content is how a reader lies about a page.
     ///
@@ -133,8 +144,10 @@ pub enum ImagePolicy {
 }
 
 impl ImagePolicy {
-    /// Every policy, for the tests that must not be allowed to miss one.
-    pub const ALL: [ImagePolicy; 3] = [
+    /// Every policy, most permissive first, which is also the order the panel lists them in.
+    /// For the tests that must not be allowed to miss one.
+    pub const ALL: [ImagePolicy; 4] = [
+        ImagePolicy::Auto,
         ImagePolicy::Placeholder,
         ImagePolicy::Never,
         ImagePolicy::NoRequests,
@@ -146,8 +159,21 @@ impl ImagePolicy {
     /// equality check against one variant compiles unchanged when a third arrives and silently
     /// treats it as [`ImagePolicy::Placeholder`], which is the most permissive answer. A
     /// `matches!` here puts the decision in one tested file instead of four untested ones.
+    ///
+    /// [`ImagePolicy::Auto`] answers yes: a picture it has not reached yet, or one whose fetch
+    /// failed, is still clickable, and `i` and `I` still work over the whole page.
     pub fn offers_loading(self) -> bool {
-        matches!(self, ImagePolicy::Placeholder)
+        matches!(self, ImagePolicy::Placeholder | ImagePolicy::Auto)
+    }
+
+    /// Whether hww may fetch an article image with no click behind it.
+    ///
+    /// A separate question from [`Self::offers_loading`] rather than a comparison against
+    /// `Auto` at the call site, for the reason the paragraph above gives: a later policy that
+    /// offers loading without automating it must not inherit this answer by being unequal to
+    /// something.
+    pub fn loads_automatically(self) -> bool {
+        matches!(self, ImagePolicy::Auto)
     }
 
     /// Whether hww may request any image at all, the page favicon included.
@@ -382,32 +408,52 @@ mod tests {
         }
     }
 
-    /// Both questions answered for every policy, so a fourth option cannot inherit an answer.
+    /// All three questions answered for every policy, so a fifth option cannot inherit an
+    /// answer.
     ///
     /// The table is written out rather than derived: deriving it from the same `matches!` the
     /// implementation uses would assert only that the function equals itself. What is pinned is
-    /// the *intent* — which policy loads article images, and which one lets any request out at
-    /// all — and `ALL` is what makes a forgotten variant a failure here.
+    /// the *intent* — which policy loads article images, which one does so unasked, and which
+    /// one lets any request out at all — and `ALL` is what makes a forgotten variant a failure
+    /// here.
     #[test]
-    fn every_policy_answers_both_questions() {
+    fn every_policy_answers_all_three_questions() {
         let expected = [
-            (ImagePolicy::Placeholder, true, true),
-            (ImagePolicy::Never, false, true),
-            (ImagePolicy::NoRequests, false, false),
+            (ImagePolicy::Auto, true, true, true),
+            (ImagePolicy::Placeholder, true, false, true),
+            (ImagePolicy::Never, false, false, true),
+            (ImagePolicy::NoRequests, false, false, false),
         ];
         assert_eq!(expected.len(), ImagePolicy::ALL.len());
-        for (policy, offers, requests) in expected {
+        for (policy, offers, automatic, requests) in expected {
             assert!(
                 ImagePolicy::ALL.contains(&policy),
                 "{policy:?} is not in ALL"
             );
             assert_eq!(policy.offers_loading(), offers, "{policy:?} offers_loading");
             assert_eq!(
+                policy.loads_automatically(),
+                automatic,
+                "{policy:?} loads_automatically"
+            );
+            assert_eq!(
                 policy.allows_any_request(),
                 requests,
                 "{policy:?} allows_any_request"
             );
         }
+    }
+
+    /// The one policy that fetches unasked is the one policy that says so. Everything else
+    /// waits for a click, the default included.
+    #[test]
+    fn only_auto_loads_without_being_asked() {
+        let automatic: Vec<_> = ImagePolicy::ALL
+            .into_iter()
+            .filter(|p| p.loads_automatically())
+            .collect();
+        assert_eq!(automatic, vec![ImagePolicy::Auto]);
+        assert!(!ReadOpts::default().images.loads_automatically());
     }
 
     /// The favicon is the whole reason `NoRequests` exists: it is the one image request that
@@ -419,13 +465,18 @@ mod tests {
         // And neither offers to load an article image, which is what they do share.
         assert!(!ImagePolicy::Never.offers_loading());
         assert!(!ImagePolicy::NoRequests.offers_loading());
+        // `Auto` is on the far side of both: it fetches the favicon and the article images.
+        assert!(ImagePolicy::Auto.allows_any_request());
+        assert!(ImagePolicy::Auto.offers_loading());
     }
 
     /// An `images` value this binary has never heard of costs the policy, not the file.
     ///
     /// The mirror of `an_unknown_theme_does_not_take_the_rest_of_the_settings_with_it`, and it
     /// became load-bearing the moment `ImagePolicy` grew a third variant: an older binary will
-    /// meet `"NoRequests"` in a file written by this one.
+    /// meet `"NoRequests"`, and now `"Auto"`, in a file written by this one — and the fallback
+    /// direction is the safe one, since a binary that cannot parse `"Auto"` cannot honour it
+    /// either and drops to asking first.
     #[test]
     fn an_unknown_image_policy_does_not_take_the_rest_of_the_settings_with_it() {
         let o: ReadOpts =
