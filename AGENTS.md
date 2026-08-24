@@ -290,7 +290,7 @@ the whole page; the title is the display role's bold; levels past three follow t
 eyebrow (site name, or host), the title, a byline row, and a `rule`; headings carry more air
 above than below (`heading_space_above`), inside the block so `measure::Heights` sees it. A
 wrapped title takes `line_height_for` of its own size, not the body's pixels
-(`a_wrapped_title_takes_its_own_leading`): 1.2 of the heading, not the body's 1.55, and the
+(`a_wrapped_title_takes_its_own_leading`): 1.2 of the heading, not the body's 1.35, and the
 body row is the floor so a caption keeps the page's rhythm. A quotation is a large serif opening mark hung in the indent, in `guide`, with
 the text upright;
 a link in prose is the link colour over a one-physical-pixel underline in `link_underline`

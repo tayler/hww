@@ -345,9 +345,9 @@ pub fn line_height_px(opts: &ReadOpts) -> f32 {
     snap(opts.base_size_pt * opts.line_height)
 }
 
-/// Display leading, as a multiple of the face's own size. Prose is 1.55; a title at that
-/// ratio of 1.9× the body is double-spaced. Display type is set tighter than prose, not to
-/// the same pixels and not to the same multiple.
+/// Display leading, as a multiple of the face's own size. Prose is 1.35; a title at that
+/// ratio of 1.9× the body is loose in the way a wrapped headline is not. Display type is set
+/// tighter than prose, not to the same pixels and not to the same multiple.
 const HEADING_LINE_HEIGHT: f32 = 1.2;
 
 /// Line height in points for text set at `size`.
@@ -355,7 +355,7 @@ const HEADING_LINE_HEIGHT: f32 = 1.2;
 /// Every section of one galley still shares one number, which is what keeps the several labels
 /// of a paragraph on one baseline. The body ratio is a floor, so a caption keeps the page's
 /// rhythm; a heading takes 1.2 of *its* size so a wrapped title has air without taking the
-/// body's 1.55.
+/// body's 1.35.
 pub fn line_height_for(opts: &ReadOpts, size: f32) -> f32 {
     line_height_px(opts).max(snap(size * HEADING_LINE_HEIGHT))
 }
