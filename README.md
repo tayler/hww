@@ -17,8 +17,8 @@ A quiet reading experience.
 Working end to end for HTML, as a keyboard-driven reading GUI with a headless `--why` for triage:
 
 ```
-cargo run --features gui --bin hww-gui -- [--no-rewrite] <url> # the reader
-cargo run --features gui --bin hww-gui -- --why <url>          # the extractor's account, no window
+cargo run --features gui -- [--no-rewrite] <url> # the reader
+cargo run --features gui -- --why <url>          # the extractor's account, no window
 ```
 
 | Piece | State |
@@ -36,6 +36,32 @@ cargo run --features gui --bin hww-gui -- --why <url>          # the extractor's
 | feeds, gemini, gopher, markdown | not started |
 | archive | not started |
 
+## Installing on Ubuntu
+
+Each successful push to `main` attaches a 64-bit Ubuntu package to its
+[CI workflow run](https://github.com/tayler/hww/actions/workflows/ci.yml). Download the
+`hww-linux-amd64` artifact from the latest successful run, then:
+
+```
+unzip hww-linux-amd64.zip
+sudo apt install ./hww_*_amd64.deb
+```
+
+The package installs the application, its desktop entry, and its icons. Open `hww` from the
+Ubuntu application menu or run `hww` at a shell. Installing a newer package with the same
+command upgrades the existing installation.
+
+Remove the package and its one saved settings file completely with:
+
+```
+sudo apt purge hww
+rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/hww"
+```
+
+If `HWW_CONFIG_DIR` was set when hww ran, remove that directory instead of the default config
+directory. The downloaded ZIP and `.deb` are ordinary files and can be deleted separately.
+hww writes no page content or reading history to disk.
+
 ## Running
 
 A stable Rust toolchain new enough for edition 2024 (1.85 or later) is the only prerequisite.
@@ -43,8 +69,8 @@ Every native library in the graph is opened at runtime rather than linked at bui
 there is no system package to install first.
 
 ```
-cargo run --features gui --bin hww-gui                          # the reader, URL bar focused
-cargo run --features gui --bin hww-gui -- example.com/article   # straight to a page
+cargo run --features gui                          # the reader, URL bar focused
+cargo run --features gui -- example.com/article   # straight to a page
 ```
 
 ### Diagnosing a site
@@ -52,7 +78,7 @@ cargo run --features gui --bin hww-gui -- example.com/article   # straight to a 
 Two tools say why a page came out the way it did, one for extraction and one for rendering:
 
 ```
-cargo run --features gui --bin hww-gui -- --why https://example.com/article   # the extractor's account
+cargo run --features gui -- --why https://example.com/article                 # the extractor's account
 cargo run --features gui --bin hww-shot -- --url https://example.com/article --out /tmp/look
 ```
 
@@ -74,17 +100,16 @@ The reader's URL argument is optional; without one it opens empty with the URL b
 opens no window; every terminal print runs through `render::sanitize_for_terminal`, because
 untrusted page text on a terminal is a stream of commands, not glyphs.
 
-Both binaries take `--no-rewrite` and `--no-profile` to switch off a per-site table, and
-`--show-rewrites` / `--show-profiles` to print one and exit. The reader lives behind the `gui` feature because it adds one network
-capability the CLI does not have, loading an image subresource (article pictures, on click or
-under the opt-in automatic policy, and the page favicon); in the `hww` binary
-that code is not compiled at all.
+`hww` takes `--no-rewrite` and `--no-profile` to switch off a per-site table, and
+`--show-rewrites` / `--show-profiles` to print one and exit. The application lives behind the
+`gui` feature so core tests and local tools compile without the GUI dependency graph or its
+image subresource path.
 
 For everyday use, build once and run the binary:
 
 ```
 cargo build --release --features gui
-./target/release/hww-gui example.com/article
+./target/release/hww example.com/article
 ```
 
 ## Measured
@@ -102,7 +127,7 @@ Against 150 real URLs sampled from browsing history ([full findings](docs/phase0
 
 Some sites serve a fully server-rendered alternate of themselves. Phase 0 measured one such
 site among its JS-only losses, which is why per-site rules are a feature rather than a hack.
-`cargo run --features gui --bin hww-gui -- --show-rewrites` prints the table; `--no-rewrite` turns it off.
+`cargo run --features gui -- --show-rewrites` prints the table; `--no-rewrite` turns it off.
 
 The table is compiled in and deliberately tiny. A rule ships only if it is the **same
 operator** as the host it replaces, **cites** a measured failure in the findings doc, stays
@@ -140,14 +165,14 @@ one function that owns the pipeline and reports the rewrite before it dispatches
     src/cards.rs   story-card detection; the walker emits `Entries` in place
     src/render.rs  IR -> text
     src/reader/    IR -> reading model (pure, tested) + reader/ui (egui, feature-gated)
-    src/bin/hww-gui thin main: argv -> reader::ui::run
+    src/bin/hww     thin main: argv -> reader::ui::run
     src/bin/corpus build a test corpus from local browser history. Checks how many of the sites you browse will work on hww.
     src/bin/bench  calibration harness vs a reference extractor (needs a local cache)
     src/bin/dbg    the `--why` account over one cached corpus page
 
 ## The reader
 
-    cargo run --features gui --bin hww-gui -- <url>
+    cargo run --features gui -- <url>
 
 Keyboard first, but nothing is keyboard-only: `?` lists the keys, a menu bar across the top
 carries every command with the key that already does it, and the status strip along the bottom

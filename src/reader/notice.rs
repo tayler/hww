@@ -46,9 +46,9 @@
 //! # Why this is not under `ui/`
 //!
 //! Two reasons. It is decidable without a `Context`, so the fast CI job that never compiles
-//! egui tests it. And `main.rs` prints a bare `LoadError` today while the GUI has considered
-//! wording for the same eight cases; [`failure`] is compiled for the CLI too, whenever that is
-//! wired up.
+//! egui tests it. And headless `--why` prints a bare `LoadError` today while the GUI has
+//! considered wording for the same eight cases; [`failure`] stays in the testable layer if
+//! another non-window caller needs it.
 
 use crate::fetch::Truncation;
 use crate::session::{LoadError, Provenance};

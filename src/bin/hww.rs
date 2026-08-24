@@ -1,8 +1,7 @@
-//! The reading GUI. A thin main: argv in, `reader::ui::run` out.
+//! The hww application. A thin main: argv in, `reader::ui::run` out.
 //!
-//! Everything this binary can do that `hww` cannot is behind the `gui` feature, so the CLI
-//! keeps compile-time absence of the image subresource path (article pictures on click, and
-//! the page favicon).
+//! The binary requires the `gui` feature; keeping that feature off by default leaves the core
+//! library, tests, and local tools free of the image subresource path and GUI dependency graph.
 
 use hww::reader::{settings, ui};
 
@@ -17,7 +16,7 @@ fn main() -> eframe::Result {
             "--no-rewrite" if !end_of_flags => opts.rewrite = false,
             "--no-profile" if !end_of_flags => opts.profile = false,
             // The extractor's account of a page in place of the page: the triage tool that
-            // used to be `hww --why`. Prints and exits without opening a window.
+            // used to be the plain-text client's `--why`. Prints and exits without a window.
             "--why" if !end_of_flags => why = true,
             "--show-rewrites" if !end_of_flags => {
                 print!("{}", hww::sites::describe_rewrites());

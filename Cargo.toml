@@ -3,11 +3,12 @@ name = "hww"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+default-run = "hww"
 
 [features]
 default = []
-# The reading GUI. Off by default so the `hww` CLI keeps compile-time absence of the image
-# subresource path (article pictures on click, and the page favicon).
+# The application GUI. Off by default so core tests and local tools keep compile-time absence
+# of the image subresource path and the GUI dependency graph.
 gui = ["dep:eframe", "dep:image", "dep:winit"]
 # Local-only corpus tooling. Behind a feature because `rusqlite = { bundled }` compiles a C
 # SQLite that exists solely for `bin/corpus`.
@@ -39,12 +40,11 @@ rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
 
 # An explicit [[bin]] whose `path` matches an auto-discovered file takes precedence and merges
 # cleanly, so these get their `required-features` while `bench` and `dbg` keep being found on
-# their own. There is no `default-run`: the plain-text `hww` CLI was removed (it printed
-# untrusted page text straight to a terminal, an escape-injection surface), so `cargo run`
-# needs an explicit `--bin`. Live `--why` triage now lives on `hww-gui`.
+# their own. The plain-text client was removed because it printed untrusted page text straight
+# to a terminal, an escape-injection surface; headless `--why` triage stays on the application.
 [[bin]]
-name = "hww-gui"
-path = "src/bin/hww-gui.rs"
+name = "hww"
+path = "src/bin/hww.rs"
 required-features = ["gui"]
 
 [[bin]]

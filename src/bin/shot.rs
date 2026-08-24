@@ -207,7 +207,7 @@ what makes a second renderer cheap.</p>
 <blockquote><p>A reader that shows a hostile picture and calls it the article's photograph has
 failed worse than one that shows no picture at all.</p></blockquote>
 <p>Code keeps its spacing, because <code>whitespace</code> is the content:</p>
-<pre><code>cargo run --features gui --bin hww-gui -- example.com
+<pre><code>cargo run --features gui --bin hww -- example.com
 cargo run --features gui --bin hww-shot -- --all</code></pre>
 <h2>Measurements</h2>
 <table><tr><th>Path</th><th>Pages</th><th>Recovered</th></tr>

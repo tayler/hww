@@ -259,7 +259,7 @@ impl RenderCtx<'_> {
 
 pub use app::{ReaderApp, run};
 
-/// Launch arguments, kept out of `app` so `bin/hww-gui.rs` stays a thin main.
+/// Launch arguments, kept out of `app` so `bin/hww.rs` stays a thin main.
 pub struct Launch {
     pub start: Option<Url>,
     pub settings: Settings,

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=hww
+GenericName=Web Reader
+Comment=Read the non-app web without JavaScript
+Exec=hww %u
+Icon=hww
+Terminal=false
+Categories=Network;WebBrowser;
+StartupNotify=true
+StartupWMClass=hww

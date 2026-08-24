@@ -66,7 +66,7 @@ impl std::fmt::Display for Rewrite {
 }
 
 /// Everything the fetch disclosed, in one value. The reader shows it in the status strip and
-/// the CLI prints it on stderr; both read the same fields, so neither can drift into a
+/// headless `--why` prints it on stderr; both read the same fields, so neither can drift into a
 /// prettier version of the truth than the other.
 #[derive(Debug, Clone)]
 pub struct Provenance {
@@ -85,8 +85,8 @@ pub struct Provenance {
     pub cookie_attempts: usize,
     pub truncation: Truncation,
     /// What the site profile did to the page, if one applied. `None` under `--no-profile` or
-    /// for a host with no profile. Not in `Display`: the CLI prints it on its own line, so the
-    /// provenance line stays what it was.
+    /// for a host with no profile. Not in `Display`: headless `--why` prints it on its own line,
+    /// so the provenance line stays what it was.
     pub profile: Option<crate::profile::ProfileReport>,
 }
 
@@ -468,7 +468,7 @@ mod tests {
         );
     }
 
-    /// The branch the CLI had and no test ever reached.
+    /// The branch headless `--why` had and no test ever reached.
     #[test]
     fn dead_rule_names_both_hosts() {
         let mut p = prov("https://example.com/a");

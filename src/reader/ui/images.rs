@@ -12,7 +12,8 @@
 //! requests. Loading one is allowed on exactly the reasoning `rewrite` uses: the placeholder
 //! **names the host before the click**, the click is a
 //! deliberate user action, the load is counted in the provenance strip, and the capability
-//! lives behind the `gui` feature, so the `hww` CLI retains compile-time absence of it.
+//! lives behind the `gui` feature, so core tests and local tools retain compile-time absence
+//! of it.
 //!
 //! Article images are never prefetched and never loaded on hover. They are auto-loaded under
 //! exactly one policy, `ImagePolicy::Auto`, which a reader has to choose: the default still

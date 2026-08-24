@@ -6,9 +6,9 @@
 //! strip at the bottom does not, and cannot, because charter point 4 requires that a rewrite is
 //! reported *before* the request goes out, unconditionally, so a hang cannot swallow the
 //! notice. A permanently visible one-line strip is what makes "chrome hidden until summoned"
-//! and that requirement compatible, and the GUI actually realizes the invariant better than
-//! the CLI does: the notice travels the channel before the blocking fetch starts, so it is on
-//! screen for the whole of a 15 s hang instead of being interleaved with page text in a
+//! and that requirement compatible, and the GUI realizes the invariant better than the old
+//! plain-text client did: the notice travels the channel before the blocking fetch starts, so
+//! it is on screen for the whole of a 15 s hang instead of being interleaved with page text in a
 //! terminal after the fact.
 //!
 //! The strip earns a second job from being there anyway. It is the one piece of chrome a
@@ -64,14 +64,19 @@ use url::Url;
 
 const URL_BAR_ID: &str = "hww-url-bar";
 const FIND_ID: &str = "hww-find";
+const APP_ID: &str = "hww";
 
 pub fn run(launch: Launch) -> eframe::Result {
+    let icon =
+        eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/logo/hww-256.png"))
+            .expect("embedded hww icon is valid PNG");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("hww")
             .with_inner_size([900.0, 800.0])
             .with_min_inner_size([420.0, 320.0])
-            .with_app_id("hww"),
+            .with_app_id(APP_ID)
+            .with_icon(icon),
         ..Default::default()
     };
     eframe::run_native(
@@ -2634,6 +2639,31 @@ enum StripAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This test belongs under `ui/` because [`APP_ID`] is handed directly to eframe. It needs
+    /// no `egui::Context`, and its failure is otherwise invisible to Rust: Ubuntu matches a
+    /// running Wayland window to its dock icon through these strings in the installed desktop
+    /// entry. A typo compiles, installs, and leaves the application with a generic icon.
+    #[test]
+    fn desktop_entry_matches_the_application_id() {
+        let desktop = include_str!("../../../packaging/hww.desktop");
+        assert_eq!(desktop.lines().next(), Some("[Desktop Entry]"));
+
+        let field = |key: &str| {
+            let prefix = format!("{key}=");
+            let values: Vec<_> = desktop
+                .lines()
+                .filter_map(|line| line.strip_prefix(&prefix))
+                .collect();
+            assert_eq!(values.len(), 1, "{key} must occur exactly once");
+            values[0]
+        };
+
+        assert_eq!(field("Type"), "Application");
+        assert_eq!(field("Icon"), APP_ID);
+        assert_eq!(field("StartupWMClass"), APP_ID);
+        assert_eq!(field("Exec").split_ascii_whitespace().next(), Some(APP_ID));
+    }
 
     /// This test belongs under `ui/` because the transition it checks lives here, but its
     /// argument stands on its own rather than relying on another test as precedent.
