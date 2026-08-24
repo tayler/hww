@@ -1962,33 +1962,43 @@ impl ReaderApp {
         };
         let mut go = false;
         let mut keep = true;
-        let bar = egui::Panel::top("hww-url")
-            .show_separator_line(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(pal.chrome_bg)
-                    .inner_margin(egui::Margin::symmetric(10, 6)),
-            )
-            .show(ui, |ui| {
-                ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
-                ui.horizontal(|ui| {
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut text)
+        let bar =
+            egui::Panel::top("hww-url")
+                .show_separator_line(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(pal.chrome_bg)
+                        .inner_margin(egui::Margin::symmetric(10, 6)),
+                )
+                .show(ui, |ui| {
+                    ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
+                    ui.horizontal(|ui| {
+                        let out = egui::TextEdit::singleline(&mut text)
                             .id(egui::Id::new(URL_BAR_ID))
                             .desired_width(f32::INFINITY)
                             .margin(egui::Margin::symmetric(8, 3))
-                            .hint_text(notice::URL_BAR_HINT),
-                    );
-                    if self.focus_url_bar {
-                        resp.request_focus();
-                        self.focus_url_bar = false;
-                    }
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        go = true;
-                        keep = false;
-                    }
+                            .hint_text(notice::URL_BAR_HINT)
+                            .show(ui);
+                        let resp = out.response.response;
+                        if self.focus_url_bar {
+                            resp.request_focus();
+                            self.focus_url_bar = false;
+                            // Opening the bar offers the current address for replacement, the way
+                            // every other browser does, so typing overwrites it and an arrow key
+                            // still lands the cursor in it. The selection has to be written into
+                            // stored state; `request_focus` alone leaves the caret where it was.
+                            let mut state = out.state;
+                            state.cursor.set_char_range(Some(
+                                egui::text::CCursorRange::select_all(&out.galley),
+                            ));
+                            state.store(ui.ctx(), resp.id);
+                        }
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                            go = true;
+                            keep = false;
+                        }
+                    });
                 });
-            });
         panel_edge(ui, bar.response.rect, Side::Bottom, pal);
         if go {
             let typed = text.trim().to_owned();
