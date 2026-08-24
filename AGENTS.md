@@ -33,7 +33,7 @@ libraries are opened at runtime rather than linked at build time.
 
 ## Diagnosis and visual checks
 
-Diagnose a site with `cargo run -- --why <url>` before reading extractor source.
+Diagnose a site with `cargo run --features gui --bin hww-gui -- --why <url>` before reading extractor source.
 `html::extract_traced` produces the document and explanation in one pass. For rendering, use
 `cargo run --features gui --bin hww-shot -- --url URL --out DIR` or name only the scenes being
 changed. Write to `./shots` only when deliberately re-baselining.

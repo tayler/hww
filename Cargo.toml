@@ -3,7 +3,6 @@ name = "hww"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-default-run = "hww"
 
 [features]
 default = []
@@ -39,10 +38,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
 
 # An explicit [[bin]] whose `path` matches an auto-discovered file takes precedence and merges
-# cleanly, so these two get their `required-features` while `hww`, `bench`, and `dbg` keep
-# being found on their own. Do NOT add `autobins = false` to "declare them all explicitly":
-# auto-discovery covers src/main.rs too, so switching it off deletes the `hww` target and
-# `default-run = "hww"` then fails to resolve before anything compiles.
+# cleanly, so these get their `required-features` while `bench` and `dbg` keep being found on
+# their own. There is no `default-run`: the plain-text `hww` CLI was removed (it printed
+# untrusted page text straight to a terminal, an escape-injection surface), so `cargo run`
+# needs an explicit `--bin`. Live `--why` triage now lives on `hww-gui`.
 [[bin]]
 name = "hww-gui"
 path = "src/bin/hww-gui.rs"
