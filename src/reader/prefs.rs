@@ -288,7 +288,7 @@ const TYPEFACES: &[Choice] = &[
 const SEARCH_ENGINES: &[Choice] = &[
     choice_note(
         "DuckDuckGo",
-        "Finds the widest range of results. Several searches in quick succession may trigger a \
+        "Finds the widest range of results. Note that several searches in quick succession may trigger a \
          human check that hww cannot answer; if that happens, wait a moment or choose another \
          engine.",
     ),
