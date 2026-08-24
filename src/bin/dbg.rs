@@ -55,11 +55,18 @@ fn main() -> Result<()> {
         let (text, _, _) = enc.decode(&bytes);
         let url = url::Url::parse(&r.url)?;
         let doc = html::extract(&text, &url);
+        // `r.url` and the Explanation carry page-controlled text (a URL, `class`/`id`
+        // attributes) to a terminal; sanitize so an escape sequence in one is not a command.
+        // `to_text` sanitizes itself.
         println!(
             "== {}\n   visible={} (from the corpus signal)",
-            r.url, sig.chars
+            render::sanitize_for_terminal(&r.url),
+            sig.chars
         );
-        print!("{}", html::explain(&text, &url));
+        print!(
+            "{}",
+            render::sanitize_for_terminal(&html::explain(&text, &url).to_string())
+        );
         if a.len() > 4 {
             let t = render::to_text(&doc, &render::TextOpts::default());
             println!("{}", head(&t, 1400));

@@ -16,6 +16,25 @@
 //! because `<a>` and `<span>` are each used both ways. That is what makes a front page
 //! readable: every headline on one is an anchor, either wrapped around the card's blocks or
 //! standing as a run of inline text, and both shapes used to arrive with the href discarded.
+//!
+//! # Extraction order
+//!
+//! The merge in [`extract_traced`] is load-bearing:
+//!
+//! 1. [`crate::cards::detect`] identifies sibling groups of story cards. [`walk_blocks`]
+//!    emits each accepted group as one [`Block::Entries`] run in place; an accepted card group
+//!    is not reconsidered as a thread.
+//! 2. Content-root candidates are scored and the winner is mapped to blocks. When class-name
+//!    chrome hints consume most of a root, [`blocks_guarded`] walks it without those hints.
+//!    Headers and footers inside an article or section remain content.
+//! 3. [`crate::thread::extract_thread`] runs independently. A longer thread replaces the
+//!    article result; a thread over 200 characters is appended to a longer article result.
+//! 4. A result below [`crate::ir::THIN_TEXT`], or below 1,000 characters when `<body>` emits
+//!    five times as much, falls back to `<body>`.
+//!
+//! Reordering these steps changes whether cards become comments, nested discussions disappear,
+//! or thin pages become blank. Diagnose changes through `--why`, which is produced by this same
+//! pass.
 
 use crate::ir::{Block, Document, Image, Inline};
 use scraper::{ElementRef, Html, Node, Selector};
@@ -390,7 +409,10 @@ fn extract_traced(
         blocks: 0,
         text_len: 0,
     };
-    let ranked = root_candidates(&html, &card_map);
+    // Measure every node's text once, after profile stripping has settled the tree. Scoring
+    // then reads a map instead of re-walking overlapping subtrees (see `TextMetrics`).
+    let metrics = build_text_metrics(&html);
+    let ranked = root_candidates(&html, &card_map, &metrics);
     why.winner = choose_root(&ranked);
     why.candidates = ranked.iter().map(|(_, c)| c.clone()).collect();
     if let Some(i) = why.winner {
@@ -679,7 +701,7 @@ fn first_of<const N: usize>(
     (None, "none")
 }
 
-/// One of the three shared text-length counters (see `AGENTS.md`). This used to build a
+/// One of the three shared text-length counters. This used to build a
 /// throwaway `Document` around a cloned block list, once per `content_root` candidate and
 /// again on the `<body>` fallback: up to six copies of a whole document per page.
 fn block_text(blocks: &[Block]) -> usize {
@@ -730,6 +752,7 @@ fn own_text_into(node: NodeRef<'_, Node>, out: &mut String, root: bool) {
 fn root_candidates<'h>(
     html: &'h Html,
     cards: &crate::cards::CardMap,
+    metrics: &TextMetrics,
 ) -> Vec<(ElementRef<'h>, Candidate)> {
     // Emitted length is measured against a dummy base: hrefs do not change how much text a
     // root yields, and the real base is not known here.
@@ -741,12 +764,12 @@ fn root_candidates<'h>(
         };
         candidates.extend(html.select(&selector).map(|el| (el, sel)));
     }
-    candidates.extend(score_best(html, &Walk::bare(&base)).map(|el| (el, "scored")));
+    candidates.extend(score_best(html, &Walk::bare(&base), metrics).map(|el| (el, "scored")));
     let mut ranked: Vec<(ElementRef<'_>, Candidate)> = candidates
         .into_iter()
         .map(|(el, origin)| {
-            let raw_text = text_len(*el);
-            let link_density = link_density(&el);
+            let raw_text = metrics.text_len(el.id());
+            let link_density = metrics.link_density(el.id());
             let v = el.value();
             let c = Candidate {
                 origin,
@@ -820,7 +843,11 @@ fn choose_root(ranked: &[(ElementRef<'_>, Candidate)]) -> Option<usize> {
 }
 
 /// Readability-style: score leaf text blocks, propagate to ancestors, and discount link density.
-fn score_best<'h>(html: &'h Html, walk: &Walk<'_>) -> Option<ElementRef<'h>> {
+fn score_best<'h>(
+    html: &'h Html,
+    walk: &Walk<'_>,
+    metrics: &TextMetrics,
+) -> Option<ElementRef<'h>> {
     let mut scores: HashMap<ego_tree::NodeId, f64> = HashMap::new();
     // `div`/`section` are included because most modern pages never emit a `<p>`. A container
     // only counts when the prose is its *own* (see `own_text`).
@@ -853,7 +880,7 @@ fn score_best<'h>(html: &'h Html, walk: &Walk<'_>) -> Option<ElementRef<'h>> {
         .filter_map(|(id, s)| {
             let node = html.tree.get(id)?;
             let el = ElementRef::wrap(node)?;
-            Some((el, s * (1.0 - link_density(&el))))
+            Some((el, s * (1.0 - metrics.link_density(el.id()))))
         })
         .filter(|(_, s)| *s > 0.0)
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
@@ -947,17 +974,162 @@ fn text_len(node: NodeRef<'_, Node>) -> usize {
     inner_text(node).len()
 }
 
-/// Fraction of an element's text that sits inside anchors. High density means navigation.
-fn link_density(el: &ElementRef) -> f64 {
-    let total = text_len(**el);
-    if total == 0 {
-        return 0.0;
+/// One node's contribution to a whitespace-normalized text length, composable across siblings.
+///
+/// `inner_text` collapses whitespace runs to a single space and trims the ends, so a node's
+/// length is not the sum of its children's: two children that meet without whitespace between
+/// them share a word. This carries just enough to fold children left-to-right and land on the
+/// same length `inner_text(node).len()` would: the byte count across tokens (`nonws`), the
+/// token count (`words`), and whether the run starts and ends on a word so an adjacent sibling
+/// knows whether to merge.
+#[derive(Clone, Copy, Default)]
+struct WsSummary {
+    nonws: usize,
+    words: usize,
+    first_is_word: bool,
+    last_is_word: bool,
+    nonempty: bool,
+}
+
+impl WsSummary {
+    /// `collect_text` puts a bare space either side of a block element; this is that space.
+    const fn ws() -> Self {
+        Self {
+            nonws: 0,
+            words: 0,
+            first_is_word: false,
+            last_is_word: false,
+            nonempty: true,
+        }
     }
-    let Ok(sel) = Selector::parse("a") else {
-        return 0.0;
-    };
-    let linked: usize = el.select(&sel).map(|a| text_len(*a)).sum();
-    (linked as f64 / total as f64).min(1.0)
+
+    fn text(t: &str) -> Self {
+        let mut nonws = 0;
+        let mut words = 0;
+        for w in t.split_whitespace() {
+            nonws += w.len();
+            words += 1;
+        }
+        Self {
+            nonws,
+            words,
+            first_is_word: t.chars().next().is_some_and(|c| !c.is_whitespace()),
+            last_is_word: t.chars().next_back().is_some_and(|c| !c.is_whitespace()),
+            nonempty: !t.is_empty(),
+        }
+    }
+
+    /// `a` then `b`. Their touching tokens merge into one word iff neither side has whitespace
+    /// at the seam. The default value is the empty string and is the identity here.
+    fn concat(a: Self, b: Self) -> Self {
+        let merge = a.last_is_word && b.first_is_word;
+        Self {
+            nonws: a.nonws + b.nonws,
+            words: a.words + b.words - usize::from(merge),
+            first_is_word: if a.nonempty {
+                a.first_is_word
+            } else {
+                b.first_is_word
+            },
+            last_is_word: if b.nonempty {
+                b.last_is_word
+            } else {
+                a.last_is_word
+            },
+            nonempty: a.nonempty || b.nonempty,
+        }
+    }
+
+    /// Normalized length: tokens joined by single spaces, trimmed.
+    fn len(self) -> usize {
+        if self.words == 0 {
+            0
+        } else {
+            self.nonws + self.words - 1
+        }
+    }
+}
+
+/// Per-node text measurements, computed once so scoring is linear rather than O(n²).
+///
+/// `text_len` and `link_density` each walk the whole subtree below a node. Called per
+/// candidate ([`root_candidates`]) and per scored node ([`score_best`]), on a deeply nested
+/// page that is O(n²): a linear chain of scored ancestors, each re-measuring the chain below
+/// it. Untrusted HTML reaches this directly, and it is not bounded by [`MAX_DEPTH`], which
+/// guards the IR walkers downstream of scoring. One post-order pass makes every measurement a
+/// map lookup.
+///
+/// `text_len` reproduces `inner_text(node).len()` exactly: `collect_text` skips [`NOISE`]
+/// subtrees and spaces a block element on both sides, and normalization collapses and trims.
+/// `anchor_len` reproduces `link_density`'s old numerator, `el.select("a").map(text_len).sum()`,
+/// which descends *into* `NOISE` (a `<nav>` full of links counts) and double-counts an anchor
+/// nested in another.
+struct TextMetrics {
+    by_node: std::collections::HashMap<ego_tree::NodeId, (WsSummary, usize)>,
+}
+
+impl TextMetrics {
+    fn text_len(&self, id: ego_tree::NodeId) -> usize {
+        self.by_node.get(&id).map_or(0, |&(s, _)| s.len())
+    }
+
+    /// Fraction of an element's text that sits inside anchors. High density means navigation.
+    fn link_density(&self, id: ego_tree::NodeId) -> f64 {
+        let Some(&(summary, anchor)) = self.by_node.get(&id) else {
+            return 0.0;
+        };
+        let total = summary.len();
+        if total == 0 {
+            return 0.0;
+        }
+        (anchor as f64 / total as f64).min(1.0)
+    }
+}
+
+/// The one post-order pass. Iterative for the same reason as [`collect_text`]: a stack frame
+/// per DOM level on untrusted input is a stack overflow waiting for a deep enough page.
+fn build_text_metrics(html: &Html) -> TextMetrics {
+    let mut by_node: std::collections::HashMap<ego_tree::NodeId, (WsSummary, usize)> =
+        std::collections::HashMap::new();
+    let mut stack: Vec<(NodeRef<'_, Node>, bool)> = vec![(html.tree.root(), false)];
+    while let Some((n, done)) = stack.pop() {
+        if !done {
+            stack.push((n, true));
+            stack.extend(n.children().map(|c| (c, false)));
+            continue;
+        }
+        // Anchors below this node, matching `select("a")`: descend everywhere, including into
+        // NOISE, and count a nested anchor once at each level (the double-count `select` makes).
+        let anchor: usize = n
+            .children()
+            .map(|c| {
+                let (cs, ca) = by_node[&c.id()];
+                let is_a = matches!(c.value(), Node::Element(e) if e.name.local.as_ref() == "a");
+                usize::from(is_a) * cs.len() + ca
+            })
+            .sum();
+        let summary = match n.value() {
+            Node::Text(t) => WsSummary::text(t),
+            Node::Element(e) if NOISE.contains(&e.name.local.as_ref()) => WsSummary::default(),
+            Node::Element(e) => {
+                let inner = n.children().fold(WsSummary::default(), |acc, c| {
+                    WsSummary::concat(acc, by_node[&c.id()].0)
+                });
+                let name = e.name.local.as_ref();
+                if BLOCK_LEVEL.contains(&name) || name == "br" {
+                    WsSummary::concat(WsSummary::concat(WsSummary::ws(), inner), WsSummary::ws())
+                } else {
+                    inner
+                }
+            }
+            // Document, fragment, comment, doctype: `collect_text` descends without a space.
+            _ => n.children().fold(WsSummary::default(), |acc, c| {
+                WsSummary::concat(acc, by_node[&c.id()].0)
+            }),
+        };
+        by_node.insert(n.id(), (summary, anchor));
+    }
+    TextMetrics { by_node }
 }
 
 // ---------- IR construction ----------
@@ -2593,6 +2765,76 @@ mod tests {
             .expect("extraction unwound");
         // Capped, not dropped: the text below the limit is flattened, not discarded.
         assert!(out > 0, "the deep page extracted nothing at all");
+    }
+
+    /// The memo must agree with the walk it replaces on every node, or scoring shifts. The
+    /// fixture mixes the cases that make composition subtle: adjacent inline elements with and
+    /// without a whitespace node between them, a block that spaces its neighbours, a `<br>`, an
+    /// anchor, and links inside a `<nav>` (NOISE for text, but `select("a")` still counts them,
+    /// so `text_len` and the `link_density` numerator disagree about that subtree by design).
+    #[test]
+    fn text_metrics_match_the_reference_walk() {
+        let src = "<html><body><article>\
+            <p>One <b>two</b>three <a href=\"x\">four five</a> six.</p>\
+            <div><span>a</span><span>b</span> <span>c</span></div>\
+            <p>line<br>break</p>\
+            <nav><a href=\"y\">menu link one</a> <a href=\"z\">menu link two</a></nav>\
+            <ul><li>alpha beta</li><li>gamma</li></ul>\
+            <pre>code   spaced</pre>\
+            </article></body></html>";
+        let html = Html::parse_document(src);
+        let metrics = build_text_metrics(&html);
+        let a_sel = Selector::parse("a").unwrap();
+        for el in html.select(&Selector::parse("*").unwrap()) {
+            let id = el.id();
+            let total = text_len(*el);
+            assert_eq!(
+                metrics.text_len(id),
+                total,
+                "text_len at <{}>",
+                el.value().name()
+            );
+            let want = if total == 0 {
+                0.0
+            } else {
+                let linked: usize = el.select(&a_sel).map(|a| text_len(*a)).sum();
+                (linked as f64 / total as f64).min(1.0)
+            };
+            assert_eq!(
+                metrics.link_density(id),
+                want,
+                "link_density at <{}>",
+                el.value().name()
+            );
+        }
+    }
+
+    /// Text at *every* level makes each `<div>` a scored candidate, which is what turned root
+    /// selection O(n²): a scored node re-measured the whole chain below it. With one shared
+    /// measurement pass it is linear. The ceiling is generous enough for a debug build and far
+    /// under what a quadratic regression at this size would take (minutes).
+    #[test]
+    fn deeply_nested_text_extracts_in_linear_time() {
+        const DEPTH: usize = 6_000;
+        let mut src = String::from("<html><body>");
+        for _ in 0..DEPTH {
+            src.push_str("<div>twenty five plus characters here ");
+        }
+        src.push_str(&"</div>".repeat(DEPTH));
+        src.push_str("</body></html>");
+
+        let elapsed = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let start = std::time::Instant::now();
+                let doc = extract(&src, &Url::parse("https://example.com/a").unwrap());
+                assert!(doc.text_len() > 0);
+                start.elapsed()
+            })
+            .unwrap()
+            .join()
+            .expect("extraction unwound");
+        assert!(elapsed.as_secs() < 10, "extraction took {elapsed:?}");
     }
 
     /// Row-header tables (infoboxes, spec sheets) put a `<th>` and a `<td>` in the same row.

@@ -8,9 +8,9 @@
 //!
 //! # The placeholder is the whole privacy argument
 //!
-//! Article images live on CDN hosts constantly, and "no third-party requests" is in the first
-//! paragraph of both README and AGENTS.md. Loading one is allowed on exactly the reasoning
-//! `rewrite` uses: the placeholder **names the host before the click**, the click is a
+//! Article images live on CDN hosts constantly, while README promises no automatic third-party
+//! requests. Loading one is allowed on exactly the reasoning `rewrite` uses: the placeholder
+//! **names the host before the click**, the click is a
 //! deliberate user action, the load is counted in the provenance strip, and the capability
 //! lives behind the `gui` feature, so the `hww` CLI retains compile-time absence of it.
 //!

@@ -14,11 +14,11 @@ A quiet reading experience.
 
 ## Status
 
-Working end to end for HTML, as a CLI that prints text and as a keyboard-driven reading GUI:
+Working end to end for HTML, as a keyboard-driven reading GUI with a headless `--why` for triage:
 
 ```
-cargo run -- [--why] [--no-rewrite] [--no-profile] <url>       # text to stdout
 cargo run --features gui --bin hww-gui -- [--no-rewrite] <url> # the reader
+cargo run --features gui --bin hww-gui -- --why <url>          # the extractor's account, no window
 ```
 
 | Piece | State |
@@ -45,7 +45,6 @@ there is no system package to install first.
 ```
 cargo run --features gui --bin hww-gui                          # the reader, URL bar focused
 cargo run --features gui --bin hww-gui -- example.com/article   # straight to a page
-cargo run -- https://example.com/article                        # the same page as text
 ```
 
 ### Diagnosing a site
@@ -53,7 +52,7 @@ cargo run -- https://example.com/article                        # the same page 
 Two tools say why a page came out the way it did, one for extraction and one for rendering:
 
 ```
-cargo run -- --why https://example.com/article                  # the extractor's account
+cargo run --features gui --bin hww-gui -- --why https://example.com/article   # the extractor's account
 cargo run --features gui --bin hww-shot -- --url https://example.com/article --out /tmp/look
 ```
 
@@ -71,8 +70,9 @@ regression baseline.
 
 The reader's URL argument is optional; without one it opens empty with the URL bar focused,
 `g` reopens that bar later, and `?` lists every key. It also accepts a bare host and fills in
-`https://`. The `hww` CLI wants a full URL, and prints the article to stdout with its
-provenance on stderr.
+`https://`. `--why` prints the extractor's account to stdout with its provenance on stderr and
+opens no window; every terminal print runs through `render::sanitize_for_terminal`, because
+untrusted page text on a terminal is a stream of commands, not glyphs.
 
 Both binaries take `--no-rewrite` and `--no-profile` to switch off a per-site table, and
 `--show-rewrites` / `--show-profiles` to print one and exit. The reader lives behind the `gui` feature because it adds one network
@@ -102,7 +102,7 @@ Against 150 real URLs sampled from browsing history ([full findings](docs/phase0
 
 Some sites serve a fully server-rendered alternate of themselves. Phase 0 measured one such
 site among its JS-only losses, which is why per-site rules are a feature rather than a hack.
-`cargo run -- --show-rewrites` prints the table; `--no-rewrite` turns it off.
+`cargo run --features gui --bin hww-gui -- --show-rewrites` prints the table; `--no-rewrite` turns it off.
 
 The table is compiled in and deliberately tiny. A rule ships only if it is the **same
 operator** as the host it replaces, **cites** a measured failure in the findings doc, stays
