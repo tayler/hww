@@ -2189,8 +2189,8 @@ const HELP: &[(&str, &str)] = &[
 mod tests {
     use super::*;
 
-    /// The third test under `ui/`, and the argument is made again rather than the precedent
-    /// cited, as AGENTS.md requires.
+    /// This test belongs under `ui/` because the transition it checks lives here, but its
+    /// argument stands on its own rather than relying on another test as precedent.
     ///
     /// [`Page::take_shown`] and [`Page::restore_shown`] take no `egui::Context`: they are a pure
     /// transition over one enum, which is why they are methods on `Page` and not on `ReaderApp`.

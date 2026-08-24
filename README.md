@@ -34,7 +34,7 @@ cargo run --features gui --bin hww-gui -- --why <url>          # the extractor's
 | `reader` | Reading model: inline runs, outline, history, threads, image decoding, notices |
 | GUI | egui reader: links, back/forward, outline, find, threads, images. **Linux verified**; macOS and Windows are believed to build and are not tested |
 | feeds, gemini, gopher, markdown | not started |
-| TUI, archive | not started |
+| archive | not started |
 
 ## Running
 
@@ -175,7 +175,8 @@ load only on an explicit click. They are never loaded automatically, on hover, o
 except the page favicon beside the masthead eyebrow, which is fetched as soon as the document
 names one. Each load is counted alongside cookie attempts in the page-info panel, and nothing is
 written to disk. Image requests, and only image requests, carry an origin-only `Referer`;
-documents carry none. See AGENTS.md for why that one header is worth its exception.
+documents carry none. `fetch::Referer::PageOrigin` documents why that one header is worth its
+exception.
 
 ## Building a corpus
 

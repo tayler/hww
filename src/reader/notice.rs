@@ -4,10 +4,10 @@
 //! one layer out: it keeps the reader's own *wording* out of `ui/`, so the text hww puts on
 //! screen is decided where `cargo test` can read it. That matters more than it looks. Two strings
 //! in the old error screen contained `→`, which the faces egui embedded by default did not carry,
-//! and both had been rendering as tofu since the day they were written while AGENTS.md stated the
-//! rule in prose. The rule was `no_notice_contains_an_arrow`, and it is gone: `reader::ui::fonts`
-//! embeds faces that carry the arrows in every role, so the constraint it enforced is no longer
-//! true. What the episode leaves behind is the reason this module sits outside `ui/` at all.
+//! and prose review did not catch that both rendered as tofu. The former
+//! `no_notice_contains_an_arrow` test is gone because `reader::ui::fonts` now embeds faces that
+//! carry arrows in every role. What the episode leaves behind is the reason this module sits
+//! outside `ui/` at all.
 //!
 //! # Severity, not colour
 //!

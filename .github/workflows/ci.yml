@@ -43,8 +43,9 @@ jobs:
   # actually fails for want of it, and say here which one and why: an apt list nobody can
   # justify is how CI accretes.
   #
-  # Linux only for now. A compile-only macOS/Windows matrix is deferred, not rejected — see
-  # the Portability notes in AGENTS.md. No test may call `eframe::run_native`.
+  # Linux only for now. Add a compile-only macOS/Windows matrix when either platform gains a
+  # user; until then its cost would guard platforms nobody runs. No test may call
+  # `eframe::run_native`.
   gui:
     name: gui + tools
     runs-on: ubuntu-latest

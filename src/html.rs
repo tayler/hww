@@ -16,6 +16,25 @@
 //! because `<a>` and `<span>` are each used both ways. That is what makes a front page
 //! readable: every headline on one is an anchor, either wrapped around the card's blocks or
 //! standing as a run of inline text, and both shapes used to arrive with the href discarded.
+//!
+//! # Extraction order
+//!
+//! The merge in [`extract_traced`] is load-bearing:
+//!
+//! 1. [`crate::cards::detect`] identifies sibling groups of story cards. [`walk_blocks`]
+//!    emits each accepted group as one [`Block::Entries`] run in place; an accepted card group
+//!    is not reconsidered as a thread.
+//! 2. Content-root candidates are scored and the winner is mapped to blocks. When class-name
+//!    chrome hints consume most of a root, [`blocks_guarded`] walks it without those hints.
+//!    Headers and footers inside an article or section remain content.
+//! 3. [`crate::thread::extract_thread`] runs independently. A longer thread replaces the
+//!    article result; a thread over 200 characters is appended to a longer article result.
+//! 4. A result below [`crate::ir::THIN_TEXT`], or below 1,000 characters when `<body>` emits
+//!    five times as much, falls back to `<body>`.
+//!
+//! Reordering these steps changes whether cards become comments, nested discussions disappear,
+//! or thin pages become blank. Diagnose changes through `--why`, which is produced by this same
+//! pass.
 
 use crate::ir::{Block, Document, Image, Inline};
 use scraper::{ElementRef, Html, Node, Selector};
@@ -682,7 +701,7 @@ fn first_of<const N: usize>(
     (None, "none")
 }
 
-/// One of the three shared text-length counters (see `AGENTS.md`). This used to build a
+/// One of the three shared text-length counters. This used to build a
 /// throwaway `Document` around a cloned block list, once per `content_root` candidate and
 /// again on the `<body>` fallback: up to six copies of a whole document per page.
 fn block_text(blocks: &[Block]) -> usize {
