@@ -55,6 +55,7 @@
 //! ceiling, which is the one amplification path the transfer cap was genuinely holding shut.
 
 use crate::fetch::Truncation;
+use url::Url;
 
 /// Longest side, in pixels, that will be decoded at all.
 pub const MAX_DIMENSION: u32 = 8192;
@@ -111,6 +112,23 @@ pub enum DecodeError {
     Decode(String),
     #[error("empty response")]
     Empty,
+}
+
+impl DecodeError {
+    /// Whether asking the same server for the same bytes could plausibly end differently.
+    ///
+    /// The reader draws a retry control on the strength of this, so a `true` it cannot back up
+    /// is a button that re-fetches and re-fails for as long as the page is open. `Unsupported`
+    /// and `TooLarge` are properties of the file: a second copy of it is the same file.
+    ///
+    /// `Decode` stays retryable on purpose. It is what a truncated transfer produces, which is
+    /// the one decode failure a second request genuinely can fix.
+    pub fn offers_retry(&self) -> bool {
+        match self {
+            Self::Unsupported(_) | Self::TooLarge(..) => false,
+            Self::UnknownFormat | Self::Decode(_) | Self::Empty => true,
+        }
+    }
 }
 
 /// Human-readable label for an incomplete transfer, or `None` if it was complete.
@@ -186,6 +204,15 @@ pub fn decode(
     })
 }
 
+/// Formats this reader declines on purpose: the name each is reported under, and the path
+/// suffixes that claim it.
+///
+/// One table, read by both declines. [`deliberately_unsupported`] recognises these from their
+/// bytes and [`declined_by_url`] from an address; a format named by one and not the other is
+/// a format that half-works, so `the_url_and_the_bytes_decline_the_same_formats` walks this
+/// list and fails the build instead.
+const DECLINED: &[(&str, &[&str])] = &[("SVG", &["svg", "svgz"]), ("AVIF", &["avif"])];
+
 /// Formats this reader declines on purpose, recognised from their bytes so the failure names
 /// the format instead of calling a valid file unrecognisable.
 ///
@@ -198,14 +225,135 @@ fn deliberately_unsupported(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && matches!(&bytes[8..12], b"avif" | b"avis") {
         return Some("AVIF");
     }
-    // SVG is XML, so sniff the root element within the leading whitespace, BOM, XML
-    // declaration, and doctype rather than requiring it first.
-    let head = &bytes[..bytes.len().min(1024)];
-    let head = String::from_utf8_lossy(head).to_ascii_lowercase();
-    if head.contains("<svg") {
+    if xml_root_is_svg(bytes) {
         return Some("SVG");
     }
     None
+}
+
+/// How far into a file the root element is still worth looking for. Generous for a prolog and
+/// cheap to walk; past it, the file is answering a different question than "is this an SVG".
+const PROLOG_SCAN: usize = 64 * 1024;
+
+/// Whether the first element of this XML document is `<svg>`.
+///
+/// A scan and not a substring test. The old check lowercased the first 1024 bytes and looked
+/// for `<svg`, which was wrong in both directions: an SVG whose editor wrote a long DOCTYPE or
+/// a metadata header pushed the root past the window and was reported as "not a recognised
+/// image format", the one message [`DecodeError::Unsupported`] exists to prevent, and a raster
+/// whose leading metadata happened to mention `<svg` was called an SVG. Widening the window
+/// makes the second failure *more* likely, not less, so the prolog is parsed instead.
+///
+/// Skipped: a UTF-8 BOM, whitespace, `<?xml ...?>` and other processing instructions,
+/// `<!-- -->` comments, and `<!DOCTYPE ...>` including an internal `[ ... ]` subset. A
+/// namespace prefix is accepted, so `<svg:svg>` counts.
+///
+/// UTF-16 is not handled. It is vanishingly rare for SVG on the web, and the cost of missing
+/// it is the old wrong message rather than a crash.
+///
+/// `.svgz` needs no gzip branch here: `reqwest` is built with the `gzip` feature, so a
+/// correctly served one arrives already inflated, and the mis-served raw-gzip case is refused
+/// by [`declined_by_url`] before a byte is fetched.
+fn xml_root_is_svg(bytes: &[u8]) -> bool {
+    // Before the conversion below, because that conversion is not free. Every raster this
+    // reader decodes reaches here first, and for one the head is not valid UTF-8, so
+    // `from_utf8_lossy` allocates an owned string of up to three bytes per input byte and
+    // validates the whole window — per image, on the decode worker — to reach a `<` test that
+    // the first byte already answered. `0x89` (PNG), `0xFF` (JPEG), `GIF8`, and `RIFF` all
+    // fail here for the cost of a scan over leading whitespace.
+    if !bytes
+        .iter()
+        .take(PROLOG_SCAN)
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|b| *b == b'<' || *b == 0xef)
+    {
+        return false;
+    }
+    let head = &bytes[..bytes.len().min(PROLOG_SCAN)];
+    // Lossy is safe here: this only ever asks whether ASCII markup is present, and a
+    // replacement char matches none of it.
+    let head = String::from_utf8_lossy(head);
+    let mut s = head.strip_prefix('\u{feff}').unwrap_or(&head);
+    loop {
+        s = s.trim_start();
+        let rest = if let Some(r) = s.strip_prefix("<!--") {
+            match r.find("-->") {
+                Some(i) => &r[i + 3..],
+                None => return false,
+            }
+        } else if let Some(r) = s.strip_prefix("<?") {
+            match r.find("?>") {
+                Some(i) => &r[i + 2..],
+                None => return false,
+            }
+        } else if let Some(r) = s.strip_prefix("<!") {
+            // A DOCTYPE may carry an internal subset, whose own `>`s must not end it.
+            match skip_declaration(r) {
+                Some(r) => r,
+                None => return false,
+            }
+        } else {
+            // The first thing that is not prolog. Either it opens the root element or this is
+            // not XML at all.
+            return s
+                .strip_prefix('<')
+                .map(element_name)
+                .is_some_and(|name| name.eq_ignore_ascii_case("svg"));
+        };
+        s = rest;
+    }
+}
+
+/// Past a `<!...>` declaration, honouring an internal `[ ... ]` subset. `s` starts just after
+/// the `<!`.
+fn skip_declaration(s: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            '>' if depth == 0 => return Some(&s[i + 1..]),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The local name of an element whose `<` has been consumed, with any namespace prefix
+/// dropped: `svg:svg` and `svg` both answer `svg`.
+fn element_name(s: &str) -> &str {
+    let end = s
+        .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+        .unwrap_or(s.len());
+    let name = &s[..end];
+    name.rsplit_once(':')
+        .map(|(_, local)| local)
+        .unwrap_or(name)
+}
+
+/// The same declines as [`deliberately_unsupported`], decidable from the address before a byte
+/// is fetched.
+///
+/// A URL extension is a claim, exactly like `Content-Type`, and this module's standing rule is
+/// to sniff bytes rather than trust claims. What differs is the consequence. Trusting a claim
+/// about *how to decode* means decoding mislabelled bytes; trusting one about *what not to
+/// fetch* costs at worst a picture that would have loaded. The byte sniff stays the authority
+/// for anything that does get fetched.
+///
+/// The exchange is worth it because the alternative is not just a wasted transfer. Every
+/// caller of this names the host to the reader before requesting, so without it the reader
+/// discloses a contact it never makes.
+///
+/// Two knock-ons, both accepted: a `.svg` address that redirects to a raster is now refused
+/// unseen, and a declined format behind an extensionless address still costs one request
+/// before the bytes are sniffed.
+pub fn declined_by_url(url: &Url) -> Option<&'static str> {
+    let last = url.path_segments()?.next_back()?;
+    let ext = last.rsplit_once('.')?.1.to_ascii_lowercase();
+    DECLINED
+        .iter()
+        .find(|(_, suffixes)| suffixes.contains(&ext.as_str()))
+        .map(|(name, _)| *name)
 }
 
 fn alloc_limits(limits: &DecodeLimits) -> image::Limits {
@@ -332,6 +480,113 @@ mod tests {
         // A format that *is* supported must not be caught by the sniffs above.
         let png = encode(16, 16, ImageFormat::Png);
         assert!(decode(&png, &Truncation::Complete, &limits(4096)).is_ok());
+    }
+
+    /// One valid byte sequence per name in [`DECLINED`], so the structural test below can ask
+    /// the byte sniff about every format the URL sniff knows.
+    fn declined_sample(name: &str) -> Vec<u8> {
+        match name {
+            "SVG" => br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#.to_vec(),
+            "AVIF" => {
+                let mut v = vec![0u8, 0, 0, 0x20];
+                v.extend_from_slice(b"ftypavif");
+                v.extend_from_slice(&[0u8; 16]);
+                v
+            }
+            other => panic!("{other} is in DECLINED with no sample; add one"),
+        }
+    }
+
+    /// The two declines must name the same formats.
+    ///
+    /// A format the address refuses but the bytes accept loads on a URL with no extension; a
+    /// format the bytes refuse but the address does not costs a request every time. Both are
+    /// silent, so the agreement is asserted rather than remembered.
+    #[test]
+    fn the_url_and_the_bytes_decline_the_same_formats() {
+        for (name, suffixes) in DECLINED {
+            assert_eq!(
+                deliberately_unsupported(&declined_sample(name)),
+                Some(*name),
+                "{name} is refused by address but not by bytes"
+            );
+            for suffix in *suffixes {
+                let url = Url::parse(&format!("https://example.org/a.{suffix}")).unwrap();
+                assert_eq!(
+                    declined_by_url(&url),
+                    Some(*name),
+                    "{name} is refused by bytes but not by a .{suffix} address"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_address_is_declined_on_its_extension_and_nothing_else() {
+        let declined = |u: &str| declined_by_url(&Url::parse(u).unwrap());
+        assert_eq!(declined("https://e.org/a.svg"), Some("SVG"));
+        assert_eq!(declined("https://e.org/a.SVG"), Some("SVG"));
+        assert_eq!(declined("https://e.org/a.svgz?v=2#f"), Some("SVG"));
+        assert_eq!(declined("https://e.org/deep/path/a.avif"), Some("AVIF"));
+        // The extension is the claim. A directory named for a format is not one, and neither
+        // is a query parameter: refusing those would drop pictures that decode.
+        assert_eq!(declined("https://e.org/svg/photo.png"), None);
+        assert_eq!(declined("https://e.org/photo.png?fmt=svg"), None);
+        assert_eq!(declined("https://e.org/notsvg"), None);
+        assert_eq!(declined("https://e.org/"), None);
+    }
+
+    /// The failure the 1024-byte window produced: a real SVG reported as unrecognisable.
+    #[test]
+    fn an_svg_behind_a_long_prolog_is_still_named_svg() {
+        let mut doc = br#"<?xml version="1.0" encoding="UTF-8"?>"#.to_vec();
+        doc.extend_from_slice(
+            br#"<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">"#,
+        );
+        doc.extend_from_slice(b"<!-- ");
+        doc.extend_from_slice(&b"editor metadata ".repeat(200));
+        doc.extend_from_slice(b" -->\n");
+        assert!(doc.len() > 1024, "the point of the fixture is the length");
+        doc.extend_from_slice(br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#);
+        assert!(matches!(
+            decode(&doc, &Truncation::Complete, &limits(4096)),
+            Err(DecodeError::Unsupported("SVG"))
+        ));
+    }
+
+    /// A DOCTYPE's internal subset carries `>` of its own, which must not end it.
+    #[test]
+    fn a_doctype_with_an_internal_subset_does_not_end_early() {
+        let doc = br#"<!DOCTYPE svg [<!ENTITY nb "&#160;">]><svg:svg xmlns:svg="http://www.w3.org/2000/svg"/>"#;
+        assert_eq!(deliberately_unsupported(doc), Some("SVG"));
+    }
+
+    /// The other half of the old substring test's failure: a supported file whose leading
+    /// metadata mentions `<svg` is not an SVG and must still decode.
+    #[test]
+    fn a_raster_whose_metadata_mentions_svg_still_decodes() {
+        let mut png = encode(16, 16, ImageFormat::Png);
+        // Ahead of the pixels but behind the signature, the way a real metadata chunk sits.
+        let at = 8;
+        png.splice(
+            at..at,
+            br#"<svg xmlns="http://www.w3.org/2000/svg">"#.iter().copied(),
+        );
+        assert!(
+            !xml_root_is_svg(&png),
+            "a PNG signature is not an XML prolog, whatever follows it"
+        );
+    }
+
+    /// The retry control is drawn from this, so a wrong answer is a button that cannot work.
+    #[test]
+    fn only_a_property_of_the_file_refuses_a_retry() {
+        assert!(!DecodeError::Unsupported("SVG").offers_retry());
+        assert!(!DecodeError::TooLarge(9000, 9000, 8192).offers_retry());
+        // A truncated transfer lands here, and a second request is exactly what fixes it.
+        assert!(DecodeError::Decode("unexpected end of file".to_owned()).offers_retry());
+        assert!(DecodeError::Empty.offers_retry());
+        assert!(DecodeError::UnknownFormat.offers_retry());
     }
 
     #[test]

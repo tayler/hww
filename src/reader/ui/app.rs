@@ -17,7 +17,7 @@
 //! What it does *not* carry is provenance. Seven facts `·`-joined into one dim right-aligned
 //! line crowded the URL, and with `wrap_mode = Truncate` on a narrow window the tail was not
 //! drawn at all, which is a poor way to report anything. They are labelled rows in the
-//! page-info panel now (`p`, or the circled `i`, `reader::ui::pageinfo_ui`). The two that could
+//! page-info panel now (`p`, or the italic `i`, `reader::ui::pageinfo_ui`). The two that could
 //! not wait for a click went the other way and became infobars under the top chrome: a truncated
 //! body and a rewrite rule that landed on the wrong host both change how the page in front of
 //! the reader should be read. The dead rule in particular used to be a twelve-second `flash`
@@ -40,16 +40,17 @@
 use crate::ir;
 use crate::reader::autoload;
 use crate::reader::history::History;
+use crate::reader::image_decode;
 use crate::reader::measure::{self, Heights};
 use crate::reader::menu::{self, Command};
-use crate::reader::notice::{self, Button, IMAGES_ARE_OFF, Notice};
+use crate::reader::notice::{self, Button, IMAGES_ARE_DECLINED, IMAGES_ARE_OFF, Notice};
 use crate::reader::outline::{self, OutlineEntry};
 use crate::reader::pageinfo;
 use crate::reader::prefs;
 use crate::reader::settings::{self, Settings};
 use crate::reader::thread_tree::CommentKey;
 use crate::reader::title;
-use crate::reader::ui::images::ImageStore;
+use crate::reader::ui::images::{Failure, ImageStore};
 use crate::reader::ui::{
     Action, Launch, RenderCtx, blocks, fonts, menu_ui, net, notice_ui, pageinfo_ui, prefs_ui, theme,
 };
@@ -677,7 +678,16 @@ impl ReaderApp {
             &self.auto_attempts,
             &self.auto_announced,
             self.images.pending(),
-            &|src| self.images.state(src).is_some(),
+            // Not only "the store has an answer": also "this address will never be
+            // requested". `plan` drops both before it names a host, so a page of declined
+            // pictures no longer announces a CDN nothing then contacts. The test that this
+            // reaches the *hosts* and not only the srcs lives in `autoload`.
+            &|src| {
+                self.images.state(src).is_some()
+                    || base
+                        .join(src)
+                        .is_ok_and(|u| image_decode::declined_by_url(&u).is_some())
+            },
         );
         if plan.is_empty() {
             return;
@@ -735,11 +745,33 @@ impl ReaderApp {
         if self.images.is_pending(src) {
             return;
         }
+        // Beside `is_pending`, and for the same reason: this is the one door, and the paths
+        // that reach it without drawing a control — "load all", and a click on a placeholder
+        // the LRU evicted and redrew as an offer — would otherwise re-issue a request whose
+        // answer is already known.
+        if self.images.refuses_retry(src) {
+            return;
+        }
         let base = ready.loaded.prov.final_url.clone();
         let Ok(url) = base.join(src) else {
-            self.images.fail(src, "unusable image address".to_owned());
+            self.images
+                .fail(src, Failure::permanent("unusable image address".to_owned()));
             return;
         };
+        // Ahead of the host, the disclosure, and the job. A format this reader declines was
+        // being fetched in full and then refused from its bytes, which cost a third-party
+        // request, up to the transfer cap in wasted transfer, and a host recorded in the
+        // panel as if a picture had been loaded from it. Nothing below this line runs, so
+        // nothing is contacted and nothing is claimed.
+        //
+        // Worded through `DecodeError::Unsupported` rather than a second literal: the reader
+        // must not learn one phrase for a declined format fetched and another for one that
+        // was not.
+        if let Some(name) = image_decode::declined_by_url(&url) {
+            let why = image_decode::DecodeError::Unsupported(name).to_string();
+            self.images.fail(src, Failure::permanent(why));
+            return;
+        }
         let host = url.host_str().unwrap_or("?").to_owned();
         self.images.begin(src);
         // Recorded here, where the host is known and where the reader is told it, and taken
@@ -775,8 +807,26 @@ impl ReaderApp {
         let Some(ready) = self.shown() else {
             return;
         };
-        let srcs = collect_image_srcs(&ready.loaded.doc);
+        let all = collect_image_srcs(&ready.loaded.doc);
         let base = ready.loaded.prov.final_url.clone();
+        // Before the hosts are gathered and before the count is taken. This remark names every
+        // host it is about to contact, so a declined address left in would have it name one it
+        // never reaches — the same claim about the network that `autoload::plan` refuses to
+        // make for an address that will not resolve.
+        let srcs: Vec<String> = all
+            .iter()
+            // Declined, and *only* declined. Testing the address the other way round dropped
+            // every `src` that fails to join too, so a page whose images all had unusable
+            // addresses reported them as a format hww does not display — a second wrong claim
+            // about the page, in place of the one this filter removes. An unusable address
+            // still belongs in the list; `request_image` has the honest message for it.
+            .filter(|s| {
+                !base
+                    .join(s)
+                    .is_ok_and(|u| image_decode::declined_by_url(&u).is_some())
+            })
+            .cloned()
+            .collect();
         let mut hosts: Vec<String> = srcs
             .iter()
             .filter_map(|s| base.join(s).ok())
@@ -785,7 +835,13 @@ impl ReaderApp {
         hosts.sort();
         hosts.dedup();
         if srcs.is_empty() {
-            self.flash("no images on this page".to_owned());
+            // Which of the two is true matters: a page whose pictures were all declined has
+            // pictures, and saying it has none describes a page the reader is not looking at.
+            self.flash(if all.is_empty() {
+                "no images on this page".to_owned()
+            } else {
+                IMAGES_ARE_DECLINED.to_owned()
+            });
             return;
         }
         // Naming the distinct hosts is the point: "load all" must not be the one place the
@@ -866,7 +922,17 @@ impl ReaderApp {
                     self.images.cookie_attempts += cookies;
                     match result {
                         Ok(decoded) => self.images.insert(ctx, &src, decoded),
-                        Err(e) => self.images.fail(&src, e.to_string()),
+                        Err(e) => {
+                            let why = e.to_string();
+                            self.images.fail(
+                                &src,
+                                if e.offers_retry() {
+                                    Failure::transient(why)
+                                } else {
+                                    Failure::permanent(why)
+                                },
+                            );
+                        }
                     }
                 }
                 Msg::ImageDropped { page, src } => {
@@ -997,8 +1063,10 @@ impl ReaderApp {
     /// arm of `drain`, and from `present`, so the screenshot tool cannot drift from the
     /// navigation path.
     fn commit(&mut self) {
-        // Textures die with the page they were loaded for; the disclosure counters do not.
-        self.images.clear_textures();
+        // Textures and the disclosure counters both die with the page they belong to: the
+        // page-info panel answers how the page on screen arrived, not what the session has
+        // done since it started.
+        self.images.clear_page();
         // All three are about the page being replaced. `auto_announced` in particular: naming
         // a host is a statement about *this* page, so carrying it forward would let a second
         // page contact a host the reader was told about once, on an article they have left.

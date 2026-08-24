@@ -217,9 +217,9 @@ uses for it. A 4xx body shown anyway, an extraction that came back thin, a body 
 truncated, a rewrite rule applied or landed on the wrong host are all bars; a failed navigation
 is an error page; and none of them is ever dressed as prose.
 
-The rest is accounting, and it lives behind the circled `i` (or `p`): encoding, bytes
-downloaded against characters extracted, the redirect chain, cookies discarded, images loaded
-and their hosts. Facts worth being able to ask for, not worth a permanent ribbon of six-point
+The rest is accounting for the page on screen, and it lives behind the circled `i` (or `p`):
+encoding, bytes downloaded against characters extracted, the redirect chain, cookies discarded,
+images loaded and their hosts. Facts worth being able to ask for, not worth a permanent ribbon of six-point
 text beside the URL.
 
 One centred reading column, measured in characters (`[` and `]`). Zoom is egui's own, so

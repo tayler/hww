@@ -69,7 +69,14 @@ impl Plan {
 /// `in_band` is every `src` the column drew inside the band, in document order and possibly
 /// with repeats. `attempts` is how many times this page has already asked for each, `announced`
 /// the hosts it has already named, and `pending` how many requests are outstanding. `known`
-/// answers whether the image store has any state for a `src` at all.
+/// answers whether this `src` is already settled, one way or another — the store holds a state
+/// for it, or it is an address the reader will never request, such as a format `image_decode`
+/// declines. The caller answers that second half, because the format tables ride with the
+/// `gui` feature and this module does not.
+///
+/// `known` is consulted *before* a host is added to [`Plan::hosts`], and that ordering is the
+/// point rather than an accident: this plan is announced to the reader before any of it is
+/// requested, so a `src` dropped here must take its host with it.
 ///
 /// `attempts` and `known` are both consulted, and neither one covers the other. `known` is
 /// false for a picture the LRU evicted while it was still on the page, and without a count of
@@ -133,6 +140,13 @@ mod tests {
 
     fn nothing_known(_: &str) -> bool {
         false
+    }
+
+    /// A `src` a declined format claims, which is how `ReaderApp::autoload` answers `known`
+    /// for one. Spelled here rather than reached for, because `image_decode` rides with the
+    /// `gui` feature and this module is tested without it.
+    fn declined(src: &str) -> bool {
+        src.ends_with(".svg")
     }
 
     fn set(items: &[&str]) -> HashSet<String> {
@@ -276,5 +290,46 @@ mod tests {
         let p = plan(&base(), &[], &tries(&[]), &set(&[]), 0, &nothing_known);
         assert!(p.is_empty());
         assert!(p.hosts.is_empty());
+    }
+
+    /// A `src` this reader will never request takes its host out of the announcement with it.
+    ///
+    /// The srcs half was already true by way of `known`; the hosts half is the one that was
+    /// broken. `plan.hosts` is flashed to the reader *before* anything is requested, so a
+    /// declined picture on a host with no other picture had hww announce a CDN it then never
+    /// contacted — a disclosure of a contact that did not happen, which is worse than a
+    /// wasted request.
+    #[test]
+    fn a_declined_src_is_planned_neither_as_a_request_nor_as_a_host() {
+        let band = [
+            "https://cdn.example.net/diagram.svg".to_owned(),
+            "https://img.example.org/photo.jpg".to_owned(),
+        ];
+        let p = plan(&base(), &band, &tries(&[]), &set(&[]), 0, &declined);
+        assert_eq!(
+            p.srcs,
+            vec!["https://img.example.org/photo.jpg"],
+            "the declined picture is not requested"
+        );
+        assert_eq!(
+            p.hosts,
+            vec!["img.example.org"],
+            "and its host is not named: nothing is going to contact it"
+        );
+    }
+
+    /// The whole band declined is an empty plan, not an empty plan with a host attached.
+    #[test]
+    fn a_band_of_only_declined_srcs_announces_nothing() {
+        let band = [
+            "https://cdn.example.net/a.svg".to_owned(),
+            "https://cdn.example.net/b.svg".to_owned(),
+        ];
+        let p = plan(&base(), &band, &tries(&[]), &set(&[]), 0, &declined);
+        assert!(p.is_empty());
+        assert!(
+            p.hosts.is_empty(),
+            "nothing is contacted, so nobody is named"
+        );
     }
 }

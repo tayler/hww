@@ -33,7 +33,7 @@
 //! font anywhere in the binary and it draws as tofu. `▸` and `▶` are worse in a subtler way —
 //! they are in `DejaVuSerif` only, which is the coverage tail, so they resolve to a serif
 //! triangle inside a monospace menu. [`SUBMENU_MARKER`] is `›`, which every face in the Plex
-//! chain carries. Same lesson as `ui::pageinfo_ui`'s hand-painted `ⓘ`, one medium over: check
+//! chain carries. Same lesson as the `ⓘ` `ui::pageinfo_ui` never typed, one medium over: check
 //! the glyph against the shipped faces, not against the font on your desktop.
 
 /// Drawn at the right of a submenu button. See the module doc: this is not decoration and not

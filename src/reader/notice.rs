@@ -88,6 +88,16 @@ pub const PENDING: &str = "[loading]";
 /// lives out here with the rest of the wording so the fast job tests it.
 pub const IMAGES_ARE_OFF: &str = "hww is set not to load images; change Images in Settings.";
 
+/// What the reader says when a key asks for pictures the page has, but in a format this
+/// renderer declines.
+///
+/// Distinct from "no images on this page", which is false and reads as a page hww saw
+/// differently than the reader did, and from [`IMAGES_ARE_OFF`], which blames a setting the
+/// reader can change. Nothing was contacted, so nothing may be named: this says why, and stops
+/// there.
+pub const IMAGES_ARE_DECLINED: &str =
+    "the images on this page are in a format hww does not display.";
+
 /// What the reader says the first time the automatic image policy contacts a host on a page.
 ///
 /// The one remark `ImagePolicy::Auto` owes. Under every other policy a control names the host

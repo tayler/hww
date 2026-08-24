@@ -1,21 +1,17 @@
-//! The circled `i` on the status strip, and the panel it opens.
+//! The italic `i` on the status strip, and the panel it opens.
 //!
-//! # Why the icon is painted rather than typed
+//! # Why the letter is painted rather than typed
 //!
-//! `ⓘ` (U+24D8) is in none of the ten faces `reader::ui::fonts` embeds, and it was in none of
-//! the four epaint used to embed before them. Enclosed Alphanumerics is a symbol-font block:
-//! swapping the whole font stack did not move it, and neither did checking a dozen more faces,
-//! including one with 5,918 glyphs. The only info glyph anything here carries is `ℹ` (U+2139,
-//! in NotoEmoji), a bare serif *i* with no circle at all, which does not say what this
-//! affordance is.
+//! This was a circled `i` for a while, and the circle claimed more than the affordance is
+//! worth: a ring around a letter reads as a badge, and this is one dim summonable panel among
+//! the chrome. A lowercase italic `i` says the same thing at the weight it deserves.
 //!
-//! This outlived the gap it was written next to. `→` was tofu under the old faces and is not
-//! under these; `ⓘ` was tofu under both.
-//!
-//! Two arcs and a letter cost about ten lines and have no font to be wrong about. They also
-//! take the palette exactly, and scale with `chrome_font`, so the icon tracks `[`/`]` and
-//! egui's zoom the way every other piece of chrome does. Do not "simplify" this back to a
-//! character.
+//! It is still painted rather than set as a label, because it is sized and centred against the
+//! square hit target the strip allocates rather than against a text baseline. It takes the
+//! palette exactly and scales with `chrome_font`, so it tracks `[`/`]` and egui's zoom the way
+//! every other piece of chrome does. The face is the shipped serif italic, asked for through
+//! `face::Face` like every other run: `ⓘ` (U+24D8) is in none of the ten faces
+//! `reader::ui::fonts` embeds and would have been tofu had it ever been typed.
 //!
 //! # Why the panel is chrome and not a bar
 //!
@@ -31,8 +27,10 @@
 //! panel reads as four short answers rather than one long ledger, and every value has a label
 //! beside it.
 
-use crate::reader::opts::ReadOpts;
+use crate::reader::face::Face;
+use crate::reader::opts::{FontChoice, ReadOpts};
 use crate::reader::pageinfo::{Group, Row};
+use crate::reader::ui::fonts;
 use crate::reader::ui::theme::{self, Palette};
 use eframe::egui::{self, RichText, Ui};
 
@@ -47,14 +45,16 @@ pub fn icon(ui: &mut Ui, pal: &Palette, opts: &ReadOpts) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::click());
     let ink = if resp.hovered() { pal.fg } else { pal.dim };
     if ui.is_rect_visible(rect) {
-        let p = ui.painter();
-        // Inset by the stroke width, or the circle is clipped on the pixel grid at small sizes.
-        p.circle_stroke(rect.center(), d * 0.5 - 1.0, egui::Stroke::new(1.0, ink));
-        p.text(
+        // The letter is small; the square it is centred in is the click target, and stays the
+        // size it was when a circle filled it.
+        ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             "i",
-            egui::FontId::proportional(theme::snap(d * 0.62)),
+            egui::FontId::new(
+                theme::snap(d * 0.8),
+                fonts::family(Face::new(FontChoice::Serif, false, true)),
+            ),
             ink,
         );
     }

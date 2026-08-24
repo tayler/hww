@@ -187,6 +187,35 @@ pub enum ImageError {
     Decode(#[from] image_decode::DecodeError),
 }
 
+impl ImageError {
+    /// Whether asking again could plausibly end differently.
+    ///
+    /// Not every fetch failure is about the attempt. A downgrade refusal is *hww's own policy*
+    /// and answers the same way forever; a redirect chain that loops, or lands on a `Location`
+    /// the server cannot spell, is a fault in what the server serves rather than in reaching
+    /// it. Offering a retry for those draws the button this change exists to remove, one arm
+    /// further out.
+    ///
+    /// What is left is genuinely about the attempt: a timeout, a reset, a body that stopped
+    /// early. `LikelyBlocked` counts as retryable — a rate-based block clears, and by its own
+    /// doc it is a document-fetch diagnosis that an image should not be inheriting anyway.
+    pub fn offers_retry(&self) -> bool {
+        match self {
+            Self::Fetch(e) => match e {
+                FetchError::SchemeDowngrade(_)
+                | FetchError::TooManyRedirects(_)
+                | FetchError::BadLocation(_)
+                | FetchError::RedirectWithoutLocation(_) => false,
+                FetchError::LikelyBlocked
+                | FetchError::Timeout(_)
+                | FetchError::Transport(_)
+                | FetchError::Io(_) => true,
+            },
+            Self::Decode(e) => e.offers_retry(),
+        }
+    }
+}
+
 /// Sends a failure if the job's thread unwinds. Disarmed on the normal path.
 struct ReplyGuard {
     req: ReqId,
@@ -454,4 +483,42 @@ fn load_image(
     };
     let decoded = image_decode::decode(&fetched.bytes, &fetched.partial, &limits);
     (cookies, decoded.map_err(ImageError::from))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reader draws its retry control on this, so an arm that answers wrongly is a button
+    /// that re-issues a third-party request and re-fails for as long as the page is open.
+    ///
+    /// Exhaustive on purpose: the match in `offers_retry` names every variant rather than
+    /// falling through, so a new `FetchError` fails the build there, and this says which way
+    /// the existing ones were decided.
+    #[test]
+    fn only_a_failure_about_the_attempt_offers_a_retry() {
+        let url = Url::parse("http://cdn.example.net/a.png").unwrap();
+        let refuses = [
+            FetchError::SchemeDowngrade(url.clone()),
+            FetchError::TooManyRedirects(vec![url]),
+            FetchError::BadLocation("://".to_owned()),
+            FetchError::RedirectWithoutLocation(302),
+        ];
+        for e in refuses {
+            assert!(
+                !ImageError::Fetch(e).offers_retry(),
+                "hww's own policy and a server's own fault answer the same way every time"
+            );
+        }
+        let offers = [
+            FetchError::Timeout(std::time::Duration::from_secs(30)),
+            FetchError::LikelyBlocked,
+            FetchError::Io(std::io::Error::other("connection reset")),
+        ];
+        for e in offers {
+            assert!(ImageError::Fetch(e).offers_retry());
+        }
+        // And the decode side still answers for itself.
+        assert!(!ImageError::Decode(image_decode::DecodeError::Unsupported("SVG")).offers_retry());
+    }
 }

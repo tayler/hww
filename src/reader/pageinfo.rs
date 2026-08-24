@@ -83,9 +83,10 @@ impl Row {
 /// The reader's own counters, which live under `ui/` and cannot be reached from here.
 ///
 /// Built by `ImageStore::counts`, so the field list sits next to the fields it reads. These
-/// are **cumulative for the session**, not per page: the store keeps decoded images and the
-/// hosts they came from across navigations, so a per-page number would be a different quantity
-/// than the one being counted. The rows say so rather than letting the panel imply otherwise.
+/// are **per page**: `ImageStore::clear_page` drops them when a page commits, so every row here
+/// answers the same question as the rest of the panel, how the page on screen arrived. They
+/// were once session totals and had to carry a "(this session)" qualifier to say so, which is
+/// a different quantity sitting under the same heading as the rest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Counts {
     pub images: usize,
@@ -194,7 +195,7 @@ pub fn rows(prov: &Provenance, counts: &Counts, rtl: bool) -> Vec<Row> {
                 ThirdParties,
                 "Images loaded",
                 format!(
-                    "{}, from {} (this session)",
+                    "{}, from {}",
                     counts.images,
                     plural(counts.hosts.len(), "host")
                 ),
@@ -207,10 +208,7 @@ pub fn rows(prov: &Provenance, counts: &Counts, rtl: bool) -> Vec<Row> {
             Row::new(
                 ThirdParties,
                 "Referer sent",
-                format!(
-                    "{} (this session)",
-                    plural(counts.referer_requests, "request")
-                ),
+                plural(counts.referer_requests, "request"),
             )
             .with_note(
                 "Scheme and host only, never the path, and only on images you asked for. \
@@ -331,10 +329,10 @@ mod tests {
         );
     }
 
-    /// The counters are session-cumulative (`ImageStore` keeps them across navigations), so a
-    /// panel with room for real labels must not let them read as facts about this page.
+    /// The image counters are the page's own (`ImageStore::clear_page` drops them at commit),
+    /// so the rows state them plainly instead of qualifying them out of the panel's subject.
     #[test]
-    fn the_session_counters_say_they_are_session_counters() {
+    fn the_image_counters_are_stated_as_facts_about_this_page() {
         let counts = Counts {
             images: 3,
             hosts: vec!["cdn.example.net".to_owned(), "img.example.org".to_owned()],
@@ -343,20 +341,21 @@ mod tests {
         };
         let rows = rows(&prov(), &counts, false);
         let images = find(&rows, "Images loaded").unwrap();
-        assert!(images.value.contains("this session"));
-        assert!(images.value.contains("2 hosts"));
+        assert_eq!(images.value, "3, from 2 hosts");
         assert!(images.note.as_ref().unwrap().contains("cdn.example.net"));
-        assert!(
-            find(&rows, "Referer sent")
-                .unwrap()
-                .value
-                .contains("this session")
-        );
+        assert_eq!(find(&rows, "Referer sent").unwrap().value, "2 requests");
+        for r in &rows {
+            assert!(
+                !r.value.contains("session"),
+                "session total in {:?}",
+                r.value
+            );
+        }
     }
 
     /// The strip summed page and image cookie attempts into one number; the row keeps that,
-    /// because the reader's question is "how many did this session throw away", not "which
-    /// fetch saw them".
+    /// because the reader's question is "how many did this page throw away", not "which fetch
+    /// saw them".
     #[test]
     fn cookie_attempts_sum_the_page_and_its_images() {
         let mut p = prov();
