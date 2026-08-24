@@ -42,6 +42,27 @@ impl TextOpts {
     }
 }
 
+/// Strip terminal-escape-capable bytes from text bound for a terminal.
+///
+/// Untrusted page text reaches a terminal through this renderer (`dbg`, `--why`), and HTML
+/// carries control characters straight through: a raw ESC byte, or a numeric character
+/// reference like `&#27;`, survives parsing into every text sink. On a terminal those bytes
+/// are commands, not glyphs, so a page can write the clipboard (OSC 52), spoof the screen, or
+/// set the title. Every control character except `\n` and `\t` (which are harmless, and which
+/// this renderer emits and relies on) is replaced with a space. `char::is_control` is exactly
+/// the Unicode Cc set: C0, DEL, and the C1 range some terminals read as escape equivalents.
+pub fn sanitize_for_terminal(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c == '\n' || c == '\t' || !c.is_control() {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
 pub fn to_text(doc: &Document, opts: &TextOpts) -> String {
     let mut out = String::new();
     if let Some(t) = crate::reader::title::display(doc) {
@@ -64,7 +85,9 @@ pub fn to_text(doc: &Document, opts: &TextOpts) -> String {
         .map(|(_, b)| b.clone())
         .collect();
     render_blocks(&body, opts, 0, &mut out);
-    out
+    // The renderer's own output is `\n`, `\t`, spaces, and printable sigils; everything else
+    // is untrusted page text. One wrap over the finished string covers every sink at once.
+    sanitize_for_terminal(&out)
 }
 
 fn render_blocks(blocks: &[Block], o: &TextOpts, indent: usize, out: &mut String) {
@@ -388,6 +411,36 @@ mod tests {
         assert_eq!(old_inline_text(&outer_strong, &o), "*_x_*");
         assert_eq!(inline_text(&outer_strong, &o), "_*x*_");
         assert_eq!(inline_text(&outer_emph, &o), inline_text(&outer_strong, &o));
+    }
+
+    /// Control characters in page text are terminal commands, not glyphs. A raw ESC byte and
+    /// a numeric character reference (`&#27;`) both reach the renderer; neither may survive to
+    /// stdout. `\n` and `\t` are the renderer's own and stay.
+    #[test]
+    fn control_characters_do_not_reach_the_terminal() {
+        let u = url::Url::parse("https://example.test/a").unwrap();
+        let src = "<html><head><title>T\u{1b}]0;pwned\u{7}X</title></head><body><article>\
+            <h1>Head\u{1b}[2Jline</h1>\
+            <p>Body long enough to be a paragraph, with an escape &#27;]52;c;YmFk&#7; inlined \
+            and a backspace \u{8}\u{8}here, plus more words to clear the length floor.</p>\
+            </article></body></html>";
+        let doc = crate::html::extract(src, &u);
+        let out = to_text(&doc, &TextOpts::default());
+        assert!(!out.contains('\u{1b}'), "ESC survived: {out:?}");
+        assert!(!out.contains('\u{7}'), "BEL survived: {out:?}");
+        assert!(!out.contains('\u{8}'), "backspace survived: {out:?}");
+        assert!(out.contains('\n'), "newlines must be kept");
+        // The escape byte is gone (replaced by a space); its harmless literal payload and the
+        // words around it stay, so the page still reads.
+        assert!(out.contains("Head") && out.contains("line"));
+        assert!(out.contains("Body long enough"));
+    }
+
+    #[test]
+    fn sanitize_keeps_newlines_and_tabs_and_drops_the_rest() {
+        assert_eq!(sanitize_for_terminal("a\nb\tc"), "a\nb\tc");
+        assert_eq!(sanitize_for_terminal("a\u{1b}b\u{7}c\u{7f}d"), "a b c d");
+        assert_eq!(sanitize_for_terminal("plain"), "plain");
     }
 
     #[test]
