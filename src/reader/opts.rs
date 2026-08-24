@@ -122,9 +122,12 @@ pub enum ImagePolicy {
     /// layout band rather than by the document: a gallery of two hundred pictures requests the
     /// handful near the window and the rest only as they are scrolled towards, so the request
     /// queue never grows past what is about to be looked at. Everything downstream is
-    /// unchanged — the same choke point, the same host disclosure, the same counters in the
-    /// page-info panel — so what this setting moves is who presses the button, not what the
-    /// reader admits to fetching.
+    /// unchanged — the same choke point, the same counters in the page-info panel — so what
+    /// this setting moves is who presses the button, not what the reader admits to fetching.
+    ///
+    /// It says nothing as it goes: a reader who chose "load automatically" asked not to be
+    /// interrupted per host, and the page-info panel still names every host contacted. The
+    /// remark belongs to the policies where a control names a host and the reader clicks it.
     Auto,
     /// Never offer to load an article image. The strip still says an image was there;
     /// silently dropping content is how a reader lies about a page.

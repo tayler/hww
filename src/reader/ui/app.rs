@@ -39,11 +39,13 @@
 
 use crate::ir;
 use crate::reader::autoload;
-use crate::reader::history::History;
+use crate::reader::history::{EntryId, History};
 use crate::reader::image_decode;
 use crate::reader::measure::{self, Heights};
 use crate::reader::menu::{self, Command};
-use crate::reader::notice::{self, Button, IMAGES_ARE_DECLINED, IMAGES_ARE_OFF, Notice};
+use crate::reader::notice::{
+    self, Button, IMAGES_ALL_FAILED, IMAGES_ARE_DECLINED, IMAGES_ARE_OFF, Notice,
+};
 use crate::reader::outline::{self, OutlineEntry};
 use crate::reader::pageinfo;
 use crate::reader::prefs;
@@ -251,9 +253,6 @@ pub struct ReaderApp {
     /// one refill is right and an unbounded number is a request loop. `autoload::MAX_ATTEMPTS`
     /// holds the reasoning, and `autoload::plan` the other half of the pair.
     auto_attempts: HashMap<String, u32>,
-    /// The hosts the automatic policy has already named on the page on screen, so "who is
-    /// being contacted" is answered once per host rather than once per picture.
-    auto_announced: HashSet<String>,
     /// How tall each block was the last time it was laid out, so the blocks off the window can
     /// be skipped. See `reader::measure` for why, and `ready_screen` for when it is ignored.
     heights: Heights,
@@ -356,6 +355,14 @@ pub struct ReaderApp {
     /// marks as the current section. Found in `ready_screen`, a frame late like everything the
     /// render discovers.
     top_block: Option<usize>,
+    /// Which history entry the page in the reading column belongs to, so `central` can keep
+    /// writing where it is being read.
+    ///
+    /// Not the cursor. `go_back` moves the cursor at dispatch and the outgoing page stays on
+    /// screen for the whole fetch, so through that window the visible page belongs to the entry
+    /// *ahead* of the cursor. By id rather than index, because a link followed in that window
+    /// truncates that entry away and puts the arriving page's entry at the same index.
+    shown_entry: Option<EntryId>,
 }
 
 /// Distance one wheel notch moves, in points.
@@ -451,7 +458,6 @@ impl ReaderApp {
             images: ImageStore::default(),
             image_blocks: HashMap::new(),
             auto_attempts: HashMap::new(),
-            auto_announced: HashSet::new(),
             heights: Heights::default(),
             collapsed: HashSet::new(),
             collapsed_changes: 0,
@@ -480,6 +486,7 @@ impl ReaderApp {
             focus_url_bar: false,
             focus_find: false,
             top_block: None,
+            shown_entry: None,
         };
         match launch.start {
             Some(url) => app.navigate(url, app.opts, true),
@@ -672,16 +679,13 @@ impl ReaderApp {
         if !self.settings.read.images.loads_automatically() {
             return;
         }
-        let plan = autoload::plan(
+        let srcs = autoload::plan(
             base,
             in_band,
             &self.auto_attempts,
-            &self.auto_announced,
             self.images.pending(),
             // Not only "the store has an answer": also "this address will never be
-            // requested". `plan` drops both before it names a host, so a page of declined
-            // pictures no longer announces a CDN nothing then contacts. The test that this
-            // reaches the *hosts* and not only the srcs lives in `autoload`.
+            // requested", so a declined picture is not requested and failed once per frame.
             &|src| {
                 self.images.state(src).is_some()
                     || base
@@ -689,17 +693,8 @@ impl ReaderApp {
                         .is_ok_and(|u| image_decode::declined_by_url(&u).is_some())
             },
         );
-        if plan.is_empty() {
-            return;
-        }
-        // Ahead of the requests. They are queued jobs and nothing has been drawn, so the
-        // disclosure still precedes the bytes, which is the same order `load_all_images` keeps.
-        if !plan.hosts.is_empty() {
-            self.flash(notice::auto_images_from(&plan.hosts));
-            self.auto_announced.extend(plan.hosts);
-        }
         let max_width = self.column_texture_width(ctx);
-        for src in plan.srcs {
+        for src in srcs {
             // Counted whether or not the request survives: `request_image` declines a `src`
             // already in flight, and an entry that never resolves must not be planned again on
             // the next frame. `Msg::ImageDropped` is the one thing that takes a count back.
@@ -825,6 +820,11 @@ impl ReaderApp {
                     .join(s)
                     .is_ok_and(|u| image_decode::declined_by_url(&u).is_some())
             })
+            // And the same argument one step later. `request_image` returns without asking for
+            // a picture that has already failed permanently, so counting one here would put a
+            // host in the remark that this press will not contact — "loading 3 image(s) from
+            // …" for three addresses nothing re-requests.
+            .filter(|s| !self.images.refuses_retry(s))
             .cloned()
             .collect();
         let mut hosts: Vec<String> = srcs
@@ -837,8 +837,13 @@ impl ReaderApp {
         if srcs.is_empty() {
             // Which of the two is true matters: a page whose pictures were all declined has
             // pictures, and saying it has none describes a page the reader is not looking at.
+            // Which of the three is true matters, and they are different pages: one with no
+            // pictures, one whose pictures hww will not open, one whose pictures were asked
+            // for and refused.
             self.flash(if all.is_empty() {
                 "no images on this page".to_owned()
+            } else if all.iter().any(|s| self.images.refuses_retry(s)) {
+                IMAGES_ALL_FAILED.to_owned()
             } else {
                 IMAGES_ARE_DECLINED.to_owned()
             });
@@ -1010,7 +1015,17 @@ impl ReaderApp {
         // installed, which is the last moment the document is not behind `self.page`.
         self.image_blocks = image_blocks(&page.loaded.doc);
         self.page = Page::Ready(Box::new(page));
-        if let Some(f) = fragment {
+        // Where this page was left, if it is a page the reader has been on: Back, Forward and
+        // `r` all arrive here with the cursor on an entry that has been read before, and
+        // `commit` has just reset the column to the top. A link followed, or a URL typed, mints
+        // an entry at zero and takes the fragment arm instead.
+        self.shown_entry = self.history.current_id();
+        let restore = self
+            .shown_entry
+            .map_or(0.0, |id| self.history.offset_of(id));
+        if restore > 0.0 {
+            self.scroll_offset = Some(restore);
+        } else if let Some(f) = fragment {
             self.jump_to_fragment(&f);
         }
     }
@@ -1067,12 +1082,11 @@ impl ReaderApp {
         // page-info panel answers how the page on screen arrived, not what the session has
         // done since it started.
         self.images.clear_page();
-        // All three are about the page being replaced. `auto_announced` in particular: naming
-        // a host is a statement about *this* page, so carrying it forward would let a second
-        // page contact a host the reader was told about once, on an article they have left.
+        // Both are about the page being replaced: the blocks index and the attempt counts
+        // describe the document that is going away, and an attempt spent on it must not count
+        // against the same `src` on the page arriving.
         self.image_blocks.clear();
         self.auto_attempts.clear();
-        self.auto_announced.clear();
         self.heights.clear();
         self.collapsed.clear();
         self.find_current = 0;
@@ -1081,6 +1095,9 @@ impl ReaderApp {
         self.pending_href = None;
         self.chrome.dismissed.clear();
         self.top_block = None;
+        // The arriving page has no entry of its own until `settle` names one, and a failure
+        // never gets one: an error screen is not a position worth remembering.
+        self.shown_entry = None;
         self.scroll_offset = Some(0.0);
         // The other two scroll one-shots, or a `Shift+G` pressed on the very frame a page
         // commits is applied against the *outgoing* page's `max_scroll` and opens the new one
@@ -2353,6 +2370,14 @@ impl ReaderApp {
                 });
                 self.viewport_height = out.inner_rect.height().max(1.0);
                 self.max_scroll = (out.content_size.y - out.inner_rect.height()).max(0.0);
+                // Every frame, not once at dispatch: the outgoing page stays visible and
+                // scrollable for the length of a fetch, so where it was left is not known until
+                // the last frame it is on screen. `out.state` is what the scroll area settled
+                // on after clamping, which is where the page is rather than where it was asked
+                // to go.
+                if let Some(id) = self.shown_entry {
+                    self.history.set_offset(id, out.state.offset.y);
+                }
             });
     }
 

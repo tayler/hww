@@ -205,7 +205,7 @@ that turns a row into a request, and it reports the rewrite and the search befor
 
 Keyboard first, but nothing is keyboard-only: `?` lists the keys, a menu bar across the top
 carries every command with the key that already does it, and the status strip along the bottom
-carries back/forward, a clickable URL, and a circled `i` so a mouse alone can navigate. That
+carries back/forward, a clickable URL, and an italic `i` so a mouse alone can navigate. That
 strip never hides: the URL bar, outline, find bar, menus, and help all dismiss on `Esc`, but a
 rewrite notice has to be on screen *before* the request goes out, so the strip stays. The bar
 itself can go (`View` ▸ `Menu bar`), and `F10` brings it back and focuses it.
@@ -217,7 +217,7 @@ uses for it. A 4xx body shown anyway, an extraction that came back thin, a body 
 truncated, a rewrite rule applied or landed on the wrong host are all bars; a failed navigation
 is an error page; and none of them is ever dressed as prose.
 
-The rest is accounting for the page on screen, and it lives behind the circled `i` (or `p`):
+The rest is accounting for the page on screen, and it lives behind the italic `i` (or `p`):
 encoding, bytes downloaded against characters extracted, the redirect chain, cookies discarded,
 images loaded and their hosts. Facts worth being able to ask for, not worth a permanent ribbon of six-point
 text beside the URL.
@@ -232,7 +232,7 @@ default load only on an explicit click. They are never loaded on hover or in adv
 the page favicon beside the masthead eyebrow, which is fetched as soon as the document names
 one. Four policies. *Ask first* is the default and offers to load each picture; *Load
 automatically* fetches the pictures near what you are reading and roughly a screenful ahead,
-naming each new host as it goes and leaving the rest of the page until you scroll towards it;
+quietly, leaving the rest of the page until you scroll towards it;
 *Article images off* marks where each one was and offers nothing; *No image requests* fetches
 nothing at all, the site icon included, which is what separates it from the one above. Each
 load is counted alongside cookie attempts in the page-info panel, and nothing is written to

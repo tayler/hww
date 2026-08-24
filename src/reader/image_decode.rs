@@ -263,42 +263,53 @@ fn xml_root_is_svg(bytes: &[u8]) -> bool {
     // fail here for the cost of a scan over leading whitespace.
     if !bytes
         .iter()
-        .take(PROLOG_SCAN)
         .find(|b| !b.is_ascii_whitespace())
         .is_some_and(|b| *b == b'<' || *b == 0xef)
     {
         return false;
     }
-    let head = &bytes[..bytes.len().min(PROLOG_SCAN)];
     // Lossy is safe here: this only ever asks whether ASCII markup is present, and a
     // replacement char matches none of it.
-    let head = String::from_utf8_lossy(head);
-    let mut s = head.strip_prefix('\u{feff}').unwrap_or(&head);
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(PROLOG_SCAN)]);
+    match walk_prolog(&head) {
+        Some(answer) => answer,
+        // The prolog did not finish inside the window: a comment or a DOCTYPE subset straddles
+        // the edge, so its terminator is simply not in `head`. Answering `false` here is the
+        // old 1024-byte failure moved out to 64 KiB rather than removed — it reports a long
+        // SVG as "not a recognised image format", which is the message this function exists to
+        // prevent. Widen once. Only a file that is XML-ish *and* has a prolog past the window
+        // ever pays for the whole-buffer conversion; every raster is long gone by here.
+        None if bytes.len() > PROLOG_SCAN => {
+            walk_prolog(&String::from_utf8_lossy(bytes)).unwrap_or(false)
+        }
+        // Unterminated with nothing left to read. The document has no root element, so it is
+        // not an SVG and not anything else either; the raster decoders get their say next.
+        None => false,
+    }
+}
+
+/// The prolog walk itself. `Some(is_svg)` when it reached the first element, `None` when a
+/// construct ran off the end of what it was given — which is a question about the window, not
+/// about the file, and is why this is an `Option` rather than a `bool`.
+fn walk_prolog(head: &str) -> Option<bool> {
+    let mut s = head.strip_prefix('\u{feff}').unwrap_or(head);
     loop {
         s = s.trim_start();
         let rest = if let Some(r) = s.strip_prefix("<!--") {
-            match r.find("-->") {
-                Some(i) => &r[i + 3..],
-                None => return false,
-            }
+            &r[r.find("-->")? + 3..]
         } else if let Some(r) = s.strip_prefix("<?") {
-            match r.find("?>") {
-                Some(i) => &r[i + 2..],
-                None => return false,
-            }
+            &r[r.find("?>")? + 2..]
         } else if let Some(r) = s.strip_prefix("<!") {
             // A DOCTYPE may carry an internal subset, whose own `>`s must not end it.
-            match skip_declaration(r) {
-                Some(r) => r,
-                None => return false,
-            }
+            skip_declaration(r)?
         } else {
             // The first thing that is not prolog. Either it opens the root element or this is
             // not XML at all.
-            return s
-                .strip_prefix('<')
-                .map(element_name)
-                .is_some_and(|name| name.eq_ignore_ascii_case("svg"));
+            return Some(
+                s.strip_prefix('<')
+                    .map(element_name)
+                    .is_some_and(|name| name.eq_ignore_ascii_case("svg")),
+            );
         };
         s = rest;
     }
@@ -348,12 +359,49 @@ fn element_name(s: &str) -> &str {
 /// unseen, and a declined format behind an extensionless address still costs one request
 /// before the bytes are sniffed.
 pub fn declined_by_url(url: &Url) -> Option<&'static str> {
-    let last = url.path_segments()?.next_back()?;
+    // Decoded first. `path_segments` yields the segment as it appears in the URL, so
+    // `logo%2Esvg` and `logo%2Egz` carry no `.` at all and would walk straight past this
+    // filter — fetched in full, and their host named to the reader — to be refused by the byte
+    // sniff afterwards, which is the whole cost this function exists to avoid.
+    let last = percent_decoded(url.path_segments()?.next_back()?);
     let ext = last.rsplit_once('.')?.1.to_ascii_lowercase();
     DECLINED
         .iter()
         .find(|(_, suffixes)| suffixes.contains(&ext.as_str()))
         .map(|(name, _)| *name)
+}
+
+/// `%XX` back to bytes, then lossily to text.
+///
+/// Enough for the one question asked of it — where the last `.` is and what follows it — and
+/// small enough not to be worth a dependency. A stray `%` or a bad pair is left as written,
+/// which is what a browser does with one and keeps a malformed address from losing its
+/// extension.
+fn percent_decoded(segment: &str) -> String {
+    if !segment.contains('%') {
+        return segment.to_owned();
+    }
+    let b = segment.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = (i + 2 < b.len())
+            .then(|| std::str::from_utf8(&b[i + 1..i + 3]).ok())
+            .flatten()
+            .filter(|_| b[i] == b'%')
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match hex {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn alloc_limits(limits: &DecodeLimits) -> image::Limits {
@@ -536,6 +584,29 @@ mod tests {
         assert_eq!(declined("https://e.org/"), None);
     }
 
+    /// A segment is served percent-encoded, so the `.` an extension hangs off need not be a
+    /// literal one. Missed, the address is fetched in full and its host named to the reader
+    /// before the byte sniff refuses it.
+    #[test]
+    fn an_encoded_extension_is_still_an_extension() {
+        let declined = |u: &str| declined_by_url(&Url::parse(u).unwrap());
+        assert_eq!(declined("https://e.org/logo%2Esvg"), Some("SVG"));
+        assert_eq!(declined("https://e.org/deep/a%2Eavif?v=2"), Some("AVIF"));
+        assert_eq!(declined("https://e.org/logo.sv%67"), Some("SVG"));
+        // And the decoding must not invent an extension where the address has none.
+        assert_eq!(declined("https://e.org/100%25"), None);
+        assert_eq!(declined("https://e.org/photo%2Epng"), None);
+    }
+
+    #[test]
+    fn a_malformed_escape_keeps_the_rest_of_the_segment() {
+        assert_eq!(percent_decoded("a%2Esvg"), "a.svg");
+        assert_eq!(percent_decoded("plain.svg"), "plain.svg");
+        assert_eq!(percent_decoded("trailing%"), "trailing%");
+        assert_eq!(percent_decoded("bad%zzpair.svg"), "bad%zzpair.svg");
+        assert_eq!(percent_decoded("cut%2"), "cut%2");
+    }
+
     /// The failure the 1024-byte window produced: a real SVG reported as unrecognisable.
     #[test]
     fn an_svg_behind_a_long_prolog_is_still_named_svg() {
@@ -552,6 +623,35 @@ mod tests {
             decode(&doc, &Truncation::Complete, &limits(4096)),
             Err(DecodeError::Unsupported("SVG"))
         ));
+    }
+
+    /// The same failure the window itself produces one size up: a construct whose terminator
+    /// sits past `PROLOG_SCAN` is unterminated only from where the walk was looking.
+    #[test]
+    fn a_prolog_longer_than_the_scan_window_is_still_read_whole() {
+        let mut doc = b"<!-- ".to_vec();
+        doc.extend_from_slice(&b"editor metadata ".repeat(6000));
+        doc.extend_from_slice(b" -->\n");
+        assert!(
+            doc.len() > PROLOG_SCAN,
+            "the fixture must straddle the window"
+        );
+        doc.extend_from_slice(br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#);
+        assert!(xml_root_is_svg(&doc));
+        assert!(matches!(
+            decode(&doc, &Truncation::Complete, &limits(4096)),
+            Err(DecodeError::Unsupported("SVG"))
+        ));
+    }
+
+    /// Widening must not turn every long text file into an SVG. A prolog that never ends has
+    /// no root element, and the raster decoders get their say.
+    #[test]
+    fn a_prolog_that_never_ends_is_not_an_svg() {
+        let mut doc = b"<!-- ".to_vec();
+        doc.extend_from_slice(&b"unterminated ".repeat(6000));
+        assert!(doc.len() > PROLOG_SCAN);
+        assert!(!xml_root_is_svg(&doc));
     }
 
     /// A DOCTYPE's internal subset carries `>` of its own, which must not end it.

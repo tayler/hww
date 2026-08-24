@@ -183,6 +183,11 @@ pub enum Msg {
 pub enum ImageError {
     #[error("{0}")]
     Fetch(#[from] FetchError),
+    /// The request arrived and the server said no. Its own arm rather than a `FetchError`,
+    /// because the document path shows a 4xx body on purpose (`--why` and the "shown anyway"
+    /// caution both depend on it) and only an image is entitled to refuse one.
+    #[error("the server answered {0}")]
+    Status(u16),
     #[error("{0}")]
     Decode(#[from] image_decode::DecodeError),
 }
@@ -211,6 +216,10 @@ impl ImageError {
                 | FetchError::Transport(_)
                 | FetchError::Io(_) => true,
             },
+            // Asking again can only end differently if the server was answering about *now*.
+            // A 429 lifts and a 5xx passes; every other refusal is about the address, and the
+            // address is not going to change while the page is open.
+            Self::Status(s) => *s == 429 || (500..600).contains(s),
             Self::Decode(e) => e.offers_retry(),
         }
     }
@@ -476,6 +485,12 @@ fn load_image(
         Err(e) => return (0, Err(e.into())),
     };
     let cookies = fetched.cookie_attempts;
+    // Before the decoder, and before the lock it would queue behind. An error body is not a
+    // picture in any format, so letting it through would spend a decode slot to arrive at
+    // `UnknownFormat` — the one classification that promises a retry is worth pressing.
+    if !(200..300).contains(&fetched.status) {
+        return (cookies, Err(ImageError::Status(fetched.status)));
+    }
     let _serialized = DECODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let limits = DecodeLimits {
         max_width,
@@ -520,5 +535,24 @@ mod tests {
         }
         // And the decode side still answers for itself.
         assert!(!ImageError::Decode(image_decode::DecodeError::Unsupported("SVG")).offers_retry());
+    }
+
+    /// A dead image URL is the commonest permanent failure there is, and before `Status` had
+    /// an arm the error body reached the decoder and came back `UnknownFormat`, which offers a
+    /// retry. The button re-fetched and re-failed for as long as the page was open.
+    #[test]
+    fn a_refused_status_offers_no_retry_and_a_busy_one_does() {
+        for s in [400, 401, 403, 404, 410, 451] {
+            assert!(
+                !ImageError::Status(s).offers_retry(),
+                "{s} is about the address, and the address is not going to change"
+            );
+        }
+        for s in [429, 500, 502, 503] {
+            assert!(
+                ImageError::Status(s).offers_retry(),
+                "{s} is about right now"
+            );
+        }
     }
 }

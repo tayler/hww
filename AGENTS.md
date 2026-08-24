@@ -77,7 +77,8 @@ exceptions.
 Reader-facing wording stays outside `ui/` so the default job tests it: page remarks in
 `reader/notice.rs`, menu and help rows in `reader/menu.rs`, setting labels and notes in
 `reader/prefs.rs`. Use only glyphs the embedded faces carry and check `fonts/`, not the desktop
-font. `ⓘ`, `⏵`, `▸`, `☰`, and `⚙` are absent; they are hand-painted or substituted.
+font. `ⓘ`, `⏵`, `▸`, `☰`, and `⚙` are absent; they are hand-painted or substituted. The page-info
+glyph is a painted italic `i` rather than `ⓘ` for that reason and one more; see `pageinfo_ui`.
 
 Every setting is reachable from the panel. A field added to `Settings` or `ReadOpts` must also be
 added to `prefs::fields()` and to both exhaustive matches in `prefs::get` and `prefs::set`;
