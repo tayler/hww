@@ -13,7 +13,6 @@ use crate::reader::inline::{Run, Style, flatten};
 
 pub struct TextOpts {
     pub width: usize,
-    pub show_links: bool,
     /// Levels of reply indent before nesting stops accumulating.
     ///
     /// `Comment::depth` is page-controlled (`thread::depth_of` parses an `indent` attribute
@@ -29,7 +28,6 @@ impl Default for TextOpts {
     fn default() -> Self {
         Self {
             width: 78,
-            show_links: false,
             max_thread_indent: 8,
         }
     }
@@ -100,11 +98,11 @@ fn render_block(b: &Block, o: &TextOpts, indent: usize, out: &mut String) {
     let pad = " ".repeat(indent);
     match b {
         Block::Heading { level, inlines } => {
-            let t = inline_text(inlines, o);
+            let t = inline_text(inlines);
             out.push_str(&format!("\n{pad}{} {t}\n\n", "#".repeat(*level as usize)));
         }
         Block::Paragraph(inlines) => {
-            let t = inline_text(inlines, o);
+            let t = inline_text(inlines);
             if !t.trim().is_empty() {
                 out.push_str(&wrap(&t, o.width.saturating_sub(indent), &pad));
                 out.push('\n');
@@ -146,10 +144,7 @@ fn render_block(b: &Block, o: &TextOpts, indent: usize, out: &mut String) {
         }
         Block::Figure { image, caption } => {
             let alt = image.alt.as_deref().unwrap_or("image");
-            let cap = caption
-                .as_ref()
-                .map(|c| inline_text(c, o))
-                .unwrap_or_default();
+            let cap = caption.as_ref().map(|c| inline_text(c)).unwrap_or_default();
             out.push_str(&format!(
                 "{pad}[{alt}]{}\n\n",
                 if cap.is_empty() {
@@ -161,11 +156,11 @@ fn render_block(b: &Block, o: &TextOpts, indent: usize, out: &mut String) {
         }
         Block::Table { headers, rows } => {
             if !headers.is_empty() {
-                let h: Vec<String> = headers.iter().map(|c| inline_text(c, o)).collect();
+                let h: Vec<String> = headers.iter().map(|c| inline_text(c)).collect();
                 out.push_str(&format!("{pad}{}\n", h.join(" | ")));
             }
             for r in rows {
-                let c: Vec<String> = r.iter().map(|c| inline_text(c, o)).collect();
+                let c: Vec<String> = r.iter().map(|c| inline_text(c)).collect();
                 out.push_str(&format!("{pad}{}\n", c.join(" | ")));
             }
             out.push('\n');
@@ -183,11 +178,8 @@ fn render_block(b: &Block, o: &TextOpts, indent: usize, out: &mut String) {
         }
         Block::Entries(entries) => {
             for e in entries {
-                let title = inline_text(&e.title, o);
-                match (&e.href, o.show_links) {
-                    (Some(h), true) => out.push_str(&format!("{pad}* {title} <{h}>\n")),
-                    _ => out.push_str(&format!("{pad}* {title}\n")),
-                }
+                let title = inline_text(&e.title);
+                out.push_str(&format!("{pad}* {title}\n"));
                 let mut buf = String::new();
                 render_blocks(&e.summary, o, 0, &mut buf);
                 for l in buf.trim().lines() {
@@ -202,26 +194,16 @@ fn render_block(b: &Block, o: &TextOpts, indent: usize, out: &mut String) {
     }
 }
 
-fn inline_text(inlines: &[Inline], o: &TextOpts) -> String {
-    runs_text(&flatten(inlines), o)
+fn inline_text(inlines: &[Inline]) -> String {
+    runs_text(&flatten(inlines))
 }
 
-fn runs_text(runs: &[Run], o: &TextOpts) -> String {
+fn runs_text(runs: &[Run]) -> String {
     let mut s = String::new();
     for r in runs {
         match r {
             Run::Text { text, style } => s.push_str(&marked(text, *style)),
-            Run::Link { href, runs } => {
-                let t = runs_text(runs, o);
-                if o.show_links {
-                    // The href goes where the anchor's own trailing space was, so that space
-                    // has to come back out the other side: without it `closure </a>Updated`
-                    // renders as `closure <https://...>Updated`.
-                    s.push_str(&link_text(&t, href));
-                } else {
-                    s.push_str(&t)
-                }
-            }
+            Run::Link { runs, .. } => s.push_str(&runs_text(runs)),
             Run::Image(img) => s.push_str(&format!("[{}]", img.alt.as_deref().unwrap_or("image"))),
             Run::Break => s.push('\n'),
         }
@@ -254,15 +236,6 @@ fn marked(text: &str, style: Style) -> String {
 const MIN_WRAP: usize = 20;
 
 /// `anchor <href>`, keeping whatever word boundary the anchor's own text carried.
-fn link_text(t: &str, href: &str) -> String {
-    let tail = if t.ends_with(char::is_whitespace) {
-        " "
-    } else {
-        ""
-    };
-    format!("{} <{href}>{tail}", t.trim_end())
-}
-
 fn wrap(text: &str, width: usize, pad: &str) -> String {
     let width = width.max(MIN_WRAP);
     let mut out = String::new();
@@ -299,22 +272,15 @@ mod tests {
     /// This is the whole safety net for building the text renderer on top of `flatten`: the
     /// rewrite is only sound if it produces the same bytes, and the only honest way to check
     /// that is to run both.
-    fn old_inline_text(inlines: &[Inline], o: &TextOpts) -> String {
+    fn old_inline_text(inlines: &[Inline]) -> String {
         let mut s = String::new();
         for i in inlines {
             match i {
                 Inline::Text(t) => s.push_str(t),
                 Inline::Code(t) => s.push_str(&format!("`{t}`")),
-                Inline::Emph(v) => s.push_str(&format!("_{}_", old_inline_text(v, o))),
-                Inline::Strong(v) => s.push_str(&format!("*{}*", old_inline_text(v, o))),
-                Inline::Link { href, inlines } => {
-                    let t = old_inline_text(inlines, o);
-                    if o.show_links {
-                        s.push_str(&link_text(&t, href));
-                    } else {
-                        s.push_str(&t)
-                    }
-                }
+                Inline::Emph(v) => s.push_str(&format!("_{}_", old_inline_text(v))),
+                Inline::Strong(v) => s.push_str(&format!("*{}*", old_inline_text(v))),
+                Inline::Link { inlines, .. } => s.push_str(&old_inline_text(inlines)),
                 Inline::Image(img) => {
                     s.push_str(&format!("[{}]", img.alt.as_deref().unwrap_or("image")))
                 }
@@ -380,37 +346,29 @@ mod tests {
                 t("Updated"),
             ],
         ];
-        for show_links in [false, true] {
-            let o = TextOpts {
-                show_links,
-                ..TextOpts::default()
-            };
-            for case in &cases {
-                assert_eq!(
-                    inline_text(case, &o),
-                    old_inline_text(case, &o),
-                    "diverged on {case:?} (show_links={show_links})"
-                );
-            }
+        for case in &cases {
+            assert_eq!(
+                inline_text(case),
+                old_inline_text(case),
+                "diverged on {case:?}"
+            );
         }
     }
 
     /// The two documented normalizations, asserted rather than left as a surprise.
     #[test]
     fn the_only_divergences_are_the_documented_ones() {
-        let o = TextOpts::default();
-
         // 1. Adjacent equal-styled segments merge: same words, fewer sigils.
         let adjacent = vec![Inline::Emph(vec![t("a")]), Inline::Emph(vec![t("b")])];
-        assert_eq!(old_inline_text(&adjacent, &o), "_a__b_");
-        assert_eq!(inline_text(&adjacent, &o), "_ab_");
+        assert_eq!(old_inline_text(&adjacent), "_a__b_");
+        assert_eq!(inline_text(&adjacent), "_ab_");
 
         // 2. Emphasis nesting order is a set, so both orders render the same.
         let outer_strong = vec![Inline::Strong(vec![Inline::Emph(vec![t("x")])])];
         let outer_emph = vec![Inline::Emph(vec![Inline::Strong(vec![t("x")])])];
-        assert_eq!(old_inline_text(&outer_strong, &o), "*_x_*");
-        assert_eq!(inline_text(&outer_strong, &o), "_*x*_");
-        assert_eq!(inline_text(&outer_emph, &o), inline_text(&outer_strong, &o));
+        assert_eq!(old_inline_text(&outer_strong), "*_x_*");
+        assert_eq!(inline_text(&outer_strong), "_*x*_");
+        assert_eq!(inline_text(&outer_emph), inline_text(&outer_strong));
     }
 
     /// Control characters in page text are terminal commands, not glyphs. A raw ESC byte and
@@ -551,13 +509,5 @@ mod tests {
             plain,
             "* A headline of some length\n  The dek.\n  2 hours ago\n\n"
         );
-        let linked = to_text(
-            &doc,
-            &TextOpts {
-                show_links: true,
-                ..TextOpts::default()
-            },
-        );
-        assert!(linked.starts_with("* A headline of some length <https://example.test/s>\n"));
     }
 }

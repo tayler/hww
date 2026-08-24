@@ -985,9 +985,15 @@ impl WsSummary {
     }
 
     fn text(t: &str) -> Self {
+        let mut nonws = 0;
+        let mut words = 0;
+        for w in t.split_whitespace() {
+            nonws += w.len();
+            words += 1;
+        }
         Self {
-            nonws: t.split_whitespace().map(str::len).sum(),
-            words: t.split_whitespace().count(),
+            nonws,
+            words,
             first_is_word: t.chars().next().is_some_and(|c| !c.is_whitespace()),
             last_is_word: t.chars().next_back().is_some_and(|c| !c.is_whitespace()),
             nonempty: !t.is_empty(),

@@ -89,7 +89,7 @@ fn main() -> eframe::Result {
                 );
             }
             Err(e) => {
-                eprintln!("{e}");
+                eprintln!("{}", hww::render::sanitize_for_terminal(&e.to_string()));
                 std::process::exit(1);
             }
         }
