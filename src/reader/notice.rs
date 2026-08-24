@@ -102,6 +102,25 @@ pub fn auto_images_from(hosts: &[String]) -> String {
     format!("loading images from {}", hosts.join(", "))
 }
 
+/// What the URL bar says when it is empty.
+///
+/// One line where there used to be a label and a hint. `https://…` described only half of what
+/// Enter accepts now that words are a search, and a "URL" label in front of the field
+/// contradicted the other half; the field is wide enough to say both itself. The wording is
+/// Chrome's, deliberately: most readers have read it already, and a bar that behaves like every
+/// other bar should not be asking them to learn a new phrasing for it.
+pub const URL_BAR_HINT: &str = "Search or type a URL";
+
+/// What a bare reload turns off, named after `Shift+R` has done it.
+///
+/// Three tables, in the order `session::load` consults them, because a reader diagnosing a page
+/// needs to know which of them was in play. Search joined the list when result pages became
+/// readable: `LoadOptions::BARE` is the documented way to see the markup an engine actually
+/// sent, so a message that named only two would leave the reader wondering why the results
+/// stopped being results. `menu::HELP` says the same three; `the_bare_reload_says_the_same_thing_twice`
+/// holds them together.
+pub const RELOADED_BARE: &str = "reloaded bare: no rewrite rule, no site profile, no search shape";
+
 /// How long a transient status stays up: "Copied URL", "loading 2 images from …", "no link
 /// focused". The Material range is four to ten seconds; six, because the one message in the set
 /// that matters is the disclosure of which hosts `I` is about to contact, and a reader looking
@@ -147,6 +166,9 @@ impl Severity {
 pub enum Button {
     Retry,
     RetryWithoutRewrite,
+    /// Open the settings panel. On a search that was refused or came back empty, changing the
+    /// engine is the remedy, and it is two keystrokes away from a page that cannot say so.
+    OpenSettings,
     CopyUrl,
 }
 
@@ -157,6 +179,7 @@ impl Button {
         match self {
             Button::Retry => "Reload",
             Button::RetryWithoutRewrite => "Reload without rewrite",
+            Button::OpenSettings => "Choose another engine",
             Button::CopyUrl => "Copy URL",
         }
     }
@@ -418,6 +441,28 @@ pub fn failure(error: &LoadError, url: &Url) -> Notice {
                 &[Button::Retry, Button::CopyUrl],
                 "BadLocation",
             ),
+            // Answered promptly, and not with results: a puzzle, or a countdown. Saying "did
+            // not answer" here would be the confident wrong diagnosis this function exists to
+            // avoid, and it would send the reader to reload, which makes a rate limit worse.
+            LoadError::SearchBlocked { engine } => (
+                "The search did not run.",
+                format!(
+                    "{engine} replied with a check or a wait rather than results, which usually \
+                     follows several searches in quick succession. hww cannot answer either \
+                     one: there is no JavaScript here to run it and no cookie to remember it. \
+                     Waiting a moment often clears it, and another engine clears it now."
+                ),
+                &[Button::OpenSettings, Button::Retry, Button::CopyUrl],
+                "SearchBlocked",
+            ),
+            // Not a failure of anything. The reading column carries page content only, so the
+            // absence of content has to be said here rather than drawn as a page.
+            LoadError::SearchEmpty { engine, terms } => (
+                "No results.",
+                format!("{engine} found nothing for {terms}."),
+                &[Button::OpenSettings, Button::CopyUrl],
+                "SearchEmpty",
+            ),
             LoadError::NotWebPage { content_type } => (
                 "Not a web page.",
                 format!("The server sent {content_type}, which hww has no reader for."),
@@ -451,7 +496,7 @@ pub fn failure(error: &LoadError, url: &Url) -> Notice {
 /// The idle screen: the one screen where the reader is the page.
 ///
 /// A wordmark, one line of what this is, and the two keys that matter, each with its meaning.
-/// The waveform that sits over the wordmark is paint, not wording, so it lives in
+/// The waveform that sits beside the wordmark is paint, not wording, so it lives in
 /// `ui::notice_ui` with the rest of how this screen is drawn. Not a notice: nothing has
 /// happened yet, so there is nothing to report, and a Quiet band that said "press Ctrl+L" was
 /// the reader describing its own chrome in the column. The URL bar is open and focused over
@@ -468,7 +513,10 @@ pub fn idle() -> Splash {
     Splash {
         wordmark: "hww",
         tagline: "A new browser for the human-wide web.",
-        keys: &[("Ctrl+L", "Open a URL"), ("?", "Keyboard shortcuts")],
+        keys: &[
+            ("Ctrl+L", "Search or open a URL"),
+            ("?", "Keyboard shortcuts"),
+        ],
     }
 }
 
@@ -604,6 +652,11 @@ mod tests {
             LoadError::Fetch(FetchError::Io(std::io::Error::other("boom"))),
             LoadError::NotWebPage {
                 content_type: "application/pdf".to_owned(),
+            },
+            LoadError::SearchBlocked { engine: "Mojeek" },
+            LoadError::SearchEmpty {
+                engine: "Mojeek",
+                terms: "lorem ipsum".to_owned(),
             },
         ]
         .iter()

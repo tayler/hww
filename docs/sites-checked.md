@@ -51,6 +51,7 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | france24.com | 2026-08-22 | front | 403 |
 | ft.com | 2026-08-22 | front | front read; no article picked |
 | g1.globo.com | 2026-08-22 | front, article | clean |
+| html.duckduckgo.com | 2026-08-24 | search | results read; 202 + CAPTCHA after ~4 rapid queries; default engine |
 | huffpost.com | 2026-08-22 | front, section, article | Outbrain row, fixed generically |
 | independent.co.uk | 2026-08-22 | front, article | profile: strip commenting-forum pitch |
 | irishtimes.com | 2026-08-22 | front, section, article | clean |
@@ -64,6 +65,7 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | medium.com | 2026-08-22 | front | front gave the picker no article; not read |
 | mg.co.za | 2026-08-22 | front, article | clean |
 | milenio.com | 2026-08-22 | front, section, article | clean |
+| mojeek.com | 2026-08-24 | search | results read; no challenge across repeats |
 | msnbc.com | 2026-08-22 | front, section, article | clean |
 | nation.africa | 2026-08-22 | front, section, article | article 403 (Cloudflare) |
 | nationalreview.com | 2026-08-22 | front | front gave the picker no article; not read |
@@ -78,6 +80,7 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | npr.org | 2026-08-22 | front, section, article | clean |
 | nypost.com | 2026-08-22 | front, section, article | Google preferred-sources box, fixed generically |
 | nytimes.com | 2026-08-22 | front, section, article | front reads; articles 403 (JS gate) |
+| old-search.marginalia.nu | 2026-08-24 | search | results read; 200 countdown page when rate-limited |
 | on.substack.com | 2026-08-22 | front | front gave the picker no article; not read |
 | people.com | 2026-08-22 | front, section, article | rate-limits after a few requests (403) |
 | politico.com | 2026-08-22 | front | front gave the picker no article; not read |
@@ -90,6 +93,7 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | reuters.com | 2026-08-22 | front | 401 |
 | sciencedaily.com | 2026-08-22 | front, section, article | "related stories" thread false positive, fixed generically |
 | scmp.com | 2026-08-22 | front, section, article | profile: strip TTS speed menu |
+| search.brave.com | 2026-08-24 | search | results read via data- attributes; class names carry a build hash |
 | slate.com | 2026-08-22 | front, article | clean |
 | spiegel.de | 2026-08-22 | front, section, article | clean |
 | straitstimes.com | 2026-08-22 | front, section, article | profile: strip newsletter line |

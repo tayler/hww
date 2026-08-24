@@ -8,6 +8,7 @@
 //! doctrine and is deliberately not started; this file holds preferences and nothing else.
 
 use crate::reader::opts::ReadOpts;
+use crate::sites::EngineId;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -32,6 +33,12 @@ pub struct Settings {
     /// which is 1.5 lines of the default body and lands short of a step; three is the browser
     /// convention and is what `j`/`k` already moved.
     pub scroll_lines: f32,
+    /// Which engine the URL bar searches when what was typed is not an address.
+    ///
+    /// A hostname never reaches this struct: the id names a row in `sites::ENGINES`, which
+    /// stays the only place in the crate that spells a host out.
+    #[serde(deserialize_with = "engine_or_default")]
+    pub search_engine: crate::sites::EngineId,
     /// Whether the menu bar is drawn.
     ///
     /// The one setting here that exists because of a chrome decision rather than a reading one.
@@ -41,6 +48,31 @@ pub struct Settings {
     pub show_menu_bar: bool,
 }
 
+/// A `search_engine` this binary does not know falls back to the default, for exactly the
+/// reason `opts::theme_or_system` and `opts::images_or_default` exist.
+///
+/// `Settings` is `#[serde(default)]`, which covers a *missing* field and not an unparseable
+/// one. Engines are the field here most likely to gain a value: the table grows whenever an
+/// engine is measured to answer a plain client. Without this, a binary predating that row
+/// reading a file that names it loses every other setting in the file, and writes the defaults
+/// back over it on the next change.
+fn engine_or_default<'de, D>(d: D) -> Result<EngineId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Known(EngineId),
+        Unknown(serde::de::IgnoredAny),
+    }
+    use serde::Deserialize as _;
+    Ok(match Wire::deserialize(d)? {
+        Wire::Known(e) => e,
+        Wire::Unknown(_) => EngineId::default(),
+    })
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -48,6 +80,7 @@ impl Default for Settings {
             zoom_factor: 1.0,
             send_image_referer: true,
             scroll_lines: 3.0,
+            search_engine: crate::sites::EngineId::default(),
             show_menu_bar: true,
         }
     }
@@ -348,5 +381,53 @@ mod tests {
         assert_eq!(edited(0.0).zoom_factor(), Settings::ZOOM_MIN);
         assert_eq!(edited(-1.0).zoom_factor(), Settings::ZOOM_MIN);
         assert_eq!(edited(1e9).zoom_factor(), Settings::ZOOM_MAX);
+    }
+
+    /// The whole point of the unknown-value fallback: an engine this binary has never heard of
+    /// costs that one field, not the file. Without it, `serde` fails the whole struct, `load`
+    /// returns the defaults, and the next write flattens the reader's zoom, theme, and menu
+    /// preference too.
+    #[test]
+    fn an_unknown_engine_costs_only_that_field() {
+        let json = r#"{
+            "search_engine": "an-engine-from-a-later-build",
+            "zoom_factor": 1.4,
+            "show_menu_bar": false,
+            "send_image_referer": false
+        }"#;
+        let s: Settings = serde_json::from_str(json).expect("the file still parses");
+        assert_eq!(s.search_engine, crate::sites::EngineId::default());
+        assert_eq!(s.zoom_factor, 1.4);
+        assert!(!s.show_menu_bar);
+        assert!(!s.send_image_referer);
+    }
+
+    /// A value of the wrong shape entirely, not just an unknown name.
+    #[test]
+    fn a_malformed_engine_costs_only_that_field() {
+        let s: Settings =
+            serde_json::from_str(r#"{"search_engine": 42, "zoom_factor": 1.25}"#).unwrap();
+        assert_eq!(s.search_engine, crate::sites::EngineId::default());
+        assert_eq!(s.zoom_factor, 1.25);
+    }
+
+    /// Every engine id round-trips through the file, so a preference set in the panel is the
+    /// one read back at the next launch.
+    #[test]
+    fn every_engine_round_trips_through_the_file() {
+        for id in crate::sites::EngineId::ALL {
+            let before = Settings {
+                search_engine: id,
+                ..Settings::default()
+            };
+            let text = serde_json::to_string(&before).unwrap();
+            let after: Settings = serde_json::from_str(&text).unwrap();
+            assert_eq!(after.search_engine, id);
+            // The serialized form names the engine, never its address.
+            assert!(
+                !text.contains(crate::sites::engine_by_id(id).host),
+                "the settings file spelled a hostname: {text}"
+            );
+        }
     }
 }

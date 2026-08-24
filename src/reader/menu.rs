@@ -191,7 +191,7 @@ pub fn bar() -> Vec<Menu> {
             title: "File",
             items: vec![
                 Item::Run {
-                    label: "Open location...",
+                    label: "Search or open a URL...",
                     keys: "Ctrl+L",
                     command: C::OpenLocation,
                     needs: N::Nothing,
@@ -380,13 +380,16 @@ pub const HELP: &[(&str, &str)] = &[
     ("j k ↓ ↑", "scroll"),
     ("Space / PgDn", "page down · Shift+Space pages up"),
     ("g / G", "top / bottom"),
-    ("Ctrl+L or o", "URL bar · Enter navigates"),
+    (
+        "Ctrl+L or o",
+        "URL bar · Enter opens an address, or searches for words",
+    ),
     ("Tab / Shift+Tab", "cycle links · Enter follows"),
     ("Alt+Left / Backspace", "back"),
     ("Alt+Right", "forward · the mouse side buttons do both"),
     (
         "r / R",
-        "reload · reload bare: no rewrite rule, no site profile",
+        "reload · reload bare: no rewrite rule, no site profile, no search shape",
     ),
     ("i / I", "load focused image · load all, naming their hosts"),
     ("t", "outline"),
@@ -554,6 +557,24 @@ mod tests {
         }
     }
 
+    /// The help card and the toast name the same three tables.
+    ///
+    /// `Shift+R` says what it turned off twice: once on the card before you press it, once in
+    /// the toast after. A reload that quietly stopped honouring a fourth table would leave both
+    /// surfaces lying, and this is the cheaper half of noticing that.
+    #[test]
+    fn the_bare_reload_says_the_same_thing_twice() {
+        let toast = crate::reader::notice::RELOADED_BARE;
+        let tables = toast
+            .split_once("bare: ")
+            .expect("the toast names what it turned off")
+            .1;
+        assert!(
+            HELP.iter().any(|(_, what)| what.contains(tables)),
+            "the help card does not list {tables:?}"
+        );
+    }
+
     /// Every help row is a key spec and a description, both non-empty.
     #[test]
     fn the_help_card_is_well_formed() {
@@ -654,7 +675,7 @@ mod tests {
             .collect();
         assert_eq!(
             with,
-            vec!["Open location...", "Find in page...", "Settings..."]
+            vec!["Search or open a URL...", "Find in page...", "Settings..."]
         );
     }
 }

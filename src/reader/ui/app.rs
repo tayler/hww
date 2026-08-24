@@ -6,10 +6,8 @@
 //! strip at the bottom does not, and cannot, because charter point 4 requires that a rewrite is
 //! reported *before* the request goes out, unconditionally, so a hang cannot swallow the
 //! notice. A permanently visible one-line strip is what makes "chrome hidden until summoned"
-//! and that requirement compatible, and the GUI realizes the invariant better than the old
-//! plain-text client did: the notice travels the channel before the blocking fetch starts, so
-//! it is on screen for the whole of a 15 s hang instead of being interleaved with page text in a
-//! terminal after the fact.
+//! and that requirement compatible: the notice travels the channel before the blocking fetch
+//! starts, so it is on screen for the whole of a 15 s hang rather than arriving after it.
 //!
 //! The strip earns a second job from being there anyway. It is the one piece of chrome a
 //! pointer can always reach, so back/forward and "summon the URL bar" live on it, and pointer
@@ -814,8 +812,19 @@ impl ReaderApp {
             match msg {
                 Msg::Rewrote { req, rewrite } => {
                     if self.current == Some(req) {
-                        let Rewrite::Applied { .. } = &rewrite;
-                        self.rewrite_notice = Some(rewrite.to_string());
+                        // Exhaustive on purpose: a new `Rewrite` variant fails to compile here
+                        // rather than reaching the user unreported.
+                        let line = match &rewrite {
+                            Rewrite::Applied { .. } | Rewrite::Searched { .. } => {
+                                rewrite.to_string()
+                            }
+                        };
+                        // One navigation can produce both, and each names a host the user did
+                        // not type. Neither may quietly replace the other.
+                        self.rewrite_notice = Some(match self.rewrite_notice.take() {
+                            Some(prev) => format!("{prev} {line}"),
+                            None => line,
+                        });
                     }
                 }
                 Msg::Loaded { req, loaded } => {
@@ -1105,7 +1114,7 @@ impl ReaderApp {
         }
         if k(Modifiers::SHIFT, Key::R) {
             self.reload(LoadOptions::BARE);
-            self.flash("reloaded bare: no rewrite rule, no site profile".to_owned());
+            self.flash(notice::RELOADED_BARE.to_owned());
         }
         if k(Modifiers::SHIFT, Key::I) {
             self.load_all_images(ctx);
@@ -1581,7 +1590,7 @@ impl ReaderApp {
             Command::Reload => self.reload(self.opts),
             Command::ReloadBare => {
                 self.reload(LoadOptions::BARE);
-                self.flash("reloaded bare: no rewrite rule, no site profile".to_owned());
+                self.flash(notice::RELOADED_BARE.to_owned());
             }
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Command::CopyPageUrl => {
@@ -1895,13 +1904,12 @@ impl ReaderApp {
             .show(ui, |ui| {
                 ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
                 ui.horizontal(|ui| {
-                    ui.label("URL");
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut text)
                             .id(egui::Id::new(URL_BAR_ID))
                             .desired_width(f32::INFINITY)
                             .margin(egui::Margin::symmetric(8, 3))
-                            .hint_text("https://…"),
+                            .hint_text(notice::URL_BAR_HINT),
                     );
                     if self.focus_url_bar {
                         resp.request_focus();
@@ -1916,15 +1924,17 @@ impl ReaderApp {
         panel_edge(ui, bar.response.rect, Side::Bottom, pal);
         if go {
             let typed = text.trim().to_owned();
-            // A bare host is what people type. Assuming https is the only assumption that does
-            // not silently downgrade.
-            let candidate = if typed.contains("://") {
-                typed.clone()
-            } else {
-                format!("https://{typed}")
-            };
-            match Url::parse(&candidate) {
+            // Words rather than an address are a search. `resolve_input` owns that decision and
+            // the bare-host rule both, so this bar and `bin/hww`'s argument cannot drift apart.
+            // The engine is named on screen before the request leaves; `navigate` does not
+            // dispatch it here.
+            let engine = crate::sites::engine_by_id(self.settings.search_engine);
+            match crate::search::resolve_input(&typed, engine) {
                 Ok(url) => self.navigate(url, self.opts, true),
+                // Enter on a blank bar is a slip, and the bar opens blank whenever there is no
+                // page. `resolve_input` refuses it, and there is nothing to name in a toast
+                // about it, so the bar simply stays open.
+                Err(_) if typed.is_empty() => keep = true,
                 Err(e) => {
                     self.flash(format!("{typed} is not a usable address ({e})"));
                     keep = true;
@@ -2331,6 +2341,7 @@ impl ReaderApp {
                 ..self.opts
             }),
             Some(Button::Retry) => self.reload(self.opts),
+            Some(Button::OpenSettings) => self.chrome.settings_open = true,
             Some(Button::CopyUrl) | None => {}
         }
     }
@@ -2373,6 +2384,7 @@ impl ReaderApp {
                 rewrite: false,
                 ..opts
             }),
+            Button::OpenSettings => self.chrome.settings_open = true,
             Button::CopyUrl => {
                 self.copy(&url);
                 self.flash("page URL copied".to_owned());

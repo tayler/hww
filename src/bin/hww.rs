@@ -15,8 +15,9 @@ fn main() -> eframe::Result {
             "--" if !end_of_flags => end_of_flags = true,
             "--no-rewrite" if !end_of_flags => opts.rewrite = false,
             "--no-profile" if !end_of_flags => opts.profile = false,
-            // The extractor's account of a page in place of the page: the triage tool that
-            // used to be the plain-text client's `--why`. Prints and exits without a window.
+            "--no-search" if !end_of_flags => opts.search = false,
+            // The extractor's account of a page in place of the page: triage, not reading.
+            // Prints and exits without a window.
             "--why" if !end_of_flags => why = true,
             "--show-rewrites" if !end_of_flags => {
                 print!("{}", hww::sites::describe_rewrites());
@@ -24,6 +25,10 @@ fn main() -> eframe::Result {
             }
             "--show-profiles" if !end_of_flags => {
                 print!("{}", hww::sites::describe_profiles());
+                return Ok(());
+            }
+            "--show-engines" if !end_of_flags => {
+                print!("{}", hww::sites::describe_engines());
                 return Ok(());
             }
             s if !end_of_flags && s.starts_with("--") => {
@@ -38,34 +43,47 @@ fn main() -> eframe::Result {
         }
     }
 
+    // Loaded before the argument is resolved, because which engine a search goes to is part of
+    // resolving it. `--why` still renders nothing and opens no window; it reads this file for
+    // the one routing decision it cannot make without it, so `hww --why "some words"` and the
+    // same words typed into the window reach the same host.
+    //
+    // A parse failure costs the settings, not the launch, and the reason is shown in the
+    // status strip rather than swallowed.
+    let (settings, settings_note) = settings::load();
+    let engine = hww::sites::engine_by_id(settings.search_engine);
+
     let start = match target {
+        // `hww ""` is an empty argument, which is the shell's version of Enter on a blank URL
+        // bar: it asks for nothing, so it opens on nothing rather than searching for it.
         None => None,
-        Some(arg) => {
-            // A bare host is what people type at a shell too.
-            let candidate = if arg.contains("://") {
-                arg.clone()
-            } else {
-                format!("https://{arg}")
-            };
-            match url::Url::parse(&candidate) {
-                Ok(u) => Some(u),
-                Err(e) => {
-                    eprintln!("{arg} is not a usable address: {e}");
-                    std::process::exit(2);
-                }
+        Some(arg) if arg.trim().is_empty() => None,
+        // Words rather than an address are a search, at a shell as much as in the URL bar.
+        // Quote them: argv splits on spaces and an unquoted second word is still an error.
+        Some(arg) => match hww::search::resolve_input(&arg, engine) {
+            Ok(u) => Some(u),
+            Err(e) => {
+                eprintln!("{arg} is not a usable address: {e}");
+                std::process::exit(2);
             }
-        }
+        },
     };
 
     // `--why` is the same pipeline as a load, reporting on itself instead of rendering the
-    // page. It runs headless: no settings, no window. Every printed string is sanitized
-    // because the Explanation carries the page's own `class`/`id` attributes, and a terminal
-    // reads an escape sequence in one of those as a command.
+    // page. It opens no window and renders nothing, but it is not settings-free: the engine a
+    // search resolves to came out of that file above, so a file that failed to parse changed
+    // where these words are about to go and says so here rather than in a status strip nobody
+    // is looking at. Every printed string is sanitized because the Explanation carries the
+    // page's own `class`/`id` attributes, and a terminal reads an escape sequence in one of
+    // those as a command.
     if why {
         let Some(url) = start else {
             eprintln!("--why needs a URL");
             std::process::exit(2);
         };
+        if let Some(note) = &settings_note {
+            eprintln!("{}", hww::render::sanitize_for_terminal(note));
+        }
         let session = match hww::session::Session::new() {
             Ok(s) => s,
             Err(e) => {
@@ -95,9 +113,6 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
-    // A parse failure costs the settings, not the launch, and the reason is shown in the
-    // status strip rather than swallowed.
-    let (settings, settings_note) = settings::load();
     ui::run(ui::Launch {
         start,
         settings,

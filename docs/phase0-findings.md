@@ -362,3 +362,70 @@ the page, and reported field by field (matched *n*, matched nothing, rejected) o
 the page, in `--why`, and in the page-info panel. Each shipped profile carries a synthetic
 fixture and `every_profile_earns_its_keep` runs it with and without the profile. `--no-profile`
 and `Shift+R` (reload bare) switch it off.
+
+## Phase 4: search
+
+Search was 42.6% of the sampled corpus, the largest class and larger than the CANDIDATE
+documents the extractor was built for, and none of it was reachable: the URL bar refused
+anything containing a space, so a session could only begin with a URL found in another browser.
+Eight engines were measured on 2026-08-24 against the shipped fetcher.
+
+**The address a user would type cannot be read.** `duckduckgo.com/?q=` returns 24 KB with
+**zero result links in the HTML**; the results arrive by XHR. Every engine that ships a modern
+SERP behaves the same way, so scraping "the search page" is not a thing that exists. What can be
+read are the no-JavaScript endpoints some engines still serve.
+
+| Engine | Result | Read as |
+|---|---|---|
+| Mojeek | 200, stable across repeats | `.serp-results` frame, `ul.results-standard > li` |
+| Marginalia | 200 | `#results` frame, `section.search-result` |
+| DuckDuckGo | 200, then 202 | `#links` frame, `div.result`, links wrapped in `?uddg=` |
+| Brave | 200, 292 KB | `#search-page` frame, `div.snippet[data-type="web"]` |
+| Google | interstitial hiding every element (`table,div,span,p{display:none}`) | not expressible |
+| Startpage | proof-of-work challenge | not expressible |
+| searx.be | "Verifying your browser…" antibot | not expressible |
+| Bing | JS-heavy; `?format=rss` returns clean XML | ToS limits it to personal RSS use; not shipped |
+
+**Refusal is a 2xx, not a timeout.** DuckDuckGo answers four rapid queries and then returns
+**HTTP 202 with a 123-character CAPTCHA** ("select all squares containing a duck"), reproduced at
+run 5 of 6 on two separate occasions. Marginalia's rate limiter answers **HTTP 200** with a
+one-second countdown page. Neither is a read-timeout, so `FetchError::LikelyBlocked` — which is
+a document read-timeout and nothing else — cannot see either, and must not be widened to try:
+the distinction between a host that hangs and a host that answers is the one Phase 0 paid for.
+
+**A frame selector is what separates "found nothing" from "did not search".** Both produce zero
+parsed results, and guessing between them blames the wrong party in one direction or the other.
+Every engine renders its own result frame whether or not it found anything — Mojeek's
+`.serp-results` is present on a nonsense query and absent on the interstitial — so the frame
+answers the question that result counts cannot. Four outcomes follow: results; frame present and
+holding less text than `THIN_TEXT` (the engine answered, and found nothing — "no results for …"
+is a sentence); no frame and either a 2xx that is not 200 or a body under `THIN_TEXT` (the
+engine declined); anything else falls back to the generic extractor, including a frame that is
+*full* of text no shape could name, which is an engine that kept its container and renamed the
+rows inside it.
+
+**Thresholds were not tuned to fit a page.** Marginalia's wait page extracts to 214 characters
+against a `THIN_TEXT` of 200, so it lands in the fallback and the reader sees the engine's own
+countdown text and its manual link. Moving the floor to capture it would be fitting the metric
+to one case, which is the failure this document already records once.
+
+**Brave's class names carry a build hash** (`svelte-1qq4ge7`) that rotates on every deploy, and
+41 distinct ones appear on a single result page. Its results do carry stable `data-pos` and
+`data-type` attributes, and `no_shape_depends_on_a_build_hash` fails the build on a selector that
+names a hash.
+
+**No API key.** Bing's Web Search API was decommissioned 2025-08-11 and Brave's free tier ended
+for new signups in February 2026, so a keyed backend means a paid signup before search works at
+all. It would also be the first secret this project has ever stored, in a plaintext
+`settings.json`, for a feature that works without one.
+
+**Result links are unwrapped.** DuckDuckGo wraps every result in `//duckduckgo.com/l/?uddg=…`.
+Pulling the destination out is a parsing requirement and a privacy improvement in the same move:
+the click reaches the site rather than the engine's click tracker. Only `http` and `https`
+destinations are accepted, through the same `classify_link` gate a clicked link uses.
+
+**Disclosure, not "same operator".** The rewrite charter's first condition cannot apply to a
+search: the user named words, not a host, so there is no operator to stay within. Condition four
+does the whole job instead. `Rewrite::Searched` names the host **and the terms** before the
+request is dispatched, because "hww went somewhere you did not type" is only half the disclosure
+when what it carried was your query.

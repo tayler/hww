@@ -24,11 +24,12 @@ cargo run --features gui -- --why <url>          # the extractor's account, no w
 | Piece | State |
 |---|---|
 | `fetch` | Privacy rules enforced in code; no cookie jar exists at compile time |
-| `sites` | Per-site rules: a rewrite table and a profile table, builtin only, every application reported |
+| `sites` | Per-site rules: a rewrite table, a profile table, and a search-engine table, builtin only, every application reported |
 | `html` | Parse, article extraction, IR mapping |
 | `thread` | Forum/discussion extraction (structural, not heuristic) |
 | `cards` | Story-card detection: a front page or section page as a run of entries, in place |
-| `session` | The pipeline in one place; the rewrite notice reported before dispatch |
+| `search` | Web search: typed words become a query URL, a result page becomes entries; four engines, user-selectable |
+| `session` | The pipeline in one place; the rewrite and search notices reported before dispatch |
 | `render` | Plain text |
 | `ir` | Document / Block / Inline / Thread / Comment / Entries / Entry |
 | `reader` | Reading model: inline runs, outline, history, threads, image decoding, notices, the menu bar and every setting as data |
@@ -147,11 +148,39 @@ page, in `--why`, and in the page-info panel, so a profile that has gone stale s
 shipped profile carries a fixture that the tests run, and `docs/sites-checked.md` lists every
 host the extractor has been measured against, with the outcome, so the same host is not
 triaged twice. `--show-profiles` prints the table,
-`--no-profile` turns it off, and `Shift+R` in the reader reloads bare: no rewrite, no profile.
+`--no-profile` turns it off, and `Shift+R` in the reader reloads bare: no rewrite, no profile,
+no search.
 
-`src/sites.rs` is the only file in the crate that contains a hostname, and the module graph
-keeps it that way: it imports no extractor, and nothing imports it but `src/session.rs`, the
-one function that owns the pipeline and reports the rewrite before it dispatches.
+## Search
+
+Type words rather than an address and hww searches. Which engine it asks is a setting: DuckDuckGo
+(the default), Mojeek, Brave Search, or Marginalia. `--show-engines` prints the table and
+`--no-search` reads a result page as an ordinary page instead.
+
+The results are a real list, not the engine's page flattened into prose: hww reads the result
+markup into the same entries a front page produces, and follows the destination directly.
+DuckDuckGo wraps every result in its own redirect, so hww unwraps it and the click reaches the
+site rather than the click tracker.
+
+The rewrite charter's first condition, *same operator*, cannot apply here — you named words,
+not a host — so the fourth does the whole job. Before the request leaves, hww prints the engine
+**and the terms**: `[searching html.duckduckgo.com for "rust ownership"]`. Nothing is written
+to disk; queries live in the session's history and nowhere else.
+
+An engine that declines to search is reported as such rather than as a site that did not
+answer, and offers you another engine: DuckDuckGo answers several quick queries with an HTTP
+202 and a CAPTCHA, and hww says so. Marginalia's countdown is not one of these — it carries 214
+characters against a thin-page threshold of 200, so it falls through to the extractor and you
+read the engine's own page. An engine that searched and found nothing says that instead, and
+an engine that redesigned its results falls back to the ordinary extractor rather than claiming
+your words found nothing. Which case it is comes from the engine's own result frame and how
+much text is in it, not from a guess: see `docs/phase0-findings.md`, Phase 4.
+
+`src/sites.rs` is the only file in the crate that contains a hostname, tests included, and it
+imports no extractor. Everything else names a *row*, never a host: `src/search.rs` holds the
+result-page selectors with no domain among them, and the settings panel stores an engine id, so
+a preference file records `"mojeek"` and not an address. `src/session.rs` is still the one place
+that turns a row into a request, and it reports the rewrite and the search before dispatching.
 
 ## Layout
 

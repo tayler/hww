@@ -14,6 +14,7 @@ pub mod ir;
 pub mod profile;
 pub mod reader;
 pub mod render;
+pub mod search;
 pub mod session;
 pub mod sites;
 pub mod thread;
