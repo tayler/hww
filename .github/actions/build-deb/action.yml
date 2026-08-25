@@ -1,0 +1,51 @@
+name: Build and verify Debian package
+description: Build the GUI binary, package it, and verify the installed package
+
+inputs:
+  version:
+    description: Debian package version; empty produces a development version
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Verify build platform
+      shell: bash
+      run: |
+        test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.35"
+
+    - name: Build release binary
+      shell: bash
+      run: cargo build --locked --release --features gui --bin hww
+
+    - name: Build Debian package
+      shell: bash
+      env:
+        HWW_DEB_VERSION: ${{ inputs.version }}
+      run: |
+        if [[ -z "$HWW_DEB_VERSION" ]]; then
+          unset HWW_DEB_VERSION
+        fi
+        packaging/build-deb.sh
+
+    - name: Inspect Debian package
+      shell: bash
+      env:
+        HWW_DEB_VERSION: ${{ inputs.version }}
+      run: |
+        dpkg-deb --info dist/*.deb
+        dpkg-deb --contents dist/*.deb
+        test "$(dpkg-deb --field dist/*.deb Architecture)" = amd64
+        if [[ -n "$HWW_DEB_VERSION" ]]; then
+          test "$(dpkg-deb --field dist/*.deb Version)" = "$HWW_DEB_VERSION"
+        fi
+
+    - name: Install Debian package
+      shell: bash
+      run: |
+        sudo apt install --yes ./dist/*.deb
+        test "$(command -v hww)" = /usr/bin/hww
+        grep -Fx 'Icon=hww' /usr/share/applications/hww.desktop
+        grep -Fx 'StartupWMClass=hww' /usr/share/applications/hww.desktop
+        test -f /usr/share/icons/hicolor/256x256/apps/hww.png

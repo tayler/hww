@@ -1,5 +1,6 @@
 # ---- Rust / Cargo ----
 /target/
+/dist/
 **/*.rs.bk
 *.pdb
 # Cargo.lock IS committed: this crate ships binaries.

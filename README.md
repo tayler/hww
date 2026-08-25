@@ -39,18 +39,24 @@ cargo run --features gui -- --why <url>          # the extractor's account, no w
 
 ## Installing on Ubuntu
 
-Each successful push to `main` attaches a 64-bit Ubuntu package to its
-[CI workflow run](https://github.com/tayler/hww/actions/workflows/ci.yml). Download the
-`hww-linux-amd64` artifact from the latest successful run, then:
+Stable 64-bit Ubuntu packages are published on the
+[Releases page](https://github.com/tayler/hww/releases). Download the `.deb` and
+`SHA256SUMS` files from the latest release, then verify and install them:
 
 ```
-unzip hww-linux-amd64.zip
+sha256sum -c SHA256SUMS
+gh attestation verify hww_*_amd64.deb --repo tayler/hww
 sudo apt install ./hww_*_amd64.deb
 ```
 
 The package installs the application, its desktop entry, and its icons. Open `hww` from the
 Ubuntu application menu or run `hww` at a shell. Installing a newer package with the same
 command upgrades the existing installation.
+
+Each successful push to `main` also attaches a temporary development package to its
+[CI workflow run](https://github.com/tayler/hww/actions/workflows/ci.yml). The
+`hww-linux-amd64` artifact expires after 14 days and is intended for testing unreleased code,
+not as a stable download. Unzip it before installing it.
 
 Remove the package and its one saved settings file completely with:
 
@@ -281,6 +287,27 @@ IR; a whitespace-only node between two inline elements welding two words togethe
 the panel cannot reach; a menu item the help card does not list; a reader-facing string needing
 a glyph no shipped face carries; and the text renderer's markdown output, which is checked
 against a verbatim copy of the walker it replaced.
+
+## Releasing
+
+Stable releases use annotated `vMAJOR.MINOR.PATCH` tags. Set the package version in
+`Cargo.toml`, run `cargo check` to update `Cargo.lock`, and commit both files. Merge the change
+to `main` and run all five CI commands listed in `AGENTS.md`. The update command deliberately
+omits `--locked`; the subsequent `--locked` CI commands verify that the committed lockfile
+matches the manifest. Tag that merged commit:
+
+```
+git switch main
+git pull --ff-only
+git tag -a v0.1.0 -m "hww 0.1.0"
+git push origin v0.1.0
+```
+
+The tag workflow checks the tag against `Cargo.toml`, verifies that the commit belongs to
+`main`, builds and installs the package, creates its checksum and provenance attestation, and
+publishes the release. After it succeeds, advance `Cargo.toml` and `Cargo.lock` on `main` to
+the next intended release version. Development packages use `~git` versions below that future
+release, so upgrades preserve Debian version ordering.
 
 ## License
 

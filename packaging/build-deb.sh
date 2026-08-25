@@ -31,7 +31,7 @@ fi
 revision=${GITHUB_RUN_NUMBER:-$(git rev-list --count HEAD)}
 sha=${GITHUB_SHA:-$(git rev-parse HEAD)}
 short_sha=${sha:0:7}
-version=${HWW_DEB_VERSION:-"${cargo_version}+git${revision}.${short_sha}"}
+version=${HWW_DEB_VERSION:-"${cargo_version}~git${revision}.${short_sha}"}
 architecture=$(dpkg --print-architecture)
 
 stage=$(mktemp -d)
