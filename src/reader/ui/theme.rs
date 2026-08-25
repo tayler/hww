@@ -3,6 +3,7 @@
 //! Everything here is a presentation decision, which is exactly why it is confined to one
 //! module that the IR cannot reach and that no extractor imports.
 
+use crate::reader::desktop;
 use crate::reader::face::Face;
 use crate::reader::notice::Severity;
 use crate::reader::opts::{FontChoice, ReadOpts, Theme};
@@ -377,8 +378,15 @@ pub fn measure_px(ctx: &egui::Context, opts: &ReadOpts) -> f32 {
 }
 
 /// Whether the desktop is asking for a dark reader. Only consulted for `Theme::System`.
+///
+/// winit answers on the platforms where it can, and `raw.system_theme` is that answer.
+/// [`desktop`] is the Linux answer, where winit reports nothing at all; see its module doc.
+/// Neither knowing is Light, because a palette has to be picked.
 pub fn system_is_dark(ctx: &egui::Context) -> bool {
-    ctx.input(|i| i.raw.system_theme) == Some(egui::Theme::Dark)
+    match ctx.input(|i| i.raw.system_theme) {
+        Some(theme) => theme == egui::Theme::Dark,
+        None => desktop::prefers_dark().unwrap_or(false),
+    }
 }
 
 /// How one severity of notice is painted.

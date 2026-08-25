@@ -39,6 +39,7 @@
 
 use crate::ir;
 use crate::reader::autoload;
+use crate::reader::desktop;
 use crate::reader::history::{EntryId, History};
 use crate::reader::image_decode;
 use crate::reader::measure::{self, Heights};
@@ -83,7 +84,15 @@ pub fn run(launch: Launch) -> eframe::Result {
     eframe::run_native(
         "hww",
         options,
-        Box::new(|cc| Ok(Box::new(ReaderApp::new(cc, launch)?))),
+        Box::new(|cc| {
+            let mut app = ReaderApp::new(cc, launch)?;
+            // Only the application follows the desktop; see `ReaderApp::desktop_theme`. A
+            // change arrives on another thread, so it has to ask for the frame that repaints
+            // in the new palette.
+            let ctx = cc.egui_ctx.clone();
+            app.desktop_theme = desktop::watch(move || ctx.request_repaint());
+            Ok(Box::new(app))
+        }),
     )
 }
 
@@ -363,6 +372,13 @@ pub struct ReaderApp {
     /// *ahead* of the cursor. By id rather than index, because a link followed in that window
     /// truncates that entry away and puts the arriving page's entry at the same index.
     shown_entry: Option<EntryId>,
+    /// The desktop's light/dark preference, followed while the window is open, for
+    /// `Theme::System`. See `reader::desktop`.
+    ///
+    /// Started by [`run`] and by nothing else, so it is `None` under `hww-shot`: a scene shot
+    /// with `--theme system` photographs the same palette on every machine rather than the one
+    /// the photographer's desktop happens to be in.
+    desktop_theme: Option<desktop::Watch>,
 }
 
 /// Distance one wheel notch moves, in points.
@@ -487,6 +503,7 @@ impl ReaderApp {
             focus_find: false,
             top_block: None,
             shown_entry: None,
+            desktop_theme: None,
         };
         match launch.start {
             Some(url) => app.navigate(url, app.opts, true),
