@@ -15,10 +15,10 @@
 //! # Why the planning is here and not in `ui/`
 //!
 //! Nothing below needs an `egui::Context`. What it needs is the band's answer, which the column
-//! computes, and three sets the reader keeps. Putting the decision here is what lets the tests
+//! computes, and two sets the reader keeps. Putting the decision here is what lets the tests
 //! run in the fast CI job: the mistakes worth catching — re-requesting an evicted picture
-//! forever, naming a host twice, letting the queue grow without bound — are all arithmetic on
-//! those sets, and none of them are visible in a screenshot.
+//! forever, requesting an address that cannot resolve, letting the queue grow without bound —
+//! are all arithmetic on those sets, and none of them are visible in a screenshot.
 
 use std::collections::{HashMap, HashSet};
 use url::Url;
@@ -48,52 +48,36 @@ pub const MAX_OUTSTANDING: usize = 8;
 /// it. The click path is unaffected and has no cap.
 pub const MAX_ATTEMPTS: u32 = 2;
 
-/// What to request, and what to say about it.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Plan {
-    /// In document order, deduplicated. The column loads top to bottom.
-    pub srcs: Vec<String>,
-    /// The hosts among `srcs` this page has not named yet, sorted. Empty is the ordinary case
-    /// after the first screenful, and it means the remark is skipped rather than repeated.
-    pub hosts: Vec<String>,
-}
-
-impl Plan {
-    pub fn is_empty(&self) -> bool {
-        self.srcs.is_empty()
-    }
-}
-
-/// Choose the pictures to request this frame.
+/// Choose the pictures to request this frame, in document order and deduplicated.
 ///
 /// `in_band` is every `src` the column drew inside the band, in document order and possibly
-/// with repeats. `attempts` is how many times this page has already asked for each, `announced`
-/// the hosts it has already named, and `pending` how many requests are outstanding. `known`
-/// answers whether the image store has any state for a `src` at all.
+/// with repeats. `attempts` is how many times this page has already asked for each, and
+/// `pending` how many requests are outstanding. `known` answers whether this `src` is already
+/// settled, one way or another — the store holds a state for it, or it is an address the reader
+/// will never request, such as a format `image_decode` declines. The caller answers that second
+/// half, because the format tables ride with the `gui` feature and this module does not.
 ///
 /// `attempts` and `known` are both consulted, and neither one covers the other. `known` is
 /// false for a picture the LRU evicted while it was still on the page, and without a count of
 /// attempts that picture would be requested again the moment it was drawn, evicted again a
 /// frame later, and so on for as long as the reader sat still. `attempts` is zero for a picture
 /// the reader loaded by hand before switching the policy on, and without `known` that one would
-/// be fetched a second time and counted twice in the disclosures.
+/// be fetched a second time.
 pub fn plan(
     base: &Url,
     in_band: &[String],
     attempts: &HashMap<String, u32>,
-    announced: &HashSet<String>,
     pending: usize,
     known: &dyn Fn(&str) -> bool,
-) -> Plan {
+) -> Vec<String> {
     let room = MAX_OUTSTANDING.saturating_sub(pending);
     if room == 0 {
-        return Plan::default();
+        return Vec::new();
     }
-    let mut plan = Plan::default();
+    let mut srcs: Vec<String> = Vec::new();
     let mut taken: HashSet<&str> = HashSet::new();
-    let mut hosts: HashSet<String> = HashSet::new();
     for src in in_band {
-        if plan.srcs.len() == room {
+        if srcs.len() == room {
             break;
         }
         if attempts.get(src).copied().unwrap_or(0) >= MAX_ATTEMPTS
@@ -103,24 +87,19 @@ pub fn plan(
             continue;
         }
         // Resolved here rather than at the request, because an address that will not resolve
-        // has no host to name and no fetch to make. Requesting it would mark the placeholder
-        // failed without anything having been contacted, which is a claim about the network
-        // that nothing did.
-        let Some(host) = base
+        // has no fetch to make. Requesting it would mark the placeholder failed without
+        // anything having been contacted, which is a claim about the network that nothing did.
+        if base
             .join(src)
             .ok()
             .and_then(|u| u.host_str().map(str::to_owned))
-        else {
+            .is_none()
+        {
             continue;
-        };
-        if !announced.contains(&host) {
-            hosts.insert(host);
         }
-        plan.srcs.push(src.clone());
+        srcs.push(src.clone());
     }
-    plan.hosts = hosts.into_iter().collect();
-    plan.hosts.sort_unstable();
-    plan
+    srcs
 }
 
 #[cfg(test)]
@@ -135,8 +114,11 @@ mod tests {
         false
     }
 
-    fn set(items: &[&str]) -> HashSet<String> {
-        items.iter().map(|s| (*s).to_owned()).collect()
+    /// A `src` a declined format claims, which is how `ReaderApp::autoload` answers `known`
+    /// for one. Spelled here rather than reached for, because `image_decode` rides with the
+    /// `gui` feature and this module is tested without it.
+    fn declined(src: &str) -> bool {
+        src.ends_with(".svg")
     }
 
     /// Attempt counts, spelled `("src", n)`.
@@ -147,9 +129,8 @@ mod tests {
     #[test]
     fn a_first_screenful_is_requested_in_document_order() {
         let band = ["/a.png".to_owned(), "/b.png".to_owned()];
-        let p = plan(&base(), &band, &tries(&[]), &set(&[]), 0, &nothing_known);
-        assert_eq!(p.srcs, vec!["/a.png".to_owned(), "/b.png".to_owned()]);
-        assert_eq!(p.hosts, vec!["example.com".to_owned()]);
+        let p = plan(&base(), &band, &tries(&[]), 0, &nothing_known);
+        assert_eq!(p, vec!["/a.png".to_owned(), "/b.png".to_owned()]);
     }
 
     /// The queue bound. Nothing is planned while the pool is already carrying its share, or the
@@ -157,23 +138,16 @@ mod tests {
     #[test]
     fn the_outstanding_ceiling_is_a_ceiling() {
         let band: Vec<String> = (0..40).map(|i| format!("/{i}.png")).collect();
-        let p = plan(&base(), &band, &tries(&[]), &set(&[]), 0, &nothing_known);
-        assert_eq!(p.srcs.len(), MAX_OUTSTANDING);
+        let p = plan(&base(), &band, &tries(&[]), 0, &nothing_known);
+        assert_eq!(p.len(), MAX_OUTSTANDING);
 
-        let p = plan(&base(), &band, &tries(&[]), &set(&[]), 6, &nothing_known);
-        assert_eq!(p.srcs.len(), MAX_OUTSTANDING - 6);
+        let p = plan(&base(), &band, &tries(&[]), 6, &nothing_known);
+        assert_eq!(p.len(), MAX_OUTSTANDING - 6);
 
-        let p = plan(
-            &base(),
-            &band,
-            &tries(&[]),
-            &set(&[]),
-            MAX_OUTSTANDING,
-            &nothing_known,
-        );
+        let p = plan(&base(), &band, &tries(&[]), MAX_OUTSTANDING, &nothing_known);
         assert!(p.is_empty());
         // And a count above the ceiling does not wrap into a very large allowance.
-        let p = plan(&base(), &band, &tries(&[]), &set(&[]), 99, &nothing_known);
+        let p = plan(&base(), &band, &tries(&[]), 99, &nothing_known);
         assert!(p.is_empty());
     }
 
@@ -188,7 +162,6 @@ mod tests {
             &base(),
             &band,
             &tries(&[("/a.png", MAX_ATTEMPTS)]),
-            &set(&["example.com"]),
             0,
             &nothing_known,
         );
@@ -201,17 +174,8 @@ mod tests {
     #[test]
     fn an_evicted_picture_is_refilled_once() {
         let band = ["/a.png".to_owned()];
-        let p = plan(
-            &base(),
-            &band,
-            &tries(&[("/a.png", 1)]),
-            &set(&["example.com"]),
-            0,
-            &nothing_known,
-        );
-        assert_eq!(p.srcs, vec!["/a.png".to_owned()]);
-        // And the host is not named again, having been named the first time.
-        assert!(p.hosts.is_empty());
+        let p = plan(&base(), &band, &tries(&[("/a.png", 1)]), 0, &nothing_known);
+        assert_eq!(p, vec!["/a.png".to_owned()]);
     }
 
     /// And the other half: a picture the reader loaded by hand is in the store but was never
@@ -219,45 +183,21 @@ mod tests {
     #[test]
     fn a_picture_already_in_the_store_is_left_alone() {
         let band = ["/a.png".to_owned(), "/b.png".to_owned()];
-        let p = plan(&base(), &band, &tries(&[]), &set(&[]), 0, &|s| {
-            s == "/a.png"
-        });
-        assert_eq!(p.srcs, vec!["/b.png".to_owned()]);
+        let p = plan(&base(), &band, &tries(&[]), 0, &|s| s == "/a.png");
+        assert_eq!(p, vec!["/b.png".to_owned()]);
     }
 
     /// A repeated `src` — a logo in the header and again in the footer, a sprite — is one
-    /// request, and the disclosure has to say one.
+    /// request.
     #[test]
     fn a_src_drawn_twice_in_the_band_is_planned_once() {
         let band = ["/logo.png".to_owned(), "/logo.png".to_owned()];
-        let p = plan(&base(), &band, &tries(&[]), &set(&[]), 0, &nothing_known);
-        assert_eq!(p.srcs, vec!["/logo.png".to_owned()]);
+        let p = plan(&base(), &band, &tries(&[]), 0, &nothing_known);
+        assert_eq!(p, vec!["/logo.png".to_owned()]);
     }
 
-    /// Each host is named once per page. The remark is for "who is being contacted", and a
-    /// page of forty pictures from one CDN is one answer to that, repeated forty times only if
-    /// this is wrong.
-    #[test]
-    fn a_host_is_named_once_and_new_hosts_are_still_named() {
-        let band = [
-            "https://cdn.example.net/a.png".to_owned(),
-            "https://img.example.org/b.png".to_owned(),
-            "https://cdn.example.net/c.png".to_owned(),
-        ];
-        let p = plan(
-            &base(),
-            &band,
-            &tries(&[]),
-            &set(&["cdn.example.net"]),
-            0,
-            &nothing_known,
-        );
-        assert_eq!(p.srcs.len(), 3);
-        assert_eq!(p.hosts, vec!["img.example.org".to_owned()]);
-    }
-
-    /// An address that will not resolve has no host to name and no request to make, so it is
-    /// not planned at all rather than planned and failed.
+    /// An address that will not resolve has no request to make, so it is not planned at all
+    /// rather than planned and failed.
     #[test]
     fn an_unusable_address_is_not_planned() {
         let band = [
@@ -265,16 +205,41 @@ mod tests {
             "mailto:someone@example.com".to_owned(),
             "/good.png".to_owned(),
         ];
-        let p = plan(&base(), &band, &tries(&[]), &set(&[]), 0, &nothing_known);
-        assert_eq!(p.srcs, vec!["/good.png".to_owned()]);
-        assert_eq!(p.hosts, vec!["example.com".to_owned()]);
+        let p = plan(&base(), &band, &tries(&[]), 0, &nothing_known);
+        assert_eq!(p, vec!["/good.png".to_owned()]);
     }
 
-    /// Nothing in the band is nothing to do, and no remark either.
+    /// Nothing in the band is nothing to do.
     #[test]
     fn an_empty_band_plans_nothing() {
-        let p = plan(&base(), &[], &tries(&[]), &set(&[]), 0, &nothing_known);
+        let p = plan(&base(), &[], &tries(&[]), 0, &nothing_known);
         assert!(p.is_empty());
-        assert!(p.hosts.is_empty());
+    }
+
+    /// A picture this reader will never request is not planned, so a page of declined formats
+    /// contacts nobody rather than failing a placeholder per picture.
+    #[test]
+    fn a_declined_src_is_not_planned() {
+        let band = [
+            "https://cdn.example.net/diagram.svg".to_owned(),
+            "https://img.example.org/photo.jpg".to_owned(),
+        ];
+        let p = plan(&base(), &band, &tries(&[]), 0, &declined);
+        assert_eq!(
+            p,
+            vec!["https://img.example.org/photo.jpg"],
+            "the declined picture is not requested"
+        );
+    }
+
+    /// The whole band declined is an empty plan.
+    #[test]
+    fn a_band_of_only_declined_srcs_plans_nothing() {
+        let band = [
+            "https://cdn.example.net/a.svg".to_owned(),
+            "https://cdn.example.net/b.svg".to_owned(),
+        ];
+        let p = plan(&base(), &band, &tries(&[]), 0, &declined);
+        assert!(p.is_empty());
     }
 }

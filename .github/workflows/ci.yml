@@ -33,9 +33,8 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-  # The reading GUI and the local-only corpus tooling. Explicit features, never
-  # `--all-features`: that would silently opt into whatever anyone adds later, which is the
-  # opposite of the auditability this client is for.
+  # The reading GUI. An explicit feature, never `--all-features`: that would silently opt into
+  # whatever anyone adds later, which is the opposite of the auditability this client is for.
   #
   # No apt packages, deliberately. Every native library in this graph is opened at runtime
   # rather than linked at build time — winit reaches X11 through `x11-dl` and keyboards
@@ -48,7 +47,7 @@ jobs:
   # user; until then its cost would guard platforms nobody runs. No test may call
   # `eframe::run_native`.
   gui:
-    name: gui + tools
+    name: gui
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -63,10 +62,10 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Clippy
-        run: cargo clippy --all-targets --locked --features gui,tools -- -D warnings
+        run: cargo clippy --all-targets --locked --features gui -- -D warnings
 
       - name: Test
-        run: cargo test --locked --features gui,tools
+        run: cargo test --locked --features gui
 
   # A fixed older userspace sets the binary's glibc floor. This job follows both test jobs and
   # exists only for a push to main, so pull requests prove the source without publishing it.

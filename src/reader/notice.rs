@@ -88,19 +88,33 @@ pub const PENDING: &str = "[loading]";
 /// lives out here with the rest of the wording so the fast job tests it.
 pub const IMAGES_ARE_OFF: &str = "hww is set not to load images; change Images in Settings.";
 
-/// What the reader says the first time the automatic image policy contacts a host on a page.
+/// What the reader says when a key asks for pictures the page has, but in a format this
+/// renderer declines.
 ///
-/// The one remark `ImagePolicy::Auto` owes. Under every other policy a control names the host
-/// and the reader clicks it, so the naming is on screen already; here nobody clicked, and a
-/// setting chosen once on some earlier day is not a disclosure of who is being contacted now.
-/// It is per host and per page rather than per picture — forty pictures from one CDN is one
-/// answer to "who" — and it is said as the jobs are queued, before any bytes have arrived.
+/// Distinct from "no images on this page", which is false and reads as a page hww saw
+/// differently than the reader did, and from [`IMAGES_ARE_OFF`], which blames a setting the
+/// reader can change. Nothing was contacted, so nothing may be named: this says why, and stops
+/// there.
+pub const IMAGES_ARE_DECLINED: &str =
+    "the images on this page are in a format hww does not display.";
+
+/// What the reader says when every picture left to ask for has already failed for good.
 ///
-/// Out here with the rest of the wording, so the fast job tests it.
-pub fn auto_images_from(hosts: &[String]) -> String {
-    debug_assert!(!hosts.is_empty(), "a disclosure that names nobody");
-    format!("loading images from {}", hosts.join(", "))
-}
+/// The same rule as [`IMAGES_ARE_DECLINED`] one step later: nothing will be contacted, so
+/// nothing may be named, and "loading 3 image(s) from …" would be a claim about the network
+/// that no request backs. Each of those pictures still carries its own reason where it sits;
+/// this only answers why the key did nothing.
+pub const IMAGES_ALL_FAILED: &str = "every image on this page has already failed to load.";
+
+/// What the reader says when the two above are true of the same page, each of some of it.
+///
+/// Neither one alone may stand in for it. [`IMAGES_ARE_DECLINED`] would say a picture that was
+/// asked for and refused was never opened, and [`IMAGES_ALL_FAILED`] would say one that hww
+/// never requested had failed — a claim about the network with no request behind it, which is
+/// the thing the whole set of these exists to avoid. Same rule: nothing was contacted by this
+/// press, so nothing is named.
+pub const IMAGES_ARE_DECLINED_OR_FAILED: &str =
+    "some images here are in a format hww does not display; the rest have already failed.";
 
 /// What the URL bar says when it is empty.
 ///
@@ -582,20 +596,6 @@ pub fn host_and_path(url: &Url) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// The automatic policy's one disclosure names every host it is about to contact, and
-    /// reads as a sentence whether that is one host or several.
-    #[test]
-    fn the_automatic_disclosure_names_its_hosts() {
-        assert_eq!(
-            super::auto_images_from(&["cdn.example.net".to_owned()]),
-            "loading images from cdn.example.net"
-        );
-        assert_eq!(
-            super::auto_images_from(&["a.example.net".to_owned(), "b.example.org".to_owned()]),
-            "loading images from a.example.net, b.example.org"
-        );
-    }
-
     use super::*;
     use crate::fetch::FetchError;
 

@@ -11,7 +11,7 @@
 //! radius, a `label_job` title with a `close` opposite. A summoned surface, not a bar, for the
 //! reason recorded there — a bar is shown without asking and this is asked for.
 //!
-//! It anchors `RIGHT_TOP` rather than `RIGHT_BOTTOM`. `pageinfo_ui` rises from the circled `i`
+//! It anchors `RIGHT_TOP` rather than `RIGHT_BOTTOM`. `pageinfo_ui` rises from the italic `i`
 //! because it is about the status strip; this one is about the whole reader and is summoned
 //! from the menu bar in the opposite corner, so rising from the strip would point at the wrong
 //! thing. Centring it, the way the help card sits, would be worse: the sliders here change the
@@ -28,7 +28,7 @@
 //! is open keeps working, which is what makes watching the text reflow useful.
 //!
 //! The glyphs are ASCII `-` and `+` on purpose. Every character this reader draws has to be in
-//! one of the twelve faces `ui::fonts` embeds, and reaching for `\u{2212}` would reopen a
+//! one of the faces `ui::fonts` embeds, and reaching for `\u{2212}` would reopen a
 //! question ASCII closes.
 
 use crate::reader::prefs::{self, Control, Field, FieldId, Group, Value};

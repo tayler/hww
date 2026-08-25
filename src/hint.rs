@@ -5,7 +5,7 @@
 //! substring, and substring matching is how every article grew a "discussion" of image
 //! captions (`age` inside `image`) and how one wire service's front page lost every story
 //! (`promo` inside `PagePromo`). Measured on the top-ten US news sites, 2026-08-22; see
-//! `docs/phase0-findings.md`, Phase 3.
+//! `docs/findings.md`, Phase 3.
 //!
 //! A hint matches a token, or a run of tokens for a hyphenated hint, where tokens are split on
 //! anything that is not alphanumeric and on a lowercase-to-uppercase step, so `user-name`,

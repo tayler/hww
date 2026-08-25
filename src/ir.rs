@@ -62,13 +62,13 @@ pub enum Block {
     },
     /// Threaded discussion. Added after Phase 0 measurement: forum pages were 8/8 broken
     /// under article extraction (5.6% of content recovered), and a flat `Vec<Block>` cannot
-    /// represent reply structure. See docs/phase0-findings.md.
+    /// represent reply structure. See docs/findings.md.
     Thread(Vec<Comment>),
     /// A run of story cards: the shape of a front page, a section page, or a feed. Added
     /// after the Phase 3 triage: every front page in a top-ten news sample was either a legal
     /// notice (article scoring) or a four-post discussion (thread detection), and a renderer
     /// handed linked paragraphs cannot tell a headline from a dek. A feed maps onto the same
-    /// block. See docs/phase0-findings.md.
+    /// block. See docs/findings.md.
     Entries(Vec<Entry>),
 }
 

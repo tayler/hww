@@ -4,7 +4,7 @@
 //! JavaScript, the CSS cascade, ads, third-party requests, and cookies are all absent.
 //!
 //! Architecture: every source format maps into [`ir::Document`], and every renderer consumes
-//! only that. See `docs/phase0-findings.md` for the measurements this design rests on.
+//! only that. See `docs/findings.md` for the measurements this design rests on.
 
 pub mod cards;
 pub mod fetch;

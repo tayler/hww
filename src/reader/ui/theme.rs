@@ -3,6 +3,7 @@
 //! Everything here is a presentation decision, which is exactly why it is confined to one
 //! module that the IR cannot reach and that no extractor imports.
 
+use crate::reader::desktop;
 use crate::reader::face::Face;
 use crate::reader::notice::Severity;
 use crate::reader::opts::{FontChoice, ReadOpts, Theme};
@@ -230,9 +231,10 @@ pub fn body_font(opts: &ReadOpts) -> FontId {
 ///
 /// The title and the first two heading levels take the **serif** when the page is set in sans:
 /// a display face over a text face is the oldest pairing there is, and Plex Serif is already
-/// embedded for the serif reading choice, so it costs nothing. A serif page keeps the serif, and
-/// a mono page keeps mono: a reader who chose one family for the whole page gets the whole page
-/// in it. Levels past 3 follow the body, because by then the heading is a run-in, not a display.
+/// embedded for the serif reading choice, so it costs nothing. Every other role keeps its own
+/// family: a reader who chose one family for the whole page gets the whole page in it, and
+/// under `Hyperlegible` that is the point of the choice rather than a preference about pairing.
+/// Levels past 3 follow the body, because by then the heading is a run-in, not a display.
 ///
 /// A role rather than a `FontId`, so `inline_ui::Setting` can resolve `Strong` and `Emph`
 /// inside the heading to the matching faces: an `<em>` in a serif heading is serif italic.
@@ -377,8 +379,16 @@ pub fn measure_px(ctx: &egui::Context, opts: &ReadOpts) -> f32 {
 }
 
 /// Whether the desktop is asking for a dark reader. Only consulted for `Theme::System`.
+///
+/// winit answers on the platforms where it can, and `raw.system_theme` is that answer.
+/// [`desktop`] is the Linux answer, where winit reports nothing at all; see its module doc.
+/// Which of the two wins is [`desktop::resolve`], out where a test can reach it; this is the
+/// `Context` read that neither of them needs.
 pub fn system_is_dark(ctx: &egui::Context) -> bool {
-    ctx.input(|i| i.raw.system_theme) == Some(egui::Theme::Dark)
+    let winit = ctx
+        .input(|i| i.raw.system_theme)
+        .map(|theme| theme == egui::Theme::Dark);
+    desktop::resolve(winit, desktop::prefers_dark())
 }
 
 /// How one severity of notice is painted.
@@ -763,7 +773,7 @@ mod tests {
     #[test]
     fn chrome_is_monospace() {
         let mut opts = ReadOpts::default();
-        for family in [FontChoice::Sans, FontChoice::Serif, FontChoice::Mono] {
+        for family in FontChoice::ALL {
             opts.family = family;
             assert_eq!(chrome_font(&opts).family, FontFamily::Monospace);
             // `Small` follows the page, or the byline and the code chip go monospace with it.
@@ -791,7 +801,11 @@ mod tests {
             assert_eq!(heading_role(&opts, level), FontChoice::Serif);
         }
         assert_eq!(heading_role(&opts, 4), FontChoice::Sans);
-        for family in [FontChoice::Serif, FontChoice::Mono] {
+        for family in [
+            FontChoice::Serif,
+            FontChoice::Mono,
+            FontChoice::Hyperlegible,
+        ] {
             opts.family = family;
             for level in 1..=5 {
                 assert_eq!(heading_role(&opts, level), family, "{family:?} h{level}");

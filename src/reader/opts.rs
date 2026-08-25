@@ -27,6 +27,27 @@ pub enum FontChoice {
     /// The one role with no italic face shipped, so emphasis here is epaint's skew. See
     /// [`crate::reader::face::Face::synthesises_italics`].
     Mono,
+    /// Atkinson Hyperlegible Next, drawn for low vision: the letterforms that ordinarily
+    /// collapse into each other are pulled apart, so `I l 1`, `O 0`, and `b d p q` stay
+    /// distinguishable at a glance.
+    ///
+    /// A reading preference like the other three and not an accessibility mode: nothing else
+    /// changes with it, and the contrast floors the themes already hold are what carry that
+    /// side. Its Latin coverage is narrower than Plex's, so more of a non-Latin page falls
+    /// through to the tail here than under the other roles; see `reader::ui::fonts`.
+    Hyperlegible,
+}
+
+impl FontChoice {
+    /// Every role. `face::Face::all` crosses this with the inline styles, and
+    /// `every_role_is_listed` is what makes a forgotten variant a failure rather than a face
+    /// nothing ever registers.
+    pub const ALL: [FontChoice; 4] = [
+        FontChoice::Sans,
+        FontChoice::Serif,
+        FontChoice::Mono,
+        FontChoice::Hyperlegible,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +132,29 @@ where
     })
 }
 
+/// A `family` this binary does not know falls back to the default, for exactly the reason
+/// [`theme_or_system`] exists.
+///
+/// `FontChoice` gained [`FontChoice::Hyperlegible`] after shipping, which is what turns this
+/// from a hypothetical into a live path: a binary predating that variant meets `"Hyperlegible"`
+/// in a file written by this one, and without this it loses every other setting in the file on
+/// the next write.
+fn family_or_default<'de, D>(d: D) -> Result<FontChoice, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Known(FontChoice),
+        Unknown(serde::de::IgnoredAny),
+    }
+    Ok(match Wire::deserialize(d)? {
+        Wire::Known(f) => f,
+        Wire::Unknown(_) => ReadOpts::default().family,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImagePolicy {
     /// Show a one-line strip naming the host. Loads only on an explicit click or `i`.
@@ -122,9 +166,12 @@ pub enum ImagePolicy {
     /// layout band rather than by the document: a gallery of two hundred pictures requests the
     /// handful near the window and the rest only as they are scrolled towards, so the request
     /// queue never grows past what is about to be looked at. Everything downstream is
-    /// unchanged — the same choke point, the same host disclosure, the same counters in the
-    /// page-info panel — so what this setting moves is who presses the button, not what the
-    /// reader admits to fetching.
+    /// unchanged — the same choke point, the same counters in the page-info panel — so what
+    /// this setting moves is who presses the button, not what the reader admits to fetching.
+    ///
+    /// It says nothing as it goes: a reader who chose "load automatically" asked not to be
+    /// interrupted per host, and the page-info panel still names every host contacted. The
+    /// remark belongs to the policies where a control names a host and the reader clicks it.
     Auto,
     /// Never offer to load an article image. The strip still says an image was there;
     /// silently dropping content is how a reader lies about a page.
@@ -220,6 +267,7 @@ pub struct ReadOpts {
     pub line_height: f32,
     /// Multiple of the font size, between blocks.
     pub paragraph_spacing: f32,
+    #[serde(deserialize_with = "family_or_default")]
     pub family: FontChoice,
     #[serde(deserialize_with = "theme_or_system")]
     pub theme: Theme,
@@ -393,6 +441,62 @@ mod tests {
             serde_json::from_str(r#"{"theme": "Aubergine", "measure_chars": 80.0}"#).unwrap();
         assert_eq!(o.theme, Theme::System);
         assert_eq!(o.measure_chars, 80.0);
+    }
+
+    /// A `family` this binary has never heard of costs the typeface, not the file. The mirror
+    /// of the two tests above, live from the moment `FontChoice` grew a fourth variant.
+    #[test]
+    fn an_unknown_family_does_not_take_the_rest_of_the_settings_with_it() {
+        let o: ReadOpts =
+            serde_json::from_str(r#"{"family": "Blackletter", "measure_chars": 80.0}"#).unwrap();
+        assert_eq!(o.family, ReadOpts::default().family);
+        assert_eq!(o.measure_chars, 80.0);
+    }
+
+    /// And every role this binary does know still round-trips.
+    #[test]
+    fn every_family_round_trips_through_json() {
+        for f in FontChoice::ALL {
+            let o = ReadOpts {
+                family: f,
+                ..Default::default()
+            };
+            let back: ReadOpts = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+            assert_eq!(back.family, f);
+        }
+    }
+
+    /// `ALL` lists every variant, once each.
+    ///
+    /// The literal list is the test and the exhaustive `match` is what keeps it honest: a
+    /// variant added to `FontChoice` fails to compile *here*, which is the prompt to write it
+    /// into both. Walking `ALL` instead cannot catch the failure this exists for — a role
+    /// missing from `ALL` is never visited, and the match arm that would have found it is
+    /// discharged by adding an arm rather than by adding the entry. Same shape as
+    /// `real_lists_every_palette` below.
+    #[test]
+    fn every_role_is_listed() {
+        for f in [
+            FontChoice::Sans,
+            FontChoice::Serif,
+            FontChoice::Mono,
+            FontChoice::Hyperlegible,
+        ] {
+            match f {
+                FontChoice::Sans
+                | FontChoice::Serif
+                | FontChoice::Mono
+                | FontChoice::Hyperlegible => {}
+            }
+            // Counted, not `contains`: `ALL` is walked to register faces and to build the
+            // settings row, so a variant listed twice is a duplicate face and a duplicate row.
+            // `dedup` cannot say so, because it only sees neighbours.
+            assert_eq!(
+                FontChoice::ALL.iter().filter(|&&x| x == f).count(),
+                1,
+                "{f:?} is missing from ALL, or listed twice"
+            );
+        }
     }
 
     /// And a theme it does know still round-trips, including the two new ones.

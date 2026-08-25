@@ -1,7 +1,7 @@
 //! Per-site rules: the only place in the crate where behaviour is keyed on a hostname.
 //!
 //! Everything else in hww is structural: `html.rs` scores subtrees, `thread.rs` groups siblings
-//! by class signature, `cards.rs` reads card lists, `bin/corpus.rs` classifies by URL shape.
+//! by class signature, and `cards.rs` reads card lists.
 //! None of them know a domain name and none of them should, and none of them import this
 //! module. Two tables live here, both keyed the same way ([`host_matches`], a label boundary):
 //!
@@ -9,7 +9,7 @@
 //!   measured ~7 genuine JS-only reading losses out of 87 document-shaped pages; two of them
 //!   are pages of one JS-gated discussion site that serves a fully server-rendered alternate
 //!   domain, same operator, same content. Reaching it is a host swap, and that is all a rule
-//!   does. See `docs/phase0-findings.md`, Phase 2.
+//!   does. See `docs/findings.md`, Phase 2.
 //! - [`PROFILES`]: a [`Profile`] applied to the page that arrived, keyed on the final URL.
 //!   Phase 3 measured the top-ten US news sites after the generic fixes and found what only a
 //!   selector can know: in-body chrome on otherwise good articles. The vocabulary is one
@@ -22,7 +22,7 @@
 //! 1. **Same operator.** The target host is run by the same entity as the source. A third-party
 //!    frontend proxy relocates the reader onto an unrelated party, precisely the "no
 //!    third-party requests" line this client exists to hold. Never builtin.
-//! 2. **Cited.** The rule names a measured failure in `docs/phase0-findings.md`. No speculative
+//! 2. **Cited.** The rule names a measured failure in `docs/findings.md`. No speculative
 //!    entries, no curated directory of the web.
 //! 3. **Offline.** The table is compiled in. Never fetched, never auto-updated: a remotely
 //!    updated rule list is a channel that reports what you read.
@@ -36,7 +36,7 @@
 //!    applied to bytes already in hand.
 //! 2. **Public.** The host is a widely read public site, so naming it discloses nothing about
 //!    whose browsing the measurement came from. A niche host does not belong in this table.
-//! 3. **Cited.** A structural row in `docs/phase0-findings.md`, Phase 3, with the measured
+//! 3. **Cited.** A structural row in `docs/findings.md`, Phase 3, with the measured
 //!    delta, and a fixture in the table itself that `every_profile_earns_its_keep` runs.
 //! 4. **Offline.** Compiled in, as above.
 //! 5. **Reported.** Every field's outcome is printed on stderr after the page, listed by
@@ -65,7 +65,7 @@ struct Rule {
 /// One rule per measured loss.
 const RULES: &[Rule] = &[
     // The JS-gated discussion site of "The real JS-only losses" and "Where it still loses" in
-    // docs/phase0-findings.md, and its own server-rendered alternate. Measured on one comment
+    // docs/findings.md, and its own server-rendered alternate. Measured on one comment
     // page: 0 chars before, 8,331 after; see "Phase 2: per-site rules". Sections, not line
     // numbers: that document grows.
     //

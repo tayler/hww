@@ -1,4 +1,4 @@
-# Phase 0 findings: is the web readable without JS?
+# Phase 0: is the web readable without JS?
 
 Measured 2026-08-21 against a real browser history: 4,843 distinct URLs, 6,731 visits
 across four months, and 527 hosts. Sample: 150 URLs across 78 hosts, recency-ordered, max 3
@@ -260,8 +260,9 @@ alternate, not returning to the exact host typed: the realistic bounce is to a s
 The swap itself is reported before the request goes out, so a fetch that fails or hangs cannot
 swallow it.
 
-`src/rewrite.rs` is the only file in the crate that contains a hostname. The module graph keeps
-it that way: `rewrite` imports no extractor, and nothing imports `rewrite` except `main.rs`.
+The rewrite table is the only place in the crate that contains a hostname, and the module graph
+keeps it that way: it imports no extractor, and no extractor imports it. (It has since moved to
+`src/sites.rs`, where Phase 3's profile table joined it under the same host matcher.)
 
 
 ---
@@ -337,22 +338,6 @@ subscriber modals, a gift counter, a consent banner on a page walked with chrome
 table spans the spectrum and four continents rather than naming a side of either, and is kept
 sorted by host.
 
-## A second, wider sample
-
-Fifty-seven more hosts across the political spectrum and across kinds of site (national and
-international news, magazines, business, tech, science, reference), forty-four articles read
-head and tail. Bodies were good throughout. What repeated was generic and landed as such: link
-rubble after the last paragraph (tag lists, "See all", "Most viewed", a "Comments" heading) on
-ten hosts is trimmed; recirculation and audio-player vendors share class names across hundreds
-of hosts and are chrome hints; a dated "related stories" block under a chrome container is not
-a thread. A native-ad slot's placeholder copy at the foot of two hosts of one publisher started
-as a profile and ended as the tail trimmer's job; one more host needed a selector (a
-text-to-speech speed menu set as prose). Later samples (ten non-US sites; twenty across Europe,
-South America, Mexico, and Africa) added eight more: newsletter lines, comments pitches,
-subscriber modals, a gift counter, a consent banner on a page walked with chrome hints off. The
-table spans the spectrum and four continents rather than naming a side of either, and is kept
-sorted by host.
-
 ## What a profile is
 
 Data, not code: one CSS selector per field, in `src/sites.rs`, the only file in the crate that
@@ -363,7 +348,9 @@ the page, in `--why`, and in the page-info panel. Each shipped profile carries a
 fixture and `every_profile_earns_its_keep` runs it with and without the profile. `--no-profile`
 and `Shift+R` (reload bare) switch it off.
 
-## Phase 4: search
+---
+
+# Phase 4: search
 
 Search was 42.6% of the sampled corpus, the largest class and larger than the CANDIDATE
 documents the extractor was built for, and none of it was reachable: the URL bar refused

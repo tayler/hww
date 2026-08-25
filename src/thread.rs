@@ -3,7 +3,7 @@
 //! Article extraction picks the single best subtree. A discussion has no single best
 //! subtree: the content is N sibling subtrees, and scoring will happily return one comment
 //! out of eighty-eight. Phase 0 measured 8/8 forum pages broken and 5.6% of content
-//! recovered under article extraction alone. See docs/phase0-findings.md.
+//! recovered under article extraction alone. See docs/findings.md.
 //!
 //! The approach here is structural rather than heuristic: find the largest set of sibling
 //! elements sharing a class signature, and treat each as a post.

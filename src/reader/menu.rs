@@ -28,13 +28,14 @@
 //!
 //! # The submenu marker is not egui's
 //!
-//! egui's `SubMenuButton::RIGHT_ARROW` is `⏵` (U+23F5), which is in **none** of the twelve
-//! faces `ui::fonts` embeds: `eframe` is built without `default_fonts`, so there is no symbol
-//! font anywhere in the binary and it draws as tofu. `▸` and `▶` are worse in a subtler way —
-//! they are in `DejaVuSerif` only, which is the coverage tail, so they resolve to a serif
-//! triangle inside a monospace menu. [`SUBMENU_MARKER`] is `›`, which every face in the Plex
-//! chain carries. Same lesson as `ui::pageinfo_ui`'s hand-painted `ⓘ`, one medium over: check
-//! the glyph against the shipped faces, not against the font on your desktop.
+//! egui's `SubMenuButton::RIGHT_ARROW` is `⏵` (U+23F5), which is in **none** of the faces
+//! `ui::fonts` embeds: `eframe` is built without `default_fonts`, so there is no symbol font
+//! anywhere in the binary and it draws as tofu. `▸` and `▶` are worse in a subtler way — they
+//! are in `DejaVuSerif` only, which is the coverage tail, so they resolve to a serif triangle
+//! inside a monospace menu. [`SUBMENU_MARKER`] is `›`, which every embedded face but the emoji
+//! tail carries, so it resolves in the first family of every chain. Same lesson as the `ⓘ`
+//! `ui::pageinfo_ui` never typed, one medium over: check the glyph against the shipped faces,
+//! not against the font on your desktop.
 
 /// Drawn at the right of a submenu button. See the module doc: this is not decoration and not
 /// egui's default.
@@ -591,12 +592,12 @@ mod tests {
     /// No string this module can put on screen needs a glyph the shipped faces lack.
     ///
     /// The executable form of the module doc, and the reason `SUBMENU_MARKER` exists. epaint has
-    /// no fallback beyond the twelve faces `ui::fonts` registers, so a missing glyph is a box on
+    /// no fallback beyond the faces `ui::fonts` registers, so a missing glyph is a box on
     /// the screen and nothing anywhere says why. Prose does not fail a build; this does.
     #[test]
     fn nothing_needs_a_glyph_the_faces_lack() {
         const MISSING: [char; 6] = [
-            '\u{23F5}', // egui's own submenu arrow, in none of the twelve
+            '\u{23F5}', // egui's own submenu arrow, in none of the shipped faces
             '\u{25B8}', '\u{25B6}', // triangles carried only by the DejaVuSerif tail
             '\u{2630}', // hamburger
             '\u{2699}', // gear

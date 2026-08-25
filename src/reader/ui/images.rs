@@ -51,11 +51,57 @@ use std::collections::HashMap;
 /// megabytes, not hundreds.
 const LRU_CAPACITY: usize = 48;
 
+/// How many settled declines `evict` will hold past [`LRU_CAPACITY`] before dropping the oldest
+/// anyway.
+///
+/// Each one is a `src` and a sentence, not a texture, so the ceiling is about the queue rather
+/// than about memory: without it a page of unloadable pictures grows `order` without bound and
+/// the cap stops being a cap. One page's worth of them, so the answer survives a page that is
+/// nothing but declines and `clear_page` still takes them all at the next commit.
+const DECLINES_KEPT: usize = LRU_CAPACITY;
+
 pub enum State {
     Offered,
     Loading,
     Ready(Ready),
-    Failed(String),
+    Failed(Failure),
+}
+
+/// Why a picture is not on screen, and whether asking again could change that.
+///
+/// The reader draws its one control on this. A retry offered for a decline that is a property
+/// of the file, or of the address, is a button that re-fetches and re-fails for as long as the
+/// page is open, and there was no way to say so while this was a bare `String`.
+///
+/// Built through the two constructors rather than a public flag, so every call site says which
+/// kind it means at the point it knows, and asked as a named question rather than by reading
+/// the flag back out.
+pub struct Failure {
+    pub why: String,
+    retryable: bool,
+}
+
+impl Failure {
+    /// A second request cannot change this: a declined format, an address that will not
+    /// resolve, a file too big to decode.
+    pub fn permanent(why: String) -> Self {
+        Self {
+            why,
+            retryable: false,
+        }
+    }
+
+    /// A second request might succeed: the transport failed, or the bytes were cut short.
+    pub fn transient(why: String) -> Self {
+        Self {
+            why,
+            retryable: true,
+        }
+    }
+
+    pub fn offers_retry(&self) -> bool {
+        self.retryable
+    }
 }
 
 /// What one queued request added to the disclosure counters, so it can be taken back if the
@@ -85,8 +131,8 @@ pub struct ImageStore {
     /// box before the bytes arrive. Cheap, and it is the only "layout reservation" available
     /// without putting dimensions in `ir::Image`, which is contract creep the charter guards.
     dims: HashMap<String, (u32, u32)>,
-    /// Hosts contacted for images this session and how many requests stand against each, for
-    /// the status strip and the page-info panel.
+    /// Hosts contacted for images on the page being read and how many requests stand against
+    /// each, for the status strip and the page-info panel.
     ///
     /// Counted rather than a set because a request can be taken back: a job the pool dropped
     /// without dispatching contacted nobody, and a set could not tell "the only request to this
@@ -97,8 +143,8 @@ pub struct ImageStore {
     /// The disclosure is recorded when the job is queued, because that is where the host is
     /// known and where the reader is told about it, and a job can still be dropped after that
     /// (`net::Msg::ImageDropped`). This is what lets that be undone exactly, instead of by
-    /// subtracting one and hoping. Cleared without undoing when a page commits: those requests
-    /// went out, and what they disclosed stands.
+    /// subtracting one and hoping. Cleared without undoing when a page commits, along
+    /// with the counters themselves: the account is about the page on screen.
     in_flight: HashMap<String, Disclosed>,
     pub loaded: usize,
     /// The `src`s whose state has moved since the reading column last looked. The column caches
@@ -149,8 +195,8 @@ impl ImageStore {
     /// was fetched: a failure here would tell the reader that a host had been contacted and
     /// had refused, which is a different and untrue thing. For the same reason the disclosure
     /// recorded when the job was queued is taken back — a host that was named and then not
-    /// contacted must not be left standing in the page-info panel for the rest of the session,
-    /// which is the panel claiming a request that never left. `dims` survives, as it does
+    /// contacted must not be left standing in the page-info panel, which is the panel claiming
+    /// a request that never left. `dims` survives, as it does
     /// across a whole navigation: it is layout memory, not a claim about the network.
     pub fn forget(&mut self, src: &str) {
         if let Some(was) = self.in_flight.remove(src) {
@@ -218,7 +264,7 @@ impl ImageStore {
         self.evict();
     }
 
-    /// The disclosure counters, for the page-info panel.
+    /// The disclosure counters for the page being read, for the page-info panel.
     ///
     /// Assembled here so the field list lives beside the fields it reads: `pageinfo::Counts`
     /// is one directory up, where egui cannot reach, and a second hand-written copy of these
@@ -259,22 +305,41 @@ impl ImageStore {
         self.in_flight.remove(src);
     }
 
-    pub fn fail(&mut self, src: &str, why: String) {
+    pub fn fail(&mut self, src: &str, failure: Failure) {
         self.settle_request(src);
-        self.set(src, State::Failed(why));
+        self.set(src, State::Failed(failure));
         self.touch(src);
     }
 
+    /// True when this `src` already failed in a way a second request cannot change.
+    ///
+    /// Asked by `ReaderApp::request_image` beside `is_pending`, so the paths that do not draw
+    /// a control — "load all", and a click on a placeholder the LRU has since evicted and
+    /// redrawn — cannot re-issue a request whose answer is already known.
+    pub fn refuses_retry(&self, src: &str) -> bool {
+        matches!(self.entries.get(src), Some(State::Failed(f)) if !f.offers_retry())
+    }
+
+    /// Everything the outgoing page owned: its textures, and the account of what its images
+    /// disclosed.
+    ///
     /// Dropped when a new page commits, not when one is asked for: the outgoing page stays on
-    /// screen for the length of the fetch and its pictures have to stay with it. Dimensions and
-    /// the disclosure counters survive even that: the first is layout memory, and the second is a
-    /// running account of what this session disclosed, which resetting would quietly understate.
-    pub fn clear_textures(&mut self) {
+    /// screen for the length of the fetch and its pictures have to stay with it. `dims` alone
+    /// survives, because it is layout memory rather than a claim about the network — a revisit
+    /// reserves the right box before the bytes arrive.
+    ///
+    /// The counters go with the textures because the panel that reads them answers how *this
+    /// page* arrived. A running session total is an answer to a question the panel does not
+    /// ask, and it reads as this page's number to anyone who misses the qualifier.
+    pub fn clear_page(&mut self) {
         self.entries.clear();
         self.order.clear();
-        // Cleared, not undone: these requests went out, and what they disclosed is a fact about
-        // this session. What is lost is only the ability to take one back, and by here the page
-        // they belonged to is gone, so nothing is left to take back.
+        self.hosts.clear();
+        self.loaded = 0;
+        self.cookie_attempts = 0;
+        self.referer_requests = 0;
+        // Cleared, not undone: subtracting these back out of counters that are themselves being
+        // reset is the same nothing, and the page they belonged to is gone.
         self.in_flight.clear();
         // Not recorded one `src` at a time: the caller is `ReaderApp::commit`, which clears the
         // whole height table on its own line, and the blocks these belonged to are a document
@@ -297,9 +362,29 @@ impl ImageStore {
     /// `referer_requests`, which are the reader's account of what it disclosed. Skipping
     /// pending entries can leave `order` briefly over capacity; it drains as they resolve.
     fn evict(&mut self) {
+        // A settled decline holds no texture, so evicting one frees nothing this cache exists
+        // to free, and it costs the memory `refuses_retry` is. Dropped, the entry reverts to
+        // `None`: the placeholder offers "load from host" again and the next "load all"
+        // re-issues a request whose answer was already known. That is the eviction bug two
+        // functions down, in the one shape the pending guard cannot see.
+        self.trim(LRU_CAPACITY, true);
+        // Sparing them is not keeping them forever. A page can carry more declines than the
+        // cache holds entries, and skipping every one of them left `order` growing with the
+        // page instead of bounded by the cap — the queue that the pass above exists to bound.
+        // Past `DECLINES_KEPT` the oldest goes anyway: an offer to re-request one picture is
+        // the cheaper failure, and it is the one already accepted for a pending entry.
+        self.trim(LRU_CAPACITY + DECLINES_KEPT, false);
+    }
+
+    /// Evict from the front of `order` until it fits `limit`. `spare_declines` is which of the
+    /// two passes in [`evict`](Self::evict) this is; a pending entry is spared by both, because
+    /// re-offering one is a duplicate third-party request rather than a repeated answer.
+    fn trim(&mut self, limit: usize, spare_declines: bool) {
         let mut i = 0;
-        while self.order.len() > LRU_CAPACITY && i < self.order.len() {
-            if self.is_pending(&self.order[i]) {
+        while self.order.len() > limit && i < self.order.len() {
+            if self.is_pending(&self.order[i])
+                || (spare_declines && self.refuses_retry(&self.order[i]))
+            {
                 i += 1;
                 continue;
             }
@@ -314,7 +399,9 @@ enum Snapshot {
     Offered,
     Loading,
     Ready,
-    Failed(String),
+    /// The message, and whether to draw the retry control beside it. Both halves, because this
+    /// exists to be read out of the store before the drawing closures borrow `ctx`.
+    Failed(String, bool),
 }
 
 /// The first [`ALT_SHOWN`] characters of an alt, cut at a word and marked.
@@ -365,7 +452,7 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     // borrow of the store across them would be a second one.
     let state = match ctx.images.state(&img.src) {
         Some(State::Loading) => Snapshot::Loading,
-        Some(State::Failed(why)) => Snapshot::Failed(why.clone()),
+        Some(State::Failed(f)) => Snapshot::Failed(f.why.clone(), f.offers_retry()),
         Some(State::Ready(_)) => Snapshot::Ready,
         None | Some(State::Offered) => Snapshot::Offered,
     };
@@ -400,13 +487,19 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
                         ui.label(RichText::new("[image]").color(pal.dim));
                         ui.label(RichText::new(format!("loading from {host}…")).color(pal.dim));
                     }
-                    Snapshot::Failed(why) => {
+                    Snapshot::Failed(why, retryable) => {
                         ui.label(RichText::new(format!("[image] {why}")).color(pal.notice_fg));
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&host).color(pal.dim));
-                            let resp = ui.small_button("retry");
-                            act = resp.clicked();
-                            focused = resp.has_focus();
+                            // No control for a failure a second request cannot change: the
+                            // button re-fetched and re-failed for as long as the page was
+                            // open, and taking Tab focus meant `i` landed on it too. The line
+                            // above still says the picture was there and why it is not shown.
+                            if *retryable {
+                                let resp = ui.small_button("retry");
+                                act = resp.clicked();
+                                focused = resp.has_focus();
+                            }
                         });
                     }
                     Snapshot::Offered | Snapshot::Ready => {
@@ -513,8 +606,11 @@ pub fn favicon(ui: &mut Ui, src: &str, ctx: &mut RenderCtx<'_>) {
 /// The one control an entry's thumbnail gets: a small dim `[image]` beside the time, which
 /// loads that one picture, and nothing once it is loaded. `Never` shows nothing at all.
 pub fn load_control(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
+    // Nothing to offer once it is loaded, and nothing to offer for a decline a second request
+    // cannot change: this is a control, and both of those make it a dead one.
     if !ctx.opts.images.offers_loading()
         || matches!(ctx.images.state(&img.src), Some(State::Ready(_)))
+        || ctx.images.refuses_retry(&img.src)
     {
         return;
     }
@@ -548,6 +644,17 @@ pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>)
         // a reader lies about a page.
         _ if !ctx.opts.images.offers_loading() => {
             ui.label(RichText::new(format!("[{alt}]")).color(pal.dim).italics());
+        }
+        // Same shape, for the same reason, one case further on: a decline a second request
+        // cannot change had no arm here at all, so the mark stayed a `Button` that took Tab
+        // focus, wrote `focus_image`, and did nothing at all when pressed. A label says the
+        // picture was there and why it is not shown, and takes no focus.
+        Some(State::Failed(f)) if !f.offers_retry() => {
+            ui.label(
+                RichText::new(format!("[{alt}] ({})", f.why))
+                    .color(pal.dim)
+                    .italics(),
+            );
         }
         _ => {
             ctx.note_unloaded_image(ui.next_widget_position().y, &img.src);
@@ -587,7 +694,7 @@ mod tests {
         store.record_request("/b.png", "cdn.example.net", false);
 
         // The decode failed. Nothing about what the request disclosed is undone by that.
-        store.fail("/a.png", "not an image".to_owned());
+        store.fail("/a.png", Failure::transient("not an image".to_owned()));
 
         let counts = store.counts();
         assert_eq!(counts.cookie_attempts, 2);
@@ -601,7 +708,7 @@ mod tests {
     }
 
     /// A job the pool dropped without dispatching contacted nobody, so the panel must not go on
-    /// naming its host for the rest of the session.
+    /// naming its host for the rest of the page.
     ///
     /// The one place the two halves can disagree: the disclosure is recorded when the job is
     /// *queued*, because that is where the host is known and where the reader is told about it,
@@ -633,13 +740,116 @@ mod tests {
         assert_eq!(store.counts().referer_requests, 0);
     }
 
+    /// The retry control is drawn from this, and so is the guard that stops "load all" from
+    /// re-issuing a request whose answer is already known.
+    #[test]
+    fn only_a_permanent_failure_refuses_a_retry() {
+        let mut store = ImageStore::default();
+        store.fail("/a.png", Failure::transient("connection reset".to_owned()));
+        store.fail(
+            "/b.svg",
+            Failure::permanent("SVG images are not supported".to_owned()),
+        );
+        assert!(!store.refuses_retry("/a.png"), "a second request may work");
+        assert!(store.refuses_retry("/b.svg"), "a second request cannot");
+        // A picture nobody has asked about yet is not a refusal.
+        assert!(!store.refuses_retry("/c.png"));
+    }
+
+    /// A page's disclosures are the page's. The panel reading these answers how the document
+    /// on screen arrived, so the counters cannot outlive it; `dims` is the one thing that does,
+    /// because reserving the right box on a revisit is layout memory rather than a network claim.
+    #[test]
+    fn committing_a_page_drops_what_the_last_one_disclosed() {
+        let mut store = ImageStore {
+            cookie_attempts: 4,
+            loaded: 2,
+            ..ImageStore::default()
+        };
+        store.dims.insert("/a.png".to_owned(), (800, 600));
+        store.record_request("/a.png", "cdn.example.net", true);
+        store.fail("/a.png", Failure::transient("connection reset".to_owned()));
+
+        store.clear_page();
+
+        assert_eq!(
+            store.counts(),
+            Counts::default(),
+            "a fresh page discloses nothing yet"
+        );
+        assert!(store.state("/a.png").is_none());
+        assert_eq!(
+            store.reserved("/a.png"),
+            Some((800, 600)),
+            "layout memory survives"
+        );
+    }
+
+    /// A settled decline must outlive the cache pressure that has nothing to do with it.
+    ///
+    /// `evict` bounds *textures*, and a failure holds none. Dropping one reverted the entry to
+    /// `None`, which made the placeholder offer itself again and let "load all" re-issue the
+    /// request. Only reachable for a decline the address cannot predict — an extensionless
+    /// AVIF, a file over the pixel ceiling — because `declined_by_url` catches the rest before
+    /// a request is made at all.
+    #[test]
+    fn eviction_does_not_forget_that_a_picture_is_settled() {
+        let mut store = ImageStore::default();
+        store.fail(
+            "/big.png",
+            Failure::permanent("image is 9000x9000".to_owned()),
+        );
+        // Fill well past the cache with entries that are evictable.
+        for i in 0..LRU_CAPACITY * 2 {
+            store.fail(
+                &format!("/n{i}.png"),
+                Failure::transient("reset".to_owned()),
+            );
+        }
+        store.evict();
+        assert!(
+            store.order.len() <= LRU_CAPACITY + 1,
+            "the cache is still bounded"
+        );
+        assert!(
+            store.refuses_retry("/big.png"),
+            "the one entry that must not be re-requested is the one that was dropped"
+        );
+    }
+
+    /// And sparing them has a ceiling of its own.
+    ///
+    /// Every entry on this page is a decline the first pass steps over, so before
+    /// `DECLINES_KEPT` the queue grew with the page and `LRU_CAPACITY` bounded nothing. What
+    /// survives is the newest, which is the part of the page a reader is still near.
+    #[test]
+    fn a_page_of_settled_declines_is_still_bounded() {
+        let mut store = ImageStore::default();
+        let n = (LRU_CAPACITY + DECLINES_KEPT) * 2;
+        for i in 0..n {
+            store.fail(
+                &format!("/n{i}.png"),
+                Failure::permanent("image is 9000x9000".to_owned()),
+            );
+            store.evict();
+        }
+        assert!(
+            store.order.len() <= LRU_CAPACITY + DECLINES_KEPT,
+            "declines are spared, not unbounded"
+        );
+        assert!(
+            store.refuses_retry(&format!("/n{}.png", n - 1)),
+            "the newest decline is the one still worth remembering"
+        );
+    }
+
     /// And a request that resolved cannot be taken back afterwards. `forget` is reachable from
     /// an eviction as well as from a drop, and an eviction is about a texture, not a host.
     #[test]
     fn forgetting_a_resolved_request_leaves_the_disclosure_standing() {
         let mut store = ImageStore::default();
         store.record_request("/a.png", "cdn.example.net", true);
-        store.fail("/a.png", "not an image".to_owned());
+        store.fail("/a.png", Failure::transient("not an image".to_owned()));
         store.forget("/a.png");
         let counts = store.counts();
         assert_eq!(counts.hosts, vec!["cdn.example.net"]);

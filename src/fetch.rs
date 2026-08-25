@@ -33,7 +33,17 @@ pub const MAX_IMAGE_BYTES: usize = 10_000_000;
 pub const IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const ACCEPT_HTML: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
-pub const ACCEPT_IMAGE: &str = "image/webp,image/avif,image/png,image/jpeg,image/gif,*/*;q=0.8";
+/// Never advertise a format the decoder declines.
+///
+/// This listed `image/avif` while `image_decode` refuses AVIF, so a server doing content
+/// negotiation was being *asked* for the one format hww cannot show, and the decline became a
+/// wasted transfer the reader had already been told about. Removing it is the cheapest way to
+/// turn current failures into pictures.
+///
+/// `*/*;q=0.8` stays: too many servers ignore `Accept` entirely, and refusing them the
+/// fallback loses images that decode. It sorts below the explicit entries, so a server that
+/// does negotiate now prefers one of them.
+pub const ACCEPT_IMAGE: &str = "image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8";
 
 /// What, if anything, a class of request discloses about the page being read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

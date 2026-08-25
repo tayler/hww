@@ -103,8 +103,8 @@ untrusted page text on a terminal is a stream of commands, not glyphs.
 
 `hww` takes `--no-rewrite` and `--no-profile` to switch off a per-site table, and
 `--show-rewrites` / `--show-profiles` to print one and exit. The application lives behind the
-`gui` feature so core tests and local tools compile without the GUI dependency graph or its
-image subresource path.
+`gui` feature so core tests compile without the GUI dependency graph or its image subresource
+path.
 
 For everyday use, build once and run the binary:
 
@@ -115,7 +115,7 @@ cargo build --release --features gui
 
 ## Measured
 
-Against 150 real URLs sampled from browsing history ([full findings](docs/phase0-findings.md)):
+Against 150 real URLs sampled from browsing history ([full findings](docs/findings.md)):
 
 - **72%** of document-shaped pages are readable with zero JavaScript
 - **59%** of pages extract at or above trafilatura's output, 21% below
@@ -174,7 +174,7 @@ characters against a thin-page threshold of 200, so it falls through to the extr
 read the engine's own page. An engine that searched and found nothing says that instead, and
 an engine that redesigned its results falls back to the ordinary extractor rather than claiming
 your words found nothing. Which case it is comes from the engine's own result frame and how
-much text is in it, not from a guess: see `docs/phase0-findings.md`, Phase 4.
+much text is in it, not from a guess: see `docs/findings.md`, Phase 4.
 
 `src/sites.rs` is the only file in the crate that contains a hostname, tests included, and it
 imports no extractor. Everything else names a *row*, never a host: `src/search.rs` holds the
@@ -194,10 +194,8 @@ that turns a row into a request, and it reports the rewrite and the search befor
     src/cards.rs   story-card detection; the walker emits `Entries` in place
     src/render.rs  IR -> text
     src/reader/    IR -> reading model (pure, tested) + reader/ui (egui, feature-gated)
-    src/bin/hww     thin main: argv -> reader::ui::run
-    src/bin/corpus build a test corpus from local browser history. Checks how many of the sites you browse will work on hww.
-    src/bin/bench  calibration harness vs a reference extractor (needs a local cache)
-    src/bin/dbg    the `--why` account over one cached corpus page
+    src/bin/hww    thin main: argv -> reader::ui::run
+    src/bin/shot   the screenshot catalog: named scenes, baseline hashes
 
 ## The reader
 
@@ -205,7 +203,7 @@ that turns a row into a request, and it reports the rewrite and the search befor
 
 Keyboard first, but nothing is keyboard-only: `?` lists the keys, a menu bar across the top
 carries every command with the key that already does it, and the status strip along the bottom
-carries back/forward, a clickable URL, and a circled `i` so a mouse alone can navigate. That
+carries back/forward, a clickable URL, and an italic `i` so a mouse alone can navigate. That
 strip never hides: the URL bar, outline, find bar, menus, and help all dismiss on `Esc`, but a
 rewrite notice has to be on screen *before* the request goes out, so the strip stays. The bar
 itself can go (`View` ▸ `Menu bar`), and `F10` brings it back and focuses it.
@@ -217,9 +215,9 @@ uses for it. A 4xx body shown anyway, an extraction that came back thin, a body 
 truncated, a rewrite rule applied or landed on the wrong host are all bars; a failed navigation
 is an error page; and none of them is ever dressed as prose.
 
-The rest is accounting, and it lives behind the circled `i` (or `p`): encoding, bytes
-downloaded against characters extracted, the redirect chain, cookies discarded, images loaded
-and their hosts. Facts worth being able to ask for, not worth a permanent ribbon of six-point
+The rest is accounting for the page on screen, and it lives behind the italic `i` (or `p`):
+encoding, bytes downloaded against characters extracted, the redirect chain, cookies discarded,
+images loaded and their hosts. Facts worth being able to ask for, not worth a permanent ribbon of six-point
 text beside the URL.
 
 One centred reading column, measured in characters (`[` and `]`). Zoom is egui's own, so
@@ -232,7 +230,7 @@ default load only on an explicit click. They are never loaded on hover or in adv
 the page favicon beside the masthead eyebrow, which is fetched as soon as the document names
 one. Four policies. *Ask first* is the default and offers to load each picture; *Load
 automatically* fetches the pictures near what you are reading and roughly a screenful ahead,
-naming each new host as it goes and leaving the rest of the page until you scroll towards it;
+quietly, leaving the rest of the page until you scroll towards it;
 *Article images off* marks where each one was and offers nothing; *No image requests* fetches
 nothing at all, the site icon included, which is what separates it from the one above. Each
 load is counted alongside cookie attempts in the page-info panel, and nothing is written to
@@ -268,20 +266,10 @@ that one setting rather than the file: an unknown theme or image policy falls ba
 default, everything else is kept, and a number outside its range is clamped instead of
 believed.
 
-## Building a corpus
-
-    cargo run --features tools --bin corpus -- --limit 150 --per-host 3 --out corpus.jsonl
-
-Finds a Firefox profile, stages a copy (the DB is locked while the browser runs), and samples
-document-shaped URLs. **Sampled by recency, never by `visit_count`**; frequency ranking
-surfaces search engines, webmail, and dashboards, while the articles under test are read once.
-
-Its output is real browsing history. It is gitignored, and it should stay that way.
-
 ## Tests
 
     cargo test                              # default features; egui never compiled
-    cargo test --features gui,tools         # adds the reader's pure modules
+    cargo test --features gui               # adds the reader's pure modules
 
 Covers IR mapping, relative-URL resolution, malformed-markup recovery, nested-document
 recovery, encoding prescan bounds, host matching at a label boundary (`evil-example.com` is

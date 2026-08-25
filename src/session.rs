@@ -531,6 +531,11 @@ pub struct FetchedImage {
     pub partial: Truncation,
     pub final_url: Url,
     pub cookie_attempts: usize,
+    /// Carried rather than dropped, because a document and an image disagree about what a
+    /// non-2xx means. A 404 body is still a page and the reader shows it; a 404 body is never
+    /// an image, and handing it to the decoder turns "this address has no picture" into
+    /// "unrecognised format", which is a retryable answer to a permanent question.
+    pub status: u16,
 }
 
 impl Session {
@@ -566,6 +571,7 @@ impl Session {
             partial: resp.truncation,
             final_url: resp.final_url,
             cookie_attempts: resp.cookie_attempts,
+            status: resp.status,
         })
     }
 }

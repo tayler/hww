@@ -17,7 +17,7 @@
 //! What it does *not* carry is provenance. Seven facts `·`-joined into one dim right-aligned
 //! line crowded the URL, and with `wrap_mode = Truncate` on a narrow window the tail was not
 //! drawn at all, which is a poor way to report anything. They are labelled rows in the
-//! page-info panel now (`p`, or the circled `i`, `reader::ui::pageinfo_ui`). The two that could
+//! page-info panel now (`p`, or the italic `i`, `reader::ui::pageinfo_ui`). The two that could
 //! not wait for a click went the other way and became infobars under the top chrome: a truncated
 //! body and a rewrite rule that landed on the wrong host both change how the page in front of
 //! the reader should be read. The dead rule in particular used to be a twelve-second `flash`
@@ -39,17 +39,22 @@
 
 use crate::ir;
 use crate::reader::autoload;
-use crate::reader::history::History;
+use crate::reader::desktop;
+use crate::reader::history::{EntryId, History};
+use crate::reader::image_decode;
 use crate::reader::measure::{self, Heights};
 use crate::reader::menu::{self, Command};
-use crate::reader::notice::{self, Button, IMAGES_ARE_OFF, Notice};
+use crate::reader::notice::{
+    self, Button, IMAGES_ALL_FAILED, IMAGES_ARE_DECLINED, IMAGES_ARE_DECLINED_OR_FAILED,
+    IMAGES_ARE_OFF, Notice,
+};
 use crate::reader::outline::{self, OutlineEntry};
 use crate::reader::pageinfo;
 use crate::reader::prefs;
 use crate::reader::settings::{self, Settings};
 use crate::reader::thread_tree::CommentKey;
 use crate::reader::title;
-use crate::reader::ui::images::ImageStore;
+use crate::reader::ui::images::{Failure, ImageStore};
 use crate::reader::ui::{
     Action, Launch, RenderCtx, blocks, fonts, menu_ui, net, notice_ui, pageinfo_ui, prefs_ui, theme,
 };
@@ -80,7 +85,15 @@ pub fn run(launch: Launch) -> eframe::Result {
     eframe::run_native(
         "hww",
         options,
-        Box::new(|cc| Ok(Box::new(ReaderApp::new(cc, launch)?))),
+        Box::new(|cc| {
+            let mut app = ReaderApp::new(cc, launch)?;
+            // Only the application follows the desktop; see `ReaderApp::desktop_theme`. A
+            // change arrives on another thread, so it has to ask for the frame that repaints
+            // in the new palette.
+            let ctx = cc.egui_ctx.clone();
+            app.desktop_theme = desktop::watch(move || ctx.request_repaint());
+            Ok(Box::new(app))
+        }),
     )
 }
 
@@ -250,9 +263,6 @@ pub struct ReaderApp {
     /// one refill is right and an unbounded number is a request loop. `autoload::MAX_ATTEMPTS`
     /// holds the reasoning, and `autoload::plan` the other half of the pair.
     auto_attempts: HashMap<String, u32>,
-    /// The hosts the automatic policy has already named on the page on screen, so "who is
-    /// being contacted" is answered once per host rather than once per picture.
-    auto_announced: HashSet<String>,
     /// How tall each block was the last time it was laid out, so the blocks off the window can
     /// be skipped. See `reader::measure` for why, and `ready_screen` for when it is ignored.
     heights: Heights,
@@ -355,6 +365,21 @@ pub struct ReaderApp {
     /// marks as the current section. Found in `ready_screen`, a frame late like everything the
     /// render discovers.
     top_block: Option<usize>,
+    /// Which history entry the page in the reading column belongs to, so `central` can keep
+    /// writing where it is being read.
+    ///
+    /// Not the cursor. `go_back` moves the cursor at dispatch and the outgoing page stays on
+    /// screen for the whole fetch, so through that window the visible page belongs to the entry
+    /// *ahead* of the cursor. By id rather than index, because a link followed in that window
+    /// truncates that entry away and puts the arriving page's entry at the same index.
+    shown_entry: Option<EntryId>,
+    /// The desktop's light/dark preference, followed while the window is open, for
+    /// `Theme::System`. See `reader::desktop`.
+    ///
+    /// Started by [`run`] and by nothing else, so it is `None` under `hww-shot`: a scene shot
+    /// with `--theme system` photographs the same palette on every machine rather than the one
+    /// the photographer's desktop happens to be in.
+    desktop_theme: Option<desktop::Watch>,
 }
 
 /// Distance one wheel notch moves, in points.
@@ -450,7 +475,6 @@ impl ReaderApp {
             images: ImageStore::default(),
             image_blocks: HashMap::new(),
             auto_attempts: HashMap::new(),
-            auto_announced: HashSet::new(),
             heights: Heights::default(),
             collapsed: HashSet::new(),
             collapsed_changes: 0,
@@ -479,6 +503,8 @@ impl ReaderApp {
             focus_url_bar: false,
             focus_find: false,
             top_block: None,
+            shown_entry: None,
+            desktop_theme: None,
         };
         match launch.start {
             Some(url) => app.navigate(url, app.opts, true),
@@ -671,25 +697,22 @@ impl ReaderApp {
         if !self.settings.read.images.loads_automatically() {
             return;
         }
-        let plan = autoload::plan(
+        let srcs = autoload::plan(
             base,
             in_band,
             &self.auto_attempts,
-            &self.auto_announced,
             self.images.pending(),
-            &|src| self.images.state(src).is_some(),
+            // Not only "the store has an answer": also "this address will never be
+            // requested", so a declined picture is not requested and failed once per frame.
+            &|src| {
+                self.images.state(src).is_some()
+                    || base
+                        .join(src)
+                        .is_ok_and(|u| image_decode::declined_by_url(&u).is_some())
+            },
         );
-        if plan.is_empty() {
-            return;
-        }
-        // Ahead of the requests. They are queued jobs and nothing has been drawn, so the
-        // disclosure still precedes the bytes, which is the same order `load_all_images` keeps.
-        if !plan.hosts.is_empty() {
-            self.flash(notice::auto_images_from(&plan.hosts));
-            self.auto_announced.extend(plan.hosts);
-        }
         let max_width = self.column_texture_width(ctx);
-        for src in plan.srcs {
+        for src in srcs {
             // Counted whether or not the request survives: `request_image` declines a `src`
             // already in flight, and an entry that never resolves must not be planned again on
             // the next frame. `Msg::ImageDropped` is the one thing that takes a count back.
@@ -735,11 +758,33 @@ impl ReaderApp {
         if self.images.is_pending(src) {
             return;
         }
+        // Beside `is_pending`, and for the same reason: this is the one door, and the paths
+        // that reach it without drawing a control — "load all", and a click on a placeholder
+        // the LRU evicted and redrew as an offer — would otherwise re-issue a request whose
+        // answer is already known.
+        if self.images.refuses_retry(src) {
+            return;
+        }
         let base = ready.loaded.prov.final_url.clone();
         let Ok(url) = base.join(src) else {
-            self.images.fail(src, "unusable image address".to_owned());
+            self.images
+                .fail(src, Failure::permanent("unusable image address".to_owned()));
             return;
         };
+        // Ahead of the host, the disclosure, and the job. A format this reader declines was
+        // being fetched in full and then refused from its bytes, which cost a third-party
+        // request, up to the transfer cap in wasted transfer, and a host recorded in the
+        // panel as if a picture had been loaded from it. Nothing below this line runs, so
+        // nothing is contacted and nothing is claimed.
+        //
+        // Worded through `DecodeError::Unsupported` rather than a second literal: the reader
+        // must not learn one phrase for a declined format fetched and another for one that
+        // was not.
+        if let Some(name) = image_decode::declined_by_url(&url) {
+            let why = image_decode::DecodeError::Unsupported(name).to_string();
+            self.images.fail(src, Failure::permanent(why));
+            return;
+        }
         let host = url.host_str().unwrap_or("?").to_owned();
         self.images.begin(src);
         // Recorded here, where the host is known and where the reader is told it, and taken
@@ -775,8 +820,32 @@ impl ReaderApp {
         let Some(ready) = self.shown() else {
             return;
         };
-        let srcs = collect_image_srcs(&ready.loaded.doc);
+        let all = collect_image_srcs(&ready.loaded.doc);
         let base = ready.loaded.prov.final_url.clone();
+        // Declined, and *only* declined. Testing the address the other way round dropped every
+        // `src` that fails to join too, so a page whose images all had unusable addresses
+        // reported them as a format hww does not display — a second wrong claim about the page,
+        // in place of the one this removes. An unusable address still belongs in the list;
+        // `request_image` has the honest message for it. Asked twice below: once to decide what
+        // to request, and once to decide what to say when that comes to nothing.
+        let is_declined = |s: &str| {
+            base.join(s)
+                .is_ok_and(|u| image_decode::declined_by_url(&u).is_some())
+        };
+        // Before the hosts are gathered and before the count is taken. This remark names every
+        // host it is about to contact, so a declined address left in would have it name one it
+        // never reaches — the same claim about the network that `autoload::plan` refuses to
+        // make for an address that will not resolve.
+        let srcs: Vec<String> = all
+            .iter()
+            .filter(|s| !is_declined(s))
+            // And the same argument one step later. `request_image` returns without asking for
+            // a picture that has already failed permanently, so counting one here would put a
+            // host in the remark that this press will not contact — "loading 3 image(s) from
+            // …" for three addresses nothing re-requests.
+            .filter(|s| !self.images.refuses_retry(s))
+            .cloned()
+            .collect();
         let mut hosts: Vec<String> = srcs
             .iter()
             .filter_map(|s| base.join(s).ok())
@@ -785,7 +854,18 @@ impl ReaderApp {
         hosts.sort();
         hosts.dedup();
         if srcs.is_empty() {
-            self.flash("no images on this page".to_owned());
+            // Which of the four is true matters, and they are four different pages: one with no
+            // pictures, one whose pictures hww will not open, one whose pictures were asked for
+            // and refused, and one that is some of each. Counted rather than asked with `any`,
+            // which answered "every image has already failed" for a page where most of them
+            // were never requested at all.
+            let declined = all.iter().filter(|s| is_declined(s)).count();
+            self.flash(match (all.len(), declined) {
+                (0, _) => "no images on this page".to_owned(),
+                (n, d) if n == d => IMAGES_ARE_DECLINED.to_owned(),
+                (_, 0) => IMAGES_ALL_FAILED.to_owned(),
+                _ => IMAGES_ARE_DECLINED_OR_FAILED.to_owned(),
+            });
             return;
         }
         // Naming the distinct hosts is the point: "load all" must not be the one place the
@@ -866,7 +946,17 @@ impl ReaderApp {
                     self.images.cookie_attempts += cookies;
                     match result {
                         Ok(decoded) => self.images.insert(ctx, &src, decoded),
-                        Err(e) => self.images.fail(&src, e.to_string()),
+                        Err(e) => {
+                            let why = e.to_string();
+                            self.images.fail(
+                                &src,
+                                if e.offers_retry() {
+                                    Failure::transient(why)
+                                } else {
+                                    Failure::permanent(why)
+                                },
+                            );
+                        }
                     }
                 }
                 Msg::ImageDropped { page, src } => {
@@ -944,7 +1034,17 @@ impl ReaderApp {
         // installed, which is the last moment the document is not behind `self.page`.
         self.image_blocks = image_blocks(&page.loaded.doc);
         self.page = Page::Ready(Box::new(page));
-        if let Some(f) = fragment {
+        // Where this page was left, if it is a page the reader has been on: Back, Forward and
+        // `r` all arrive here with the cursor on an entry that has been read before, and
+        // `commit` has just reset the column to the top. A link followed, or a URL typed, mints
+        // an entry at zero and takes the fragment arm instead.
+        self.shown_entry = self.history.current_id();
+        let restore = self
+            .shown_entry
+            .map_or(0.0, |id| self.history.offset_of(id));
+        if restore > 0.0 {
+            self.scroll_offset = Some(restore);
+        } else if let Some(f) = fragment {
             self.jump_to_fragment(&f);
         }
     }
@@ -997,14 +1097,15 @@ impl ReaderApp {
     /// arm of `drain`, and from `present`, so the screenshot tool cannot drift from the
     /// navigation path.
     fn commit(&mut self) {
-        // Textures die with the page they were loaded for; the disclosure counters do not.
-        self.images.clear_textures();
-        // All three are about the page being replaced. `auto_announced` in particular: naming
-        // a host is a statement about *this* page, so carrying it forward would let a second
-        // page contact a host the reader was told about once, on an article they have left.
+        // Textures and the disclosure counters both die with the page they belong to: the
+        // page-info panel answers how the page on screen arrived, not what the session has
+        // done since it started.
+        self.images.clear_page();
+        // Both are about the page being replaced: the blocks index and the attempt counts
+        // describe the document that is going away, and an attempt spent on it must not count
+        // against the same `src` on the page arriving.
         self.image_blocks.clear();
         self.auto_attempts.clear();
-        self.auto_announced.clear();
         self.heights.clear();
         self.collapsed.clear();
         self.find_current = 0;
@@ -1013,6 +1114,9 @@ impl ReaderApp {
         self.pending_href = None;
         self.chrome.dismissed.clear();
         self.top_block = None;
+        // The arriving page has no entry of its own until `settle` names one, and a failure
+        // never gets one: an error screen is not a position worth remembering.
+        self.shown_entry = None;
         self.scroll_offset = Some(0.0);
         // The other two scroll one-shots, or a `Shift+G` pressed on the very frame a page
         // commits is applied against the *outgoing* page's `max_scroll` and opens the new one
@@ -1894,33 +1998,43 @@ impl ReaderApp {
         };
         let mut go = false;
         let mut keep = true;
-        let bar = egui::Panel::top("hww-url")
-            .show_separator_line(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(pal.chrome_bg)
-                    .inner_margin(egui::Margin::symmetric(10, 6)),
-            )
-            .show(ui, |ui| {
-                ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
-                ui.horizontal(|ui| {
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut text)
+        let bar =
+            egui::Panel::top("hww-url")
+                .show_separator_line(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(pal.chrome_bg)
+                        .inner_margin(egui::Margin::symmetric(10, 6)),
+                )
+                .show(ui, |ui| {
+                    ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
+                    ui.horizontal(|ui| {
+                        let out = egui::TextEdit::singleline(&mut text)
                             .id(egui::Id::new(URL_BAR_ID))
                             .desired_width(f32::INFINITY)
                             .margin(egui::Margin::symmetric(8, 3))
-                            .hint_text(notice::URL_BAR_HINT),
-                    );
-                    if self.focus_url_bar {
-                        resp.request_focus();
-                        self.focus_url_bar = false;
-                    }
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        go = true;
-                        keep = false;
-                    }
+                            .hint_text(notice::URL_BAR_HINT)
+                            .show(ui);
+                        let resp = out.response.response;
+                        if self.focus_url_bar {
+                            resp.request_focus();
+                            self.focus_url_bar = false;
+                            // Opening the bar offers the current address for replacement, the way
+                            // every other browser does, so typing overwrites it and an arrow key
+                            // still lands the cursor in it. The selection has to be written into
+                            // stored state; `request_focus` alone leaves the caret where it was.
+                            let mut state = out.state;
+                            state.cursor.set_char_range(Some(
+                                egui::text::CCursorRange::select_all(&out.galley),
+                            ));
+                            state.store(ui.ctx(), resp.id);
+                        }
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                            go = true;
+                            keep = false;
+                        }
+                    });
                 });
-            });
         panel_edge(ui, bar.response.rect, Side::Bottom, pal);
         if go {
             let typed = text.trim().to_owned();
@@ -2275,6 +2389,14 @@ impl ReaderApp {
                 });
                 self.viewport_height = out.inner_rect.height().max(1.0);
                 self.max_scroll = (out.content_size.y - out.inner_rect.height()).max(0.0);
+                // Every frame, not once at dispatch: the outgoing page stays visible and
+                // scrollable for the length of a fetch, so where it was left is not known until
+                // the last frame it is on screen. `out.state` is what the scroll area settled
+                // on after clamping, which is where the page is rather than where it was asked
+                // to go.
+                if let Some(id) = self.shown_entry {
+                    self.history.set_offset(id, out.state.offset.y);
+                }
             });
     }
 
