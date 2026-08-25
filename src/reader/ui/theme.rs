@@ -382,12 +382,13 @@ pub fn measure_px(ctx: &egui::Context, opts: &ReadOpts) -> f32 {
 ///
 /// winit answers on the platforms where it can, and `raw.system_theme` is that answer.
 /// [`desktop`] is the Linux answer, where winit reports nothing at all; see its module doc.
-/// Neither knowing is Light, because a palette has to be picked.
+/// Which of the two wins is [`desktop::resolve`], out where a test can reach it; this is the
+/// `Context` read that neither of them needs.
 pub fn system_is_dark(ctx: &egui::Context) -> bool {
-    match ctx.input(|i| i.raw.system_theme) {
-        Some(theme) => theme == egui::Theme::Dark,
-        None => desktop::prefers_dark().unwrap_or(false),
-    }
+    let winit = ctx
+        .input(|i| i.raw.system_theme)
+        .map(|theme| theme == egui::Theme::Dark);
+    desktop::resolve(winit, desktop::prefers_dark())
 }
 
 /// How one severity of notice is painted.
