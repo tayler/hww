@@ -280,6 +280,244 @@ pub const PROFILES: &[SiteProfile] = &[
     },
 ];
 
+// ---------------------------------------------------------------------------------------------
+// Search engines
+// ---------------------------------------------------------------------------------------------
+
+/// Which engine a search goes to. Serialized into `settings.json`, so the names are stable and
+/// an unknown one falls back rather than throwing the file away (`engine_or_default`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EngineId {
+    DuckDuckGo,
+    Mojeek,
+    Brave,
+    Marginalia,
+}
+
+impl EngineId {
+    /// Declaration order is the order the settings panel offers them.
+    pub const ALL: [EngineId; 4] = [
+        EngineId::DuckDuckGo,
+        EngineId::Mojeek,
+        EngineId::Brave,
+        EngineId::Marginalia,
+    ];
+}
+
+impl Default for EngineId {
+    /// DuckDuckGo: the widest results of the four measured, read from the no-JavaScript
+    /// endpoint rather than the JavaScript shell. Its failure mode is a 202 CAPTCHA after
+    /// several rapid queries, which the frame rule reports as the engine declining and offers
+    /// another engine for; Mojeek, the next row, is the one that never challenged across
+    /// repeats and is the choice for a reader who searches in bursts.
+    fn default() -> Self {
+        EngineId::DuckDuckGo
+    }
+}
+
+/// One engine's address and result layout, and the fixture that proves the layout parses.
+///
+/// The charter for [`RULES`] applies with one substitution. A search is not a rewrite: the user
+/// asked for a search and named no host, so "same operator" cannot apply and **reported** does
+/// the whole job. `session::load` emits [`crate::session::Rewrite::Searched`] before the request
+/// goes out, naming the host and the terms, so a query never leaves silently. The table stays
+/// offline and compiled in for the same reason the rewrite table does: a fetched engine list is
+/// a channel that reports what you search for.
+pub struct SearchEngine {
+    pub id: EngineId,
+    /// Reader-facing name for the settings panel. Never an internal identifier.
+    pub label: &'static str,
+    /// Same form and matching as [`Rule::host`].
+    pub host: &'static str,
+    pub path: &'static str,
+    pub query_key: &'static str,
+    pub shape: crate::search::SearchShape,
+    /// Synthetic markup in the shape the selectors were written for: lorem text, the engine's
+    /// own class and attribute names, nothing pasted from a real result page.
+    /// `every_engine_parses_its_fixture` runs it.
+    pub fixture: &'static str,
+}
+
+/// One entry per engine measured to answer a plain no-JavaScript client.
+///
+/// Google serves an interstitial that hides every element, Startpage a proof-of-work challenge,
+/// and public SearxNG instances an antibot page. None is expressible as a shape, so none is
+/// here. `duckduckgo.com/?q=` is a JavaScript shell with zero result links, which is why the
+/// DuckDuckGo entry names the no-JS endpoint instead.
+///
+/// **Keep the table sorted by `host`**, as [`PROFILES`] is, and for the same reason.
+pub const ENGINES: &[SearchEngine] = &[
+    SearchEngine {
+        id: EngineId::DuckDuckGo,
+        label: "DuckDuckGo",
+        // The no-JS endpoint. `duckduckgo.com/?q=` is a JavaScript shell: measured at 24 KB
+        // with zero result links in the HTML, so there is nothing there to read.
+        host: "html.duckduckgo.com",
+        path: "/html/",
+        query_key: "q",
+        shape: crate::search::SearchShape {
+            frame: std::borrow::Cow::Borrowed("#links"),
+            // Ads are `div.result.result--ad` in the same list as the organic rows, and their
+            // anchors go to `//duckduckgo.com/y.js?…` rather than `?uddg=`, so `unwrap_param`
+            // cannot reach a destination inside one: the row would render like every other row
+            // and link at the engine's ad tracker. Excluded here rather than filtered later,
+            // because a shape is the whole description of what a result is.
+            result: std::borrow::Cow::Borrowed("div.result:not(.result--ad)"),
+            title: std::borrow::Cow::Borrowed("h2.result__title a.result__a"),
+            href: std::borrow::Cow::Borrowed("a.result__a"),
+            snippet: Some(std::borrow::Cow::Borrowed("a.result__snippet")),
+            // Result links are wrapped in `//duckduckgo.com/l/?uddg=…&rut=…`. Unwrapping sends
+            // the click to the site instead of through the engine's click tracker.
+            unwrap_param: Some("uddg"),
+        },
+        fixture: "<html><body><div id=\"links\">\
+            <div class=\"result result--ad result--ad--small\"><div class=\"links_main\">\
+            <h2 class=\"result__title\"><a rel=\"nofollow\" class=\"result__a\" href=\"//duckduckgo.com/y.js?ad_domain=sponsor.test&amp;ad_provider=x\">Sponsored lorem ipsum</a></h2>\
+            <a class=\"result__snippet\" href=\"//duckduckgo.com/y.js?ad_domain=sponsor.test\">An advertisement, not a result.</a>\
+            </div></div>\
+            <div class=\"result results_links results_links_deep web-result\"><div class=\"links_main\">\
+            <h2 class=\"result__title\"><a rel=\"nofollow\" class=\"result__a\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Florem.test%2Fone&amp;rut=aaa\">Lorem ipsum dolor sit amet</a></h2>\
+            <a class=\"result__snippet\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Florem.test%2Fone\">Consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore.</a>\
+            </div></div>\
+            <div class=\"result results_links results_links_deep web-result\"><div class=\"links_main\">\
+            <h2 class=\"result__title\"><a rel=\"nofollow\" class=\"result__a\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fipsum.test%2Ftwo&amp;rut=bbb\">Ut enim ad minim veniam quis</a></h2>\
+            <a class=\"result__snippet\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fipsum.test%2Ftwo\">Nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo.</a>\
+            </div></div>\
+            <div class=\"result results_links results_links_deep web-result\"><div class=\"links_main\">\
+            <h2 class=\"result__title\"><a rel=\"nofollow\" class=\"result__a\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fdolor.test%2Fthree&amp;rut=ccc\">Duis aute irure dolor in reprehenderit</a></h2>\
+            <a class=\"result__snippet\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fdolor.test%2Fthree\">Voluptate velit esse cillum dolore eu fugiat nulla pariatur.</a>\
+            </div></div>\
+            </div></body></html>",
+    },
+    SearchEngine {
+        id: EngineId::Mojeek,
+        label: "Mojeek",
+        host: "mojeek.com",
+        path: "/search",
+        query_key: "q",
+        shape: crate::search::SearchShape {
+            // Gated to the results list: the same page carries a shopping carousel of
+            // `a.serp-carousel__card`, which the generic extractor picks up as story cards.
+            frame: std::borrow::Cow::Borrowed(".serp-results"),
+            result: std::borrow::Cow::Borrowed("ul.results-standard > li"),
+            title: std::borrow::Cow::Borrowed("h2 a.title"),
+            href: std::borrow::Cow::Borrowed("h2 a.title"),
+            snippet: Some(std::borrow::Cow::Borrowed("p.s")),
+            unwrap_param: None,
+        },
+        fixture: "<html><body><div class=\"container serp-results\">\
+            <div class=\"serp-carousel\"><a class=\"serp-carousel__card\" href=\"https://shop.test/x\">A book about lorem $19.99</a></div>\
+            <ul class=\"results-standard\">\
+            <li class=\"r1\"><a title=\"https://lorem.test/one\" href=\"https://lorem.test/one\" class=\"ob\"><p class=\"i\"><span class=\"url\">lorem.test</span></p></a>\
+            <h2><a class=\"title\" href=\"https://lorem.test/one\">Lorem ipsum dolor sit amet</a></h2>\
+            <p class=\"s\">Consectetur adipiscing elit, sed do <strong>eiusmod</strong> tempor incididunt ut labore.</p></li>\
+            <li class=\"r2\"><a title=\"https://ipsum.test/two\" href=\"https://ipsum.test/two\" class=\"ob\"><p class=\"i\"><span class=\"url\">ipsum.test</span></p></a>\
+            <h2><a class=\"title\" href=\"https://ipsum.test/two\">Ut enim ad minim veniam quis</a></h2>\
+            <p class=\"s\">Nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo.</p></li>\
+            <li class=\"r3\"><a title=\"https://dolor.test/three\" href=\"https://dolor.test/three\" class=\"ob\"><p class=\"i\"><span class=\"url\">dolor.test</span></p></a>\
+            <h2><a class=\"title\" href=\"https://dolor.test/three\">Duis aute irure dolor in reprehenderit</a></h2>\
+            <p class=\"s\">Voluptate velit esse cillum dolore eu fugiat nulla pariatur.</p></li>\
+            </ul></div></body></html>",
+    },
+    SearchEngine {
+        id: EngineId::Marginalia,
+        label: "Marginalia",
+        // The operator's own current host; `search.marginalia.nu` redirects here.
+        host: "old-search.marginalia.nu",
+        path: "/search",
+        query_key: "query",
+        shape: crate::search::SearchShape {
+            frame: std::borrow::Cow::Borrowed("#results"),
+            result: std::borrow::Cow::Borrowed("section.search-result"),
+            title: std::borrow::Cow::Borrowed("h2 a.title"),
+            href: std::borrow::Cow::Borrowed("h2 a.title"),
+            snippet: Some(std::borrow::Cow::Borrowed("p.description")),
+            unwrap_param: None,
+        },
+        fixture: "<html><body><section id=\"results\">\
+            <section class=\"card search-result\"><div class=\"url\"><a href=\"https://lorem.test/one\">lorem.test/one</a></div>\
+            <h2><a class=\"title\" href=\"https://lorem.test/one\">Lorem ipsum dolor sit amet</a></h2>\
+            <p class=\"description\">Consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore.</p></section>\
+            <section class=\"card search-result\"><div class=\"url\"><a href=\"https://ipsum.test/two\">ipsum.test/two</a></div>\
+            <h2><a class=\"title\" href=\"https://ipsum.test/two\">Ut enim ad minim veniam quis</a></h2>\
+            <p class=\"description\">Nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo.</p></section>\
+            <section class=\"card search-result\"><div class=\"url\"><a href=\"https://dolor.test/three\">dolor.test/three</a></div>\
+            <h2><a class=\"title\" href=\"https://dolor.test/three\">Duis aute irure dolor in reprehenderit</a></h2>\
+            <p class=\"description\">Voluptate velit esse cillum dolore eu fugiat nulla pariatur.</p></section>\
+            </section></body></html>",
+    },
+    SearchEngine {
+        id: EngineId::Brave,
+        label: "Brave Search",
+        host: "search.brave.com",
+        path: "/search",
+        query_key: "q",
+        shape: crate::search::SearchShape {
+            // Every class on this page carries a build hash that rotates on deploy, so the
+            // shape uses the `data-` attributes instead. `data-type` is `web` or `cluster`;
+            // the LLM answer block is a `div.snippet` with neither.
+            frame: std::borrow::Cow::Borrowed("#search-page"),
+            result: std::borrow::Cow::Borrowed("div.snippet[data-type=\"web\"]"),
+            title: std::borrow::Cow::Borrowed(".search-snippet-title"),
+            href: std::borrow::Cow::Borrowed("a[href^=\"http\"]"),
+            // The description element is identified by a hash and nothing else. A title and a
+            // URL are still a usable row; a selector that breaks every deploy is not.
+            snippet: None,
+            unwrap_param: None,
+        },
+        fixture: "<html><body><main id=\"search-page\">\
+            <div class=\"snippet svelte-abc1234\" id=\"llm-snippet\"><div class=\"loading-rows\"></div></div>\
+            <div class=\"snippet svelte-abc1234\" data-pos=\"1\" data-type=\"web\">\
+            <a href=\"https://lorem.test/one\" class=\"svelte-def5678 l1\">\
+            <div class=\"title search-snippet-title line-clamp-1 svelte-def5678\">Lorem ipsum dolor sit amet</div></a></div>\
+            <div class=\"snippet svelte-abc1234\" data-pos=\"2\" data-type=\"web\">\
+            <a href=\"https://ipsum.test/two\" class=\"svelte-def5678 l1\">\
+            <div class=\"title search-snippet-title line-clamp-1 svelte-def5678\">Consectetur adipiscing elit sed</div></a></div>\
+            <div class=\"snippet svelte-abc1234\" data-pos=\"3\" data-type=\"web\">\
+            <a href=\"https://dolor.test/three\" class=\"svelte-def5678 l1\">\
+            <div class=\"title search-snippet-title line-clamp-1 svelte-def5678\">Eiusmod tempor incididunt ut labore</div></a></div>\
+            <div class=\"snippet svelte-abc1234\" data-pos=\"4\" data-type=\"cluster\">\
+            <a href=\"https://lorem.test/one\" class=\"svelte-def5678\">\
+            <div class=\"title search-snippet-title svelte-def5678\">Lorem ipsum dolor sit amet</div></a></div>\
+            </main></body></html>",
+    },
+];
+
+/// The engine whose result page `url` is, if it is one. Same matching as [`profile_for`]: a
+/// label boundary, http(s) only, and the path and query must both be the engine's own, so an
+/// engine's front page or settings page is an ordinary document.
+pub fn engine_for(url: &Url) -> Option<&'static SearchEngine> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?;
+    ENGINES.iter().find(|e| {
+        host_matches(host, e.host)
+            && url.path() == e.path
+            && url
+                .query_pairs()
+                .any(|(k, v)| k == e.query_key && !v.is_empty())
+    })
+}
+
+/// The table entry for an id. Total: [`EngineId`] has no variant without a row, which
+/// `every_engine_id_has_a_row` checks.
+pub fn engine_by_id(id: EngineId) -> &'static SearchEngine {
+    ENGINES
+        .iter()
+        .find(|e| e.id == id)
+        .expect("every EngineId has a table row")
+}
+
+/// The engine table, for `--show-engines`.
+pub fn describe_engines() -> String {
+    ENGINES
+        .iter()
+        .map(|e| format!("search {} {}{}\n", e.label, e.host, e.path))
+        .collect()
+}
+
 /// The profile for the page that arrived at `url`, and the host it was matched on. First
 /// match wins; http(s) only.
 pub fn profile_for(url: &Url) -> Option<(&'static str, &'static Profile)> {
@@ -553,6 +791,105 @@ mod tests {
     fn first_match_wins() {
         // Both rules match the host; the earlier, narrower one must not be shadowed.
         assert!(go("https://example.com/comments/1").starts_with("https://threads."));
+    }
+
+    /// The engine table, under the same guards as the rewrite table: normalized hosts, sorted
+    /// order, no unreachable row, and every id backed by one.
+    #[test]
+    fn engine_table_is_sound() {
+        for (i, e) in ENGINES.iter().enumerate() {
+            let parsed = Url::parse(&format!("https://{}/", e.host)).unwrap();
+            assert_eq!(
+                parsed.host_str(),
+                Some(e.host),
+                "engine {i}: host {:?} is not in the form Url produces",
+                e.host
+            );
+            assert!(
+                e.path.starts_with('/'),
+                "engine {i}: path {:?} must start with '/'",
+                e.path
+            );
+            assert!(
+                !e.query_key.is_empty(),
+                "engine {i}: has no query parameter name"
+            );
+            assert!(
+                ENGINES[..i].iter().all(|p| p.host != e.host),
+                "engine {i}: duplicate host {:?}",
+                e.host
+            );
+        }
+
+        let hosts: Vec<&str> = ENGINES.iter().map(|e| e.host).collect();
+        let mut sorted = hosts.clone();
+        sorted.sort_unstable();
+        assert_eq!(hosts, sorted, "keep ENGINES sorted by host");
+
+        for id in EngineId::ALL {
+            assert_eq!(engine_by_id(id).id, id);
+        }
+        assert_eq!(
+            EngineId::ALL.len(),
+            ENGINES.len(),
+            "every EngineId needs a table row and every row an id"
+        );
+    }
+
+    /// A search URL built for an engine must be recognized as that engine's, or the reader
+    /// would fetch the page and then read it as prose.
+    #[test]
+    fn a_built_query_url_round_trips() {
+        for e in ENGINES {
+            let url = crate::search::query_url(e, "lorem ipsum");
+            let found = engine_for(&url).expect("built its own URL and did not match it back");
+            assert_eq!(found.id, e.id);
+            assert_eq!(
+                crate::search::terms_of(e, &url).as_deref(),
+                Some("lorem ipsum")
+            );
+        }
+    }
+
+    /// An engine's other pages are ordinary documents. Only the result path, carrying a
+    /// non-empty query, is read as results.
+    #[test]
+    fn only_the_result_page_is_a_search() {
+        let e = engine_by_id(EngineId::Mojeek);
+        for other in [
+            format!("https://{}/", e.host),
+            format!("https://{}/about", e.host),
+            format!("https://{}{}", e.host, e.path),
+            format!("https://{}{}?q=", e.host, e.path),
+            format!("https://{}{}?other=x", e.host, e.path),
+        ] {
+            let url = Url::parse(&other).unwrap();
+            assert!(engine_for(&url).is_none(), "{other} was read as a search");
+        }
+    }
+
+    /// The label-boundary property, on this table too: a lookalike host must not be read as
+    /// an engine, or a hostile page could dictate what hww renders as "results".
+    #[test]
+    fn a_lookalike_host_is_not_an_engine() {
+        let e = engine_by_id(EngineId::Mojeek);
+        for host in [
+            format!("evil-{}", e.host),
+            format!("{}.attacker.test", e.host),
+        ] {
+            let url = Url::parse(&format!("https://{host}{}?q=lorem", e.path)).unwrap();
+            assert!(engine_for(&url).is_none(), "{host} matched the table");
+        }
+        // A real subdomain still matches, as it does for the rewrite table.
+        let sub = Url::parse(&format!("https://www.{}{}?q=lorem", e.host, e.path)).unwrap();
+        assert!(engine_for(&sub).is_some());
+    }
+
+    /// Non-web schemes never reach the engine table, matching `apply` and `profile_for`.
+    #[test]
+    fn only_web_schemes_are_searches() {
+        let url = Url::parse("gemini://mojeek.com/search?q=lorem").unwrap();
+        assert!(engine_for(&url).is_none());
     }
 
     #[test]

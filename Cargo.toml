@@ -40,8 +40,9 @@ rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
 
 # An explicit [[bin]] whose `path` matches an auto-discovered file takes precedence and merges
 # cleanly, so these get their `required-features` while `bench` and `dbg` keep being found on
-# their own. The plain-text client was removed because it printed untrusted page text straight
-# to a terminal, an escape-injection surface; headless `--why` triage stays on the application.
+# their own. Nothing here prints page text to a terminal: untrusted text carrying an escape
+# sequence is an injection surface, so triage is headless `--why` on the application and
+# every string it prints goes through `render::sanitize_for_terminal` first.
 [[bin]]
 name = "hww"
 path = "src/bin/hww.rs"

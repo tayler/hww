@@ -202,6 +202,11 @@ pub struct Explanation {
     pub cards_text: usize,
     /// What the site profile did, if one applied. Its `host` is filled by `session`.
     pub profile: Option<crate::profile::ProfileReport>,
+    /// What the search-shape reader did, if the page was a known engine's result page. Filled
+    /// by `session`, which owns that decision; the extractor knows no engines. Without this
+    /// line `--why` would rank root candidates for a page whose document came from somewhere
+    /// else entirely, which is the one thing the flag exists to prevent.
+    pub search: Option<String>,
     /// What the thread merge did: `"replaced the document"`, `"appended"`,
     /// `"dropped (thinner than the floor)"`, or `"no thread"`.
     pub thread_merge: &'static str,
@@ -218,7 +223,7 @@ pub struct Explanation {
     pub text_len: usize,
 }
 
-/// Extract, and say why. The CLI's `--why` and `bin/dbg` print this.
+/// Extract, and say why. Headless `--why` and `bin/dbg` print this.
 pub fn explain(source: &str, url: &Url) -> Explanation {
     extract_traced(source, url, &crate::profile::Profile::NONE).1
 }
@@ -245,6 +250,9 @@ impl std::fmt::Display for Explanation {
                     .collect::<Vec<_>>()
                     .join(", ")
             )?;
+        }
+        if let Some(sr) = &self.search {
+            writeln!(f, "search: {sr}")?;
         }
         writeln!(f, "root candidates (ranked by emitted text; * chose):")?;
         if self.candidates.is_empty() {
@@ -396,6 +404,7 @@ fn extract_traced(
         cards,
         cards_text: 0,
         profile: profile_report,
+        search: None,
         thread_merge: "no thread",
         meta: vec![
             ("title", title_src, doc.title.clone()),

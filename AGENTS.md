@@ -125,9 +125,10 @@ disableable and the disclosure remains reported.
 
 ## Site rules
 
-`src/sites.rs` is the only file in the crate that contains a hostname. Rewrites match the entry
-URL; profiles match the final URL and are data from `src/profile.rs`. Extractors do not know
-domains. `session::load` owns the pipeline and reports a rewrite before dispatch.
+`src/sites.rs` is the only file in the crate that contains a hostname, tests included. Rewrites
+match the entry URL; profiles and search engines match the final URL and are data from
+`src/profile.rs` and `src/search.rs`. Extractors do not know domains. `session::load` owns the
+pipeline and reports a rewrite, and a search, before dispatch.
 
 A builtin rewrite ships only when all four conditions hold:
 
@@ -140,6 +141,26 @@ Match hosts at a label boundary. Leave non-web schemes and credential-bearing UR
 Apply a rule once, to the entry URL only. Keep profile tables sorted and update
 `docs/sites-checked.md` after triage. A stale profile must fail visibly through its floor/report,
 not silently override extraction. A dead rewrite reports on stderr; there is no automatic retry.
+
+## Search
+
+A `SearchShape` is selectors only; the hosts live in `sites::ENGINES` and the settings file
+stores an `EngineId`, never an address. A shape's `frame` is the engine's own result container,
+present whether or not it found anything: it is the only thing separating "answered, found
+nothing" from "declined to search", and dropping it would make hww blame the reader's words for
+a rate limit. An empty answer is the frame *and* less than `THIN_TEXT` inside it; a full frame
+with no parsable rows is a redesign and falls through to the extractor. The parser stays a
+candidate with a floor, so no reading of a result page may end in a blank screen.
+
+`session::search_notice` takes no `LoadOptions` and must not: `--no-search` and `Shift+R` decide
+how a response is read, never whether the request is disclosed. `search::resolve_input` refuses
+empty input, so no keystroke turns a blank URL bar into a request. Do not widen
+`FetchError::LikelyBlocked` to cover a challenge page; it means a document read-timeout and the
+split is measured. Do not name a build hash in a selector
+(`no_shape_depends_on_a_build_hash`), and do not tune `ir::THIN_TEXT` to capture one engine's
+interstitial. Result entries carry `image: None`: the engines serve result favicons from their
+own image hosts. `LoadOptions::search` is off in `BARE`, which is how a stale shape is
+diagnosed. Adding an engine means a table row, a fixture, and a `Choice` in `prefs::fields`.
 
 ## Corpus safety
 

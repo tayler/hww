@@ -405,17 +405,40 @@ pub fn splash(ui: &mut Ui, pal: &Palette, opts: &ReadOpts, column: Column, s: &n
             ui.set_min_width(column.measure);
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             ui.add_space(theme::snap(opts.base_size_pt * 5.0));
-            let d = theme::snap(opts.base_size_pt * 4.0);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
-            if ui.is_rect_visible(rect) {
-                logo(ui.painter(), rect, pal);
-            }
-            ui.add_space(theme::snap(opts.base_size_pt * 0.6));
-            ui.label(
-                RichText::new(s.wordmark)
-                    .font(theme::wordmark_font(opts))
-                    .color(pal.fg),
+            // Mark and wordmark on one line, laid out by hand rather than by a horizontal
+            // strip: the mark's ink fills only the middle 36 of its 64 grid, so a row that
+            // centres two boxes hangs it above the letters. Measure the word, allocate one
+            // rect for both, and centre each on the same axis, which is what makes the wave
+            // read as the same height as `hww` instead of floating over it.
+            let wordmark = ui.painter().layout_no_wrap(
+                s.wordmark.to_owned(),
+                theme::wordmark_font(opts),
+                pal.fg,
             );
+            let d = theme::snap(opts.base_size_pt * 4.4);
+            let gap = theme::snap(opts.base_size_pt * 0.8);
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(
+                    d + gap + wordmark.rect.width(),
+                    d.max(wordmark.rect.height()),
+                ),
+                egui::Sense::hover(),
+            );
+            if ui.is_rect_visible(rect) {
+                let mark = egui::Rect::from_center_size(
+                    egui::pos2(rect.left() + d * 0.5, rect.center().y),
+                    egui::vec2(d, d),
+                );
+                logo(ui.painter(), mark, pal);
+                ui.painter().galley(
+                    egui::pos2(
+                        rect.left() + d + gap,
+                        rect.center().y - wordmark.rect.height() * 0.5,
+                    ),
+                    wordmark,
+                    pal.fg,
+                );
+            }
             ui.add_space(theme::snap(opts.base_size_pt * 0.3));
             ui.label(
                 RichText::new(s.tagline)

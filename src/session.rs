@@ -25,6 +25,10 @@ pub struct LoadOptions {
     /// Apply the builtin profile table to the page that arrives. `--no-profile` and the
     /// reader's `Shift+R` clear it.
     pub profile: bool,
+    /// Read a known engine's result page as results rather than as prose. `--no-search` and
+    /// the reader's `Shift+R` clear it, which is how you see the SERP the engine actually
+    /// sent when a shape looks wrong.
+    pub search: bool,
 }
 
 impl Default for LoadOptions {
@@ -32,6 +36,7 @@ impl Default for LoadOptions {
         Self {
             rewrite: true,
             profile: true,
+            search: true,
         }
     }
 }
@@ -41,6 +46,7 @@ impl LoadOptions {
     pub const BARE: LoadOptions = LoadOptions {
         rewrite: false,
         profile: false,
+        search: false,
     };
 }
 
@@ -49,7 +55,17 @@ impl LoadOptions {
 /// not type.
 #[derive(Debug, Clone)]
 pub enum Rewrite {
-    Applied { from: Url, to: Url },
+    Applied {
+        from: Url,
+        to: Url,
+    },
+    /// A search. The user named terms, not a host, so "same operator" cannot apply and the
+    /// disclosure does the whole job: the host and the words both appear before the request
+    /// goes out, and a hang cannot swallow them.
+    Searched {
+        host: &'static str,
+        terms: String,
+    },
 }
 
 impl std::fmt::Display for Rewrite {
@@ -61,6 +77,9 @@ impl std::fmt::Display for Rewrite {
                 from.host_str().unwrap_or("?"),
                 to.host_str().unwrap_or("?")
             ),
+            Rewrite::Searched { host, terms } => {
+                write!(f, "[searching {host} for {terms:?}]")
+            }
         }
     }
 }
@@ -170,6 +189,18 @@ pub enum LoadError {
     /// worst kind, because it blames the site.
     #[error("{content_type} is not a web page")]
     NotWebPage { content_type: String },
+    /// The engine answered with a challenge instead of results.
+    ///
+    /// Deliberately not [`FetchError::LikelyBlocked`], which means a document read-timeout and
+    /// nothing else. The measured shape here is the opposite: a prompt 2xx carrying a CAPTCHA.
+    /// Folding them together would cost the distinction Phase 0 paid for and would report a
+    /// hung host and a challenging one with the same wording and the same useless remedy.
+    #[error("{engine} asked for a human check instead of answering")]
+    SearchBlocked { engine: &'static str },
+    /// The engine answered and found nothing. Not a failure of the fetch, but the reading
+    /// column carries page content only, so "nothing" has to be said as a page remark.
+    #[error("{engine} found nothing for {terms:?}")]
+    SearchEmpty { engine: &'static str, terms: String },
 }
 
 /// What following a link should do, decided **before** anything is dispatched.
@@ -266,8 +297,8 @@ impl Session {
 
     /// Fetch and extract one page.
     ///
-    /// `notify` is called before the request is dispatched, never after. The CLI's closure is
-    /// an `eprintln!`; the reader's sends the notice to the UI thread and repaints, so the
+    /// `notify` is called before the request is dispatched, never after. Headless `--why`
+    /// passes an `eprintln!`; the reader's sends the notice to the UI thread and repaints, so the
     /// line is on screen for the whole of a 15 s hang instead of arriving with the corpse.
     pub fn load(
         &self,
@@ -276,6 +307,33 @@ impl Session {
         notify: &mut dyn FnMut(&Rewrite),
     ) -> Result<Loaded, LoadError> {
         let f = self.fetch_page(requested, opts, notify)?;
+        if let Some((engine, terms)) = f.search(opts) {
+            match crate::search::read(&f.source, &f.resp.final_url, engine, f.resp.status) {
+                crate::search::Outcome::Results(entries) => {
+                    let doc = crate::search::document(&f.resp.final_url, &terms, entries);
+                    let chars = doc.text_len();
+                    return Ok(Loaded {
+                        doc,
+                        prov: f.provenance(requested, chars, None),
+                    });
+                }
+                crate::search::Outcome::Blocked => {
+                    return Err(LoadError::SearchBlocked {
+                        engine: engine.label,
+                    });
+                }
+                crate::search::Outcome::Empty => {
+                    return Err(LoadError::SearchEmpty {
+                        engine: engine.label,
+                        terms,
+                    });
+                }
+                // The shape has gone stale, or this is a page it was not written for. The
+                // generic extractor reads every one of these engines acceptably, so falling
+                // through costs a rougher page rather than a blank one.
+                crate::search::Outcome::Unrecognized => {}
+            }
+        }
         let (host, profile) = f.profile(opts);
         let x = html::extract_with_profile(&f.source, &f.resp.final_url, profile);
         let report = x.profile.map(|mut r| {
@@ -302,6 +360,30 @@ impl Session {
         if let Some(r) = &mut why.profile {
             r.host = host.unwrap_or_default().to_owned();
         }
+        // `load` may never reach the extractor at all on these pages. Saying which engine
+        // matched, and what reading its shape produced, is the difference between `--why`
+        // explaining the pipeline and `--why` explaining a path that did not run.
+        if let Some((engine, terms)) = f.search(opts) {
+            why.search = Some(
+                match crate::search::read(&f.source, &f.resp.final_url, engine, f.resp.status) {
+                    crate::search::Outcome::Results(entries) => format!(
+                        "{} shape matched {} result(s) for {terms:?}; the candidates below did not run",
+                        engine.label,
+                        entries.len()
+                    ),
+                    crate::search::Outcome::Blocked => {
+                        format!("{} answered a challenge, not results", engine.label)
+                    }
+                    crate::search::Outcome::Empty => {
+                        format!("{} answered, and found nothing for {terms:?}", engine.label)
+                    }
+                    crate::search::Outcome::Unrecognized => format!(
+                        "{} shape matched nothing; fell back to the extractor below",
+                        engine.label
+                    ),
+                },
+            );
+        }
         let prov = f.provenance(requested, why.text_len, why.profile.clone());
         Ok((why, prov))
     }
@@ -325,6 +407,9 @@ impl Session {
                 from: requested.clone(),
                 to: url.clone(),
             });
+        }
+        if let Some(n) = search_notice(&url) {
+            notify(&n);
         }
 
         let resp = self.fetcher.get(&url)?;
@@ -351,6 +436,26 @@ impl Session {
     }
 }
 
+/// The disclosure a request to a search engine owes, before it is dispatched.
+///
+/// Keyed on the URL about to be requested rather than the one that arrives: the charter's
+/// promise is that nothing leaves silently, and a notice that waited for the response could not
+/// keep it.
+///
+/// It takes no [`LoadOptions`], and that is the rule rather than an omission.
+/// `LoadOptions::search` decides how the *response* is read, while `search::resolve_input` has
+/// already turned the reader's words into this URL whatever the flag says. Gating the
+/// disclosure on it would make `--no-search` and `Shift+R` the two quietest ways to search,
+/// which is the opposite of what both are for.
+fn search_notice(url: &Url) -> Option<Rewrite> {
+    let engine = crate::sites::engine_for(url)?;
+    let terms = crate::search::terms_of(engine, url)?;
+    Some(Rewrite::Searched {
+        host: engine.host,
+        terms,
+    })
+}
+
 /// A page after decode and before extraction.
 struct Fetched {
     /// What was requested, after the rewrite table had its say.
@@ -362,6 +467,20 @@ struct Fetched {
 }
 
 impl Fetched {
+    /// The engine whose result page arrived, and the terms it was asked for.
+    ///
+    /// Keyed on the final URL, as `profile` is, so a redirect that lands somewhere else is not
+    /// read as results. The pre-dispatch notice is keyed on the *requested* URL instead; they
+    /// differ only when an engine bounces, which is itself worth seeing rather than hiding.
+    fn search(&self, opts: &LoadOptions) -> Option<(&'static crate::sites::SearchEngine, String)> {
+        if !opts.search {
+            return None;
+        }
+        let engine = crate::sites::engine_for(&self.resp.final_url)?;
+        let terms = crate::search::terms_of(engine, &self.resp.final_url)?;
+        Some((engine, terms))
+    }
+
     /// The profile for the page that arrived, keyed on the final URL: a profile describes
     /// bytes in hand, and the rewrite table has already had its say on the entry URL.
     fn profile(
@@ -562,6 +681,74 @@ mod tests {
     /// Every shipped profile, run over its own fixture with and without the profile: every
     /// field matched, and the document changed. A profile that no longer does anything on the
     /// markup it was written for fails here before it ships stale.
+    /// A search is disclosed before the request goes out, naming both the host and the words.
+    /// The words matter: "hww went to a host you did not type" is only half the disclosure when
+    /// what it carried was your query.
+    #[test]
+    fn a_search_notice_names_the_host_and_the_terms() {
+        // The host comes from the table, not from a literal here: `sites.rs` is the only file
+        // in the crate that spells one, tests included.
+        let engine = crate::sites::engine_by_id(crate::sites::EngineId::default());
+        let n = Rewrite::Searched {
+            host: engine.host,
+            terms: "rust ownership".to_owned(),
+        };
+        let line = n.to_string();
+        assert!(line.contains(engine.host), "{line}");
+        assert!(line.contains("rust ownership"), "{line}");
+    }
+
+    /// The search disclosure is owed by the request, not by how the answer will be read.
+    ///
+    /// `--no-search` and `Shift+R` turn off *reading* a result page as results. They used to
+    /// turn off saying that a search was leaving, which made them the two quietest ways to
+    /// send a query to a third party. The signature is the guarantee: no `LoadOptions` reaches
+    /// this decision.
+    #[test]
+    fn the_search_disclosure_does_not_depend_on_the_options() {
+        let engine = crate::sites::engine_by_id(crate::sites::EngineId::default());
+        let searched = crate::search::query_url(engine, "rust ownership");
+        let line = search_notice(&searched)
+            .expect("a query URL owes a notice")
+            .to_string();
+        assert!(line.contains(engine.host), "{line}");
+        assert!(line.contains("rust ownership"), "{line}");
+        // An engine's other pages, and a query with no terms in it, are not searches.
+        let front = Url::parse(&format!("https://{}/", engine.host)).unwrap();
+        assert!(search_notice(&front).is_none());
+        assert!(search_notice(&crate::search::query_url(engine, "")).is_none());
+        assert!(search_notice(&Url::parse("https://lorem.test/one").unwrap()).is_none());
+    }
+
+    /// `Shift+R` and `--no-search` are how you see the result page the engine actually sent.
+    /// If `BARE` left search on, a stale shape would be unfalsifiable from inside the reader.
+    #[test]
+    fn bare_reads_a_result_page_as_a_page() {
+        const { assert!(!LoadOptions::BARE.search) };
+        assert!(LoadOptions::default().search);
+    }
+
+    /// Every engine's own fixture reads as results through the same call `load` makes, and
+    /// produces a document made of entries rather than prose.
+    #[test]
+    fn every_engine_fixture_becomes_entries() {
+        for e in crate::sites::ENGINES {
+            let url = crate::search::query_url(e, "lorem ipsum");
+            let crate::search::Outcome::Results(entries) =
+                crate::search::read(e.fixture, &url, e, 200)
+            else {
+                panic!("{:?}: its own fixture did not read as results", e.id);
+            };
+            let doc = crate::search::document(&url, "lorem ipsum", entries);
+            assert!(
+                matches!(doc.blocks.as_slice(), [ir::Block::Entries(es)] if es.len() >= 3),
+                "{:?}: document is not a run of entries",
+                e.id
+            );
+            assert!(doc.text_len() > 0);
+        }
+    }
+
     #[test]
     fn every_profile_earns_its_keep() {
         for p in crate::sites::PROFILES {

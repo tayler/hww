@@ -50,17 +50,19 @@ pub enum Group {
     Page,
     Replies,
     Window,
+    Search,
     Privacy,
 }
 
 impl Group {
     /// Every group, in panel order.
-    pub const ALL: [Group; 6] = [
+    pub const ALL: [Group; 7] = [
         Group::Text,
         Group::Theme,
         Group::Page,
         Group::Replies,
         Group::Window,
+        Group::Search,
         Group::Privacy,
     ];
 
@@ -72,6 +74,7 @@ impl Group {
             Group::Page => "Page",
             Group::Replies => "Replies",
             Group::Window => "Window",
+            Group::Search => "Search",
             Group::Privacy => "Privacy",
         }
     }
@@ -87,6 +90,10 @@ impl Group {
                 "The d key cycles the first four and never lands on the high-contrast pair, \
                  which the panel is the only way to reach. Pressing d while one of them is on \
                  leaves it, so choose here and leave d alone.",
+            ),
+            Group::Search => Some(
+                "Typing words rather than an address searches. The words go to the engine \
+                 chosen here, and hww names it on screen before the request leaves.",
             ),
             Group::Privacy => Some(
                 "hww has no cookie store, sends no Referer for pages, and makes no request you \
@@ -114,13 +121,14 @@ pub enum FieldId {
     ReplyIndent,
     StopIndentingAfter,
     ShowMenuBar,
+    SearchEngine,
     SendImageReferer,
 }
 
 impl FieldId {
     /// Every field. Walked by the tests, and by nothing else: the panel walks [`fields`],
     /// which carries the order and the grouping.
-    pub const ALL: [FieldId; 14] = [
+    pub const ALL: [FieldId; 15] = [
         FieldId::LineWidth,
         FieldId::TextSize,
         FieldId::LineSpacing,
@@ -134,6 +142,7 @@ impl FieldId {
         FieldId::ReplyIndent,
         FieldId::StopIndentingAfter,
         FieldId::ShowMenuBar,
+        FieldId::SearchEngine,
         FieldId::SendImageReferer,
     ];
 
@@ -160,6 +169,7 @@ impl FieldId {
             FieldId::Zoom => (None, "zoom_factor"),
             FieldId::ScrollStep => (None, "scroll_lines"),
             FieldId::ShowMenuBar => (None, "show_menu_bar"),
+            FieldId::SearchEngine => (None, "search_engine"),
             FieldId::SendImageReferer => (None, "send_image_referer"),
         }
     }
@@ -266,6 +276,36 @@ const TYPEFACES: &[Choice] = &[
         "Mono",
         "IBM Plex Mono. Equal-width characters can make code easier to scan, but ordinary prose \
          may look more mechanical.",
+    ),
+];
+
+/// One entry per row of `sites::ENGINES`, in `EngineId::ALL` order, which
+/// `the_engine_choices_match_the_table` holds to. The labels are repeated here rather than read
+/// from the table because this is the panel's wording and the panel's tests run on it; the test
+/// is what keeps the two from drifting.
+///
+/// The notes say what a reader cannot see from a name: whose index it is, and what it costs.
+const SEARCH_ENGINES: &[Choice] = &[
+    choice_note(
+        "DuckDuckGo",
+        "Finds the widest range of results. Note that several searches in quick succession may trigger a \
+         human check that hww cannot answer; if that happens, wait a moment or choose another \
+         engine.",
+    ),
+    choice_note(
+        "Mojeek",
+        "Reliable for repeated searches and rarely interrupts you, but finds fewer results than \
+         the larger engines.",
+    ),
+    choice_note(
+        "Brave Search",
+        "Finds nearly as many results as the largest engines, but results may occasionally display \
+         poorly.",
+    ),
+    choice_note(
+        "Marginalia",
+        "Excellent for essays, documentation, and small non-commercial sites, but poor for \
+         shopping or current topics.",
     ),
 ];
 
@@ -519,6 +559,18 @@ pub fn fields() -> Vec<Field> {
             control: Toggle,
         },
         Field {
+            id: F::SearchEngine,
+            group: G::Search,
+            label: "Search with",
+            note: Some(
+                "Used when what you type in the address bar is not an address. hww shows the \
+                 engine's name and your words before the request goes out, so a search never \
+                 leaves without saying so.",
+            ),
+            keys: "",
+            control: Choice(SEARCH_ENGINES),
+        },
+        Field {
             id: F::SendImageReferer,
             group: G::Privacy,
             label: "Send the site name when loading images",
@@ -560,6 +612,12 @@ pub fn get(s: &Settings, id: FieldId) -> Value {
             ImagePolicy::Never => 2,
             ImagePolicy::NoRequests => 3,
         }),
+        FieldId::SearchEngine => Value::Index(
+            crate::sites::EngineId::ALL
+                .iter()
+                .position(|&e| e == s.search_engine)
+                .unwrap_or(0),
+        ),
         FieldId::ShowLinkAddresses => Value::Bool(s.read.show_link_urls),
         FieldId::Zoom => Value::Num(s.zoom_factor),
         FieldId::ScrollStep => Value::Num(s.scroll_lines),
@@ -634,6 +692,11 @@ pub fn set(s: &mut Settings, id: FieldId, v: Value) {
                 Some(2) => ImagePolicy::Never,
                 Some(3) => ImagePolicy::NoRequests,
                 _ => s.read.images,
+            }
+        }
+        FieldId::SearchEngine => {
+            if let Some(e) = v.index().and_then(|i| crate::sites::EngineId::ALL.get(i)) {
+                s.search_engine = *e;
             }
         }
         FieldId::ShowLinkAddresses => {
@@ -719,7 +782,7 @@ mod tests {
             }
         }
         assert!(
-            leaves.len() >= 14,
+            leaves.len() >= 15,
             "expected at least fourteen settings, walked {}",
             leaves.len()
         );
@@ -749,6 +812,46 @@ mod tests {
         assert_eq!(claimed.len(), leaves.len());
     }
 
+    /// The panel's engine list and `sites::ENGINES` are two orderings of the same thing. The
+    /// index `get` and `set` pass through is a position in `EngineId::ALL`, so a row added to
+    /// one and not the other silently selects the wrong engine.
+    #[test]
+    fn the_engine_choices_match_the_table() {
+        use crate::sites::EngineId;
+        assert_eq!(SEARCH_ENGINES.len(), EngineId::ALL.len());
+        for (i, id) in EngineId::ALL.into_iter().enumerate() {
+            assert_eq!(
+                SEARCH_ENGINES[i].label,
+                crate::sites::engine_by_id(id).label,
+                "choice {i} and the table disagree about {id:?}"
+            );
+        }
+    }
+
+    /// Round-trip through the index the panel actually hands back, for every engine.
+    #[test]
+    fn every_engine_survives_the_panel() {
+        use crate::sites::EngineId;
+        assert!(
+            fields().iter().any(|f| f.id == FieldId::SearchEngine),
+            "the search engine field is exposed in the panel"
+        );
+        for (i, id) in EngineId::ALL.into_iter().enumerate() {
+            let mut s = Settings::default();
+            set(&mut s, FieldId::SearchEngine, Value::Index(i));
+            assert_eq!(s.search_engine, id);
+            assert_eq!(get(&s, FieldId::SearchEngine), Value::Index(i));
+        }
+        // An index the panel could never produce leaves the setting alone rather than
+        // resetting it.
+        let mut s = Settings {
+            search_engine: EngineId::Marginalia,
+            ..Default::default()
+        };
+        set(&mut s, FieldId::SearchEngine, Value::Index(999));
+        assert_eq!(s.search_engine, EngineId::Marginalia);
+    }
+
     /// `ALL` lists every variant, enforced by an exhaustive match rather than by a length.
     ///
     /// Same shape as `opts::real_lists_every_palette`, and for the same reason: a variant added
@@ -771,6 +874,7 @@ mod tests {
                 | FieldId::ReplyIndent
                 | FieldId::StopIndentingAfter
                 | FieldId::ShowMenuBar
+                | FieldId::SearchEngine
                 | FieldId::SendImageReferer => true,
             };
             assert!(listed);
