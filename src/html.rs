@@ -223,7 +223,7 @@ pub struct Explanation {
     pub text_len: usize,
 }
 
-/// Extract, and say why. Headless `--why` and `bin/dbg` print this.
+/// Extract, and say why. Headless `--why` prints this.
 pub fn explain(source: &str, url: &Url) -> Explanation {
     extract_traced(source, url, &crate::profile::Profile::NONE).1
 }
@@ -2414,7 +2414,7 @@ mod tests {
 
     /// Regression: `comment` was in NOISE_HINT, which deleted every comment body on thread
     /// pages. Both trafilatura and the first cut of this extractor returned only usernames
-    /// and timestamps on Hacker News. See docs/phase0-findings.md.
+    /// and timestamps on Hacker News. See docs/findings.md.
     /// Markup indentation puts a whitespace-only text node between adjacent inline elements
     /// constantly, and dropping it welds two words into one.
     #[test]

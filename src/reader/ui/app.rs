@@ -45,7 +45,8 @@ use crate::reader::image_decode;
 use crate::reader::measure::{self, Heights};
 use crate::reader::menu::{self, Command};
 use crate::reader::notice::{
-    self, Button, IMAGES_ALL_FAILED, IMAGES_ARE_DECLINED, IMAGES_ARE_OFF, Notice,
+    self, Button, IMAGES_ALL_FAILED, IMAGES_ARE_DECLINED, IMAGES_ARE_DECLINED_OR_FAILED,
+    IMAGES_ARE_OFF, Notice,
 };
 use crate::reader::outline::{self, OutlineEntry};
 use crate::reader::pageinfo;
@@ -821,22 +822,23 @@ impl ReaderApp {
         };
         let all = collect_image_srcs(&ready.loaded.doc);
         let base = ready.loaded.prov.final_url.clone();
+        // Declined, and *only* declined. Testing the address the other way round dropped every
+        // `src` that fails to join too, so a page whose images all had unusable addresses
+        // reported them as a format hww does not display — a second wrong claim about the page,
+        // in place of the one this removes. An unusable address still belongs in the list;
+        // `request_image` has the honest message for it. Asked twice below: once to decide what
+        // to request, and once to decide what to say when that comes to nothing.
+        let is_declined = |s: &str| {
+            base.join(s)
+                .is_ok_and(|u| image_decode::declined_by_url(&u).is_some())
+        };
         // Before the hosts are gathered and before the count is taken. This remark names every
         // host it is about to contact, so a declined address left in would have it name one it
         // never reaches — the same claim about the network that `autoload::plan` refuses to
         // make for an address that will not resolve.
         let srcs: Vec<String> = all
             .iter()
-            // Declined, and *only* declined. Testing the address the other way round dropped
-            // every `src` that fails to join too, so a page whose images all had unusable
-            // addresses reported them as a format hww does not display — a second wrong claim
-            // about the page, in place of the one this filter removes. An unusable address
-            // still belongs in the list; `request_image` has the honest message for it.
-            .filter(|s| {
-                !base
-                    .join(s)
-                    .is_ok_and(|u| image_decode::declined_by_url(&u).is_some())
-            })
+            .filter(|s| !is_declined(s))
             // And the same argument one step later. `request_image` returns without asking for
             // a picture that has already failed permanently, so counting one here would put a
             // host in the remark that this press will not contact — "loading 3 image(s) from
@@ -852,17 +854,17 @@ impl ReaderApp {
         hosts.sort();
         hosts.dedup();
         if srcs.is_empty() {
-            // Which of the two is true matters: a page whose pictures were all declined has
-            // pictures, and saying it has none describes a page the reader is not looking at.
-            // Which of the three is true matters, and they are different pages: one with no
-            // pictures, one whose pictures hww will not open, one whose pictures were asked
-            // for and refused.
-            self.flash(if all.is_empty() {
-                "no images on this page".to_owned()
-            } else if all.iter().any(|s| self.images.refuses_retry(s)) {
-                IMAGES_ALL_FAILED.to_owned()
-            } else {
-                IMAGES_ARE_DECLINED.to_owned()
+            // Which of the four is true matters, and they are four different pages: one with no
+            // pictures, one whose pictures hww will not open, one whose pictures were asked for
+            // and refused, and one that is some of each. Counted rather than asked with `any`,
+            // which answered "every image has already failed" for a page where most of them
+            // were never requested at all.
+            let declined = all.iter().filter(|s| is_declined(s)).count();
+            self.flash(match (all.len(), declined) {
+                (0, _) => "no images on this page".to_owned(),
+                (n, d) if n == d => IMAGES_ARE_DECLINED.to_owned(),
+                (_, 0) => IMAGES_ALL_FAILED.to_owned(),
+                _ => IMAGES_ARE_DECLINED_OR_FAILED.to_owned(),
             });
             return;
         }

@@ -19,7 +19,7 @@
 //! # The submenu marker
 //!
 //! Set from [`menu::SUBMENU_MARKER`] rather than left to egui, whose default `⏵` (U+23F5) is in
-//! none of the twelve faces this binary carries and draws as a box. See the `menu` module doc.
+//! none of the faces this binary carries and draws as a box. See the `menu` module doc.
 //!
 //! # Keyboard
 //!

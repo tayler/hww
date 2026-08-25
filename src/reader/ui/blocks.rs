@@ -79,8 +79,11 @@ pub fn block_ui(ui: &mut Ui, b: &ir::Block, ctx: &mut RenderCtx<'_>) {
                 let (slot, _) =
                     ui.allocate_exact_size(egui::vec2(indent, 0.0), egui::Sense::hover());
                 let role = match ctx.opts.family {
-                    FontChoice::Mono => FontChoice::Mono,
-                    _ => FontChoice::Serif,
+                    // A page that chose one family for the whole of itself keeps it here too,
+                    // the rule `theme::heading_role` follows; only the sans page borrows the
+                    // display face.
+                    FontChoice::Sans => FontChoice::Serif,
+                    other => other,
                 };
                 ui.painter().text(
                     egui::pos2(slot.left(), slot.top() - theme::snap(base * 0.35)),

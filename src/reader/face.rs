@@ -6,7 +6,7 @@
 //! faces and registers one family per name this returns; `ui::fonts::family` is the only place
 //! a name becomes an `egui::FontFamily`.
 //!
-//! Three roles, four styles each, and one face missing on purpose: no italic monospace is
+//! Four roles, four styles each, and one face missing on purpose: no italic monospace is
 //! shipped, because an italic mono face costs 285K to serve emphasis inside a code span. That
 //! single hole is what [`Face::synthesises_italics`] reports, and epaint's skew fills it.
 
@@ -52,18 +52,23 @@ impl Face {
                     "mono"
                 }
             }
+            FontChoice::Hyperlegible => match (self.strong, self.emph) {
+                (false, false) => "hyperlegible",
+                (true, false) => "hyperlegible-bold",
+                (false, true) => "hyperlegible-italic",
+                (true, true) => "hyperlegible-bold-italic",
+            },
         }
     }
 
-    /// Every role crossed with every style: the twelve faces the reader can ask for.
+    /// Every role crossed with every style: the sixteen faces the reader can ask for, which
+    /// resolve to fourteen names because mono answers with its upright pair twice.
     pub fn all() -> impl Iterator<Item = Face> {
-        [FontChoice::Sans, FontChoice::Serif, FontChoice::Mono]
-            .into_iter()
-            .flat_map(|role| {
-                [(false, false), (true, false), (false, true), (true, true)]
-                    .into_iter()
-                    .map(move |(strong, emph)| Face::new(role, strong, emph))
-            })
+        FontChoice::ALL.into_iter().flat_map(|role| {
+            [(false, false), (true, false), (false, true), (true, true)]
+                .into_iter()
+                .map(move |(strong, emph)| Face::new(role, strong, emph))
+        })
     }
 
     /// Whether epaint must skew this face to stand in for an italic one.
@@ -76,7 +81,7 @@ impl Face {
 }
 
 /// Every family name the reader can ask for, which is what `ui::fonts` must register.
-pub const FAMILY_NAMES: [&str; 10] = [
+pub const FAMILY_NAMES: [&str; 14] = [
     "sans",
     "sans-bold",
     "sans-italic",
@@ -87,6 +92,10 @@ pub const FAMILY_NAMES: [&str; 10] = [
     "serif-bold-italic",
     "mono",
     "mono-bold",
+    "hyperlegible",
+    "hyperlegible-bold",
+    "hyperlegible-italic",
+    "hyperlegible-bold-italic",
 ];
 
 #[cfg(test)]
@@ -116,7 +125,11 @@ mod tests {
     /// case where none exists.
     #[test]
     fn only_monospace_synthesises_its_italic() {
-        for role in [FontChoice::Sans, FontChoice::Serif] {
+        for role in [
+            FontChoice::Sans,
+            FontChoice::Serif,
+            FontChoice::Hyperlegible,
+        ] {
             assert!(!Face::new(role, false, true).synthesises_italics());
             assert!(!Face::new(role, true, true).synthesises_italics());
         }
@@ -135,6 +148,10 @@ mod tests {
         assert_eq!(
             Face::new(FontChoice::Serif, true, true).family_name(),
             "serif-bold-italic"
+        );
+        assert_eq!(
+            Face::new(FontChoice::Hyperlegible, true, true).family_name(),
+            "hyperlegible-bold-italic"
         );
         // Mono keeps its weight and takes the skew rather than resolving to a face that is not
         // there.

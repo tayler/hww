@@ -25,9 +25,11 @@
 //! Only [`watch`] starts any of it. `hww-shot` never calls it, so a screenshot of
 //! `--theme system` stays what it always was rather than following the machine that took it.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// The portal namespace and key. Named once because the query and the change signal that
 /// reports the same value must agree on it.
@@ -78,7 +80,7 @@ pub fn watch(wake: impl Fn() + Send + 'static) -> Option<Watch> {
     let now = query()?;
     SCHEME.store(encode(now), Ordering::Relaxed);
 
-    let mut child = Command::new("gdbus")
+    let child = Command::new("gdbus")
         .args([
             "monitor",
             "--session",
@@ -92,7 +94,13 @@ pub fn watch(wake: impl Fn() + Send + 'static) -> Option<Watch> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let out = child.stdout.take()?;
+
+    // A `Watch` from the moment the child exists, and every `?` below is why: nothing else
+    // kills it, so a `None` returned with the child still spawned leaves a `gdbus monitor`
+    // running for the rest of the login session — the leak the `Drop` impl was written to
+    // prevent, reached through the failure path instead of through exit.
+    let mut watch = Watch(child);
+    let out = watch.0.stdout.take()?;
 
     std::thread::Builder::new()
         .name("hww-desktop-theme".to_owned())
@@ -106,7 +114,7 @@ pub fn watch(wake: impl Fn() + Send + 'static) -> Option<Watch> {
         })
         .ok()?;
 
-    Some(Watch(child))
+    Some(watch)
 }
 
 fn encode(dark: bool) -> u8 {
@@ -141,23 +149,68 @@ fn query() -> Option<bool> {
         .or_else(gnome_scheme)
 }
 
+/// How long one startup query may take before it is abandoned.
+///
+/// The same second [`query`] already asks `gdbus` for, applied from out here so it also covers
+/// the command that has no flag of its own: `gsettings` reads through dconf, and a wedged dconf
+/// backend is otherwise a browser that shows no window. Every call on this path runs on the UI
+/// thread before the first frame, so an unbounded one is a hang rather than a slow start.
+///
+/// Per command, and [`query`] falls through at most three of them, so the whole of it is three
+/// seconds in the worst case: a desktop with no portal *and* a wedged dconf. A desktop that
+/// answers at all answers the first one in under a millisecond.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// A command's stdout, or `None` if it could not be started, could not be read, or was still
+/// running at [`QUERY_TIMEOUT`].
+///
+/// The exit status is not consulted. It cannot be: the child is killed at the deadline, so
+/// there is nothing to read a status from in the case this exists to handle. Both callers pass
+/// what came back to a parser that answers `None` for anything that is not the value it wants,
+/// which is the same refusal a step later.
+fn output_within(cmd: &mut Command) -> Option<String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let answer = read_before_deadline(&mut child);
+    // Unconditional, and on the success path too: a child that has already exited refuses the
+    // kill and that is fine, while one that closed its pipe without exiting is exactly what the
+    // deadline is for. Nothing here outlives the call.
+    let _ = child.kill();
+    let _ = child.wait();
+    answer
+}
+
+/// Read on a thread rather than after a `wait`, so a child that fills its pipe and one that
+/// never writes at all are both bounded by the same deadline. Killing the child at the deadline
+/// ends the read on EOF, so the thread does not outlive it either.
+fn read_before_deadline(child: &mut Child) -> Option<String> {
+    let out = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("hww-desktop-query".to_owned())
+        .spawn(move || {
+            let mut buf = String::new();
+            let _ = BufReader::new(out).read_to_string(&mut buf);
+            let _ = tx.send(buf);
+        })
+        .ok()?;
+    rx.recv_timeout(QUERY_TIMEOUT).ok()
+}
+
 fn gdbus(args: &[&str]) -> Option<bool> {
-    let out = Command::new("gdbus").args(args).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    scheme_reply(&String::from_utf8_lossy(&out.stdout))
+    scheme_reply(&output_within(Command::new("gdbus").args(args))?)
 }
 
 fn gnome_scheme() -> Option<bool> {
-    let out = Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.interface", KEY])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    named_scheme(&String::from_utf8_lossy(&out.stdout))
+    named_scheme(&output_within(Command::new("gsettings").args([
+        "get",
+        "org.gnome.desktop.interface",
+        KEY,
+    ]))?)
 }
 
 /// The `uint32` in a portal reply, whatever it is wrapped in.
@@ -224,6 +277,27 @@ mod tests {
         assert_eq!(named_scheme("'prefer-light'\n"), Some(false));
         assert_eq!(named_scheme("'default'\n"), Some(false));
         assert_eq!(named_scheme("'newthing'\n"), None);
+    }
+
+    /// A query that never answers is abandoned rather than waited on.
+    ///
+    /// The whole of [`query`] runs on the UI thread before the first frame, so this is the
+    /// difference between a slow start and a window that never appears. `gdbus` is asked for a
+    /// timeout of its own and `gsettings` has no flag for one, which is why the bound lives out
+    /// here and covers both. A machine with no `sleep` fails the spawn and answers `None` by the
+    /// other route, which is the same answer.
+    #[test]
+    fn a_query_that_hangs_is_abandoned() {
+        let started = std::time::Instant::now();
+        assert_eq!(
+            output_within(Command::new("sleep").arg("30")),
+            None,
+            "a command still running at the deadline has nothing to report"
+        );
+        assert!(
+            started.elapsed() < QUERY_TIMEOUT * 5,
+            "the deadline is what bounds this, not the command"
+        );
     }
 
     /// Verbatim `gdbus monitor` output, captured from a GNOME session toggling dark mode.

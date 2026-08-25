@@ -106,6 +106,16 @@ pub const IMAGES_ARE_DECLINED: &str =
 /// this only answers why the key did nothing.
 pub const IMAGES_ALL_FAILED: &str = "every image on this page has already failed to load.";
 
+/// What the reader says when the two above are true of the same page, each of some of it.
+///
+/// Neither one alone may stand in for it. [`IMAGES_ARE_DECLINED`] would say a picture that was
+/// asked for and refused was never opened, and [`IMAGES_ALL_FAILED`] would say one that hww
+/// never requested had failed — a claim about the network with no request behind it, which is
+/// the thing the whole set of these exists to avoid. Same rule: nothing was contacted by this
+/// press, so nothing is named.
+pub const IMAGES_ARE_DECLINED_OR_FAILED: &str =
+    "some images here are in a format hww does not display; the rest have already failed.";
+
 /// What the URL bar says when it is empty.
 ///
 /// One line where there used to be a label and a hint. `https://…` described only half of what

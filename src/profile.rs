@@ -6,7 +6,7 @@
 //! this article" banner, a "see all topics" link, a lead gallery of captions. Every one of
 //! them is a `strip`. Nothing asked for a root, a metadata source, or a thread shape, and the
 //! previous per-site layer was removed precisely for being mechanism without a caller
-//! (`docs/phase0-findings.md`, Phase 2). Boolean extraction overrides could silently discard
+//! (`docs/findings.md`, Phase 2). Boolean extraction overrides could silently discard
 //! the longer generic result, so `Profile` has the field that has callers and grows only when
 //! measurement asks.
 //!

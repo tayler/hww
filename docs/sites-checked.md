@@ -2,7 +2,7 @@
 
 A ledger of the hosts the extractor has been measured against, so the work is not repeated:
 before triaging a host, look here; after, add or update its row. These are public sites chosen
-for the audit, not anyone's browsing history, which is the line `docs/phase0-findings.md` keeps.
+for the audit, not anyone's browsing history, which is the line `docs/findings.md` keeps.
 Dates are when the pages were fetched. "Clean"
 means the article read well with no host-specific work; generic fixes found on a host are in
 `triage/sheet.md` (gitignored) and the findings doc, not here.

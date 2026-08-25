@@ -10,9 +10,6 @@ default = []
 # The application GUI. Off by default so core tests and local tools keep compile-time absence
 # of the image subresource path and the GUI dependency graph.
 gui = ["dep:eframe", "dep:image", "dep:winit"]
-# Local-only corpus tooling. Behind a feature because `rusqlite = { bundled }` compiles a C
-# SQLite that exists solely for `bin/corpus`.
-tools = ["dep:rusqlite"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -36,13 +33,11 @@ eframe = { version = "0.36.1", default-features = false, features = ["wgpu", "x1
 # a slash in a dependency's feature list unless eframe re-exports it, which it does not.
 winit = { version = "0.30", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico"], optional = true }
-rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
 
-# An explicit [[bin]] whose `path` matches an auto-discovered file takes precedence and merges
-# cleanly, so these get their `required-features` while `bench` and `dbg` keep being found on
-# their own. Nothing here prints page text to a terminal: untrusted text carrying an escape
-# sequence is an injection surface, so triage is headless `--why` on the application and
-# every string it prints goes through `render::sanitize_for_terminal` first.
+# Both binaries need the GUI, so both carry `required-features`. Nothing here prints page text
+# to a terminal: untrusted text carrying an escape sequence is an injection surface, so triage
+# is headless `--why` on the application and every string it prints goes through
+# `render::sanitize_for_terminal` first.
 [[bin]]
 name = "hww"
 path = "src/bin/hww.rs"
@@ -52,8 +47,3 @@ required-features = ["gui"]
 name = "hww-shot"
 path = "src/bin/shot.rs"
 required-features = ["gui"]
-
-[[bin]]
-name = "corpus"
-path = "src/bin/corpus.rs"
-required-features = ["tools"]

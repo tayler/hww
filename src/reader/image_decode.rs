@@ -103,7 +103,7 @@ pub enum DecodeError {
     UnknownFormat,
     /// A format hww deliberately does not decode. Named, so the strip can say which rather
     /// than calling a perfectly valid file unrecognisable.
-    #[error("{0} not shown")]
+    #[error("{0} images are not supported")]
     Unsupported(&'static str),
     #[error("image is {0}x{1}; the limit is {2} px on a side")]
     TooLarge(u32, u32, u32),
@@ -235,6 +235,15 @@ fn deliberately_unsupported(bytes: &[u8]) -> Option<&'static str> {
 /// cheap to walk; past it, the file is answering a different question than "is this an SVG".
 const PROLOG_SCAN: usize = 64 * 1024;
 
+/// The one widening, and its ceiling.
+///
+/// The retry below reconverts, and `from_utf8_lossy` allocates up to three bytes per input byte
+/// for a buffer that is not valid UTF-8. Over the whole of a [`crate::fetch::MAX_IMAGE_BYTES`]
+/// file that is 30M on the decode worker to answer "is this an SVG", reachable from any
+/// third-party address that serves 64 KiB of unterminated `<!--`. A prolog past a megabyte is
+/// not a document this reader was going to draw.
+const PROLOG_SCAN_WIDE: usize = 1024 * 1024;
+
 /// Whether the first element of this XML document is `<svg>`.
 ///
 /// A scan and not a substring test. The old check lowercased the first 1024 bytes and looked
@@ -277,10 +286,12 @@ fn xml_root_is_svg(bytes: &[u8]) -> bool {
         // the edge, so its terminator is simply not in `head`. Answering `false` here is the
         // old 1024-byte failure moved out to 64 KiB rather than removed — it reports a long
         // SVG as "not a recognised image format", which is the message this function exists to
-        // prevent. Widen once. Only a file that is XML-ish *and* has a prolog past the window
-        // ever pays for the whole-buffer conversion; every raster is long gone by here.
+        // prevent. Widen once, to [`PROLOG_SCAN_WIDE`] and not to the whole file; only a file
+        // that is XML-ish *and* has a prolog past the first window pays for the second
+        // conversion at all, and every raster is long gone by here.
         None if bytes.len() > PROLOG_SCAN => {
-            walk_prolog(&String::from_utf8_lossy(bytes)).unwrap_or(false)
+            let wide = String::from_utf8_lossy(&bytes[..bytes.len().min(PROLOG_SCAN_WIDE)]);
+            walk_prolog(&wide).unwrap_or(false)
         }
         // Unterminated with nothing left to read. The document has no root element, so it is
         // not an SVG and not anything else either; the raster decoders get their say next.
@@ -509,8 +520,8 @@ mod tests {
         }
     }
 
-    /// Declined on purpose, and named: "SVG not shown" is a different statement from "not a
-    /// recognised image format", and only one of them is true.
+    /// Declined on purpose, and named: "SVG images are not supported" is a different
+    /// statement from "not a recognised image format", and only one of them is true.
     #[test]
     fn svg_and_avif_are_declined_by_name() {
         let svg = br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>"#;
@@ -651,6 +662,19 @@ mod tests {
         let mut doc = b"<!-- ".to_vec();
         doc.extend_from_slice(&b"unterminated ".repeat(6000));
         assert!(doc.len() > PROLOG_SCAN);
+        assert!(!xml_root_is_svg(&doc));
+    }
+
+    /// And the widening has an end. A prolog past `PROLOG_SCAN_WIDE` is not read further,
+    /// because the alternative is converting the whole `MAX_IMAGE_BYTES` ceiling to answer one
+    /// question about the first element.
+    #[test]
+    fn the_widened_window_has_a_ceiling_of_its_own() {
+        let mut doc = b"<!-- ".to_vec();
+        doc.extend_from_slice(&b"editor metadata ".repeat(PROLOG_SCAN_WIDE / 16 + 16));
+        doc.extend_from_slice(b" -->\n");
+        assert!(doc.len() > PROLOG_SCAN_WIDE);
+        doc.extend_from_slice(br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#);
         assert!(!xml_root_is_svg(&doc));
     }
 

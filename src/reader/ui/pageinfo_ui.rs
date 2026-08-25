@@ -10,7 +10,7 @@
 //! square hit target the strip allocates rather than against a text baseline. It takes the
 //! palette exactly and scales with `chrome_font`, so it tracks `[`/`]` and egui's zoom the way
 //! every other piece of chrome does. The face is the shipped serif italic, asked for through
-//! `face::Face` like every other run: `ⓘ` (U+24D8) is in none of the ten faces
+//! `face::Face` like every other run: `ⓘ` (U+24D8) is in none of the fourteen faces
 //! `reader::ui::fonts` embeds and would have been tofu had it ever been typed.
 //!
 //! # Why the panel is chrome and not a bar

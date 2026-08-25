@@ -6,11 +6,20 @@
 //! `reqwest`'s `default-features = false` one directory over: a capability that is not compiled
 //! in cannot be reached by accident, and a face nobody chose cannot appear on a page.
 //!
-//! **Three roles, four styles each, one tail.** IBM Plex covers sans, serif, and mono from one
-//! licence and one design. `DejaVuSerif` sits behind all three and is the only place coverage
+//! **Four roles, four styles each, one tail.** IBM Plex covers sans, serif, and mono from one
+//! licence and one design. `DejaVuSerif` sits behind all four and is the only place coverage
 //! for a script Plex does not carry comes from: polytonic Greek, Armenian, Georgian, `∀`, `∈`.
 //! `font_data` is keyed by name and `families` are lists of names, so the tail's 380K appear
 //! once no matter how many chains reference it.
+//!
+//! **The fourth role is Atkinson Hyperlegible Next**, drawn for low vision. Two variable files,
+//! 231K for four styles, against 196K for the four static cuts: 35K more, and it buys the whole
+//! `wght` 200–800 range and the arrangement Plex Sans already uses, so one pinning rule covers
+//! every variable face here. It is by far the *narrowest* face embedded — 362 codepoints, Latin
+//! and little else, against Plex's Greek and Cyrillic — so a
+//! Cyrillic page set in it falls through to the serif tail where the same page in Plex Sans
+//! would not. That is a legible fallback rather than tofu, and pulling `I l 1` and `b d p q`
+//! apart is what the role is for; do not substitute a wider face that gives that up.
 //!
 //! **The tail is `DejaVuSerif` rather than `DejaVuSans`, and the reason is bidi.** epaint shapes
 //! with `harfrust`, so joining and marks work, but it has no bidi (`epaint::text::font`,
@@ -37,6 +46,9 @@ const PLEX_SERIF_ITALIC: &[u8] = include_bytes!("../../../fonts/IBMPlexSerif-Ita
 const PLEX_SERIF_BOLD_ITALIC: &[u8] = include_bytes!("../../../fonts/IBMPlexSerif-BoldItalic.ttf");
 const PLEX_MONO: &[u8] = include_bytes!("../../../fonts/IBMPlexMono-Regular.ttf");
 const PLEX_MONO_BOLD: &[u8] = include_bytes!("../../../fonts/IBMPlexMono-Bold.ttf");
+const HYPER: &[u8] = include_bytes!("../../../fonts/AtkinsonHyperlegibleNext-Variable.ttf");
+const HYPER_ITALIC: &[u8] =
+    include_bytes!("../../../fonts/AtkinsonHyperlegibleNext-Italic-Variable.ttf");
 const TAIL: &[u8] = include_bytes!("../../../fonts/DejaVuSerif.ttf");
 /// Two scripts `harfrust` shapes correctly and no face above carries: a Noto file each, in
 /// every chain after the tail. Variable, so `wght`/`wdth` are pinned like the rest.
@@ -44,7 +56,9 @@ const DEVANAGARI: &[u8] = include_bytes!("../../../fonts/NotoSansDevanagari-Vari
 const THAI: &[u8] = include_bytes!("../../../fonts/NotoSansThai-Variable.ttf");
 const EMOJI: &[u8] = include_bytes!("../../../fonts/NotoEmoji-Regular.ttf");
 
-/// Plex Sans runs `wght` 100–700, so 700 is its bold end, not an arbitrary number.
+/// Plex Sans runs `wght` 100–700, so 700 is its bold end, not an arbitrary number. Atkinson
+/// runs 200–800, where 700 is its named Bold and 800 its ExtraBold; the shared constant lands
+/// on the drawn weight in both.
 const REGULAR: f32 = 400.0;
 const BOLD: f32 = 700.0;
 
@@ -52,7 +66,7 @@ const BOLD: f32 = 700.0;
 ///
 /// One list, walked twice: once to register the faces and once to build the chains. Two lists
 /// would be two places for a name to be misspelled, and a misspelled name is silent.
-const FACES: [(&str, &[u8], f32); 10] = [
+const FACES: [(&str, &[u8], f32); 14] = [
     ("sans", PLEX_SANS, REGULAR),
     ("sans-bold", PLEX_SANS, BOLD),
     ("sans-italic", PLEX_SANS_ITALIC, REGULAR),
@@ -63,6 +77,10 @@ const FACES: [(&str, &[u8], f32); 10] = [
     ("serif-bold-italic", PLEX_SERIF_BOLD_ITALIC, BOLD),
     ("mono", PLEX_MONO, REGULAR),
     ("mono-bold", PLEX_MONO_BOLD, BOLD),
+    ("hyperlegible", HYPER, REGULAR),
+    ("hyperlegible-bold", HYPER, BOLD),
+    ("hyperlegible-italic", HYPER_ITALIC, REGULAR),
+    ("hyperlegible-bold-italic", HYPER_ITALIC, BOLD),
 ];
 
 /// The family to draw a face in.
@@ -71,8 +89,8 @@ pub fn family(face: Face) -> FontFamily {
 }
 
 /// One `FontFamily` per name, built once. `FontFamily::Name` holds an `Arc<str>`, and building
-/// it from a `&str` allocates; this is asked for once per run of text per frame, so the ten are
-/// made here and cloned, which is an atomic increment.
+/// it from a `&str` allocates; this is asked for once per run of text per frame, so one per
+/// name in [`FAMILY_NAMES`] is made here and cloned, which is an atomic increment.
 static FAMILIES: LazyLock<[FontFamily; FAMILY_NAMES.len()]> =
     LazyLock::new(|| FAMILY_NAMES.map(|name| FontFamily::Name(name.into())));
 

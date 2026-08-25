@@ -277,6 +277,12 @@ const TYPEFACES: &[Choice] = &[
         "IBM Plex Mono. Equal-width characters can make code easier to scan, but ordinary prose \
          may look more mechanical.",
     ),
+    choice_note(
+        "Hyperlegible",
+        "Atkinson Hyperlegible Next, drawn for low vision: letters that usually look alike, such \
+         as capital I and lowercase l, are given distinct shapes. It covers fewer languages than \
+         the others, so text outside the Latin alphabet falls back to the serif.",
+    ),
 ];
 
 /// One entry per row of `sites::ENGINES`, in `EngineId::ALL` order, which
@@ -448,8 +454,8 @@ pub fn fields() -> Vec<Field> {
             group: G::Text,
             label: "Typeface",
             note: Some(
-                "Changes the look of page text. Sans uses contrasting serif headings, while \
-                 Serif and Mono keep the same typeface throughout.",
+                "Changes the look of page text. Sans uses contrasting serif headings; the other \
+                 three keep the same typeface throughout.",
             ),
             keys: "",
             control: Choice(TYPEFACES),
@@ -597,6 +603,7 @@ pub fn get(s: &Settings, id: FieldId) -> Value {
             FontChoice::Sans => 0,
             FontChoice::Serif => 1,
             FontChoice::Mono => 2,
+            FontChoice::Hyperlegible => 3,
         }),
         FieldId::Theme => Value::Index(match s.read.theme {
             Theme::System => 0,
@@ -671,6 +678,7 @@ pub fn set(s: &mut Settings, id: FieldId, v: Value) {
                 Some(0) => FontChoice::Sans,
                 Some(1) => FontChoice::Serif,
                 Some(2) => FontChoice::Mono,
+                Some(3) => FontChoice::Hyperlegible,
                 _ => s.read.family,
             }
         }
@@ -1193,7 +1201,7 @@ mod tests {
     /// No reader-facing string needs a glyph the shipped faces lack.
     ///
     /// The same rule the menu's marker follows, applied here because a note is prose and prose
-    /// does not fail a build. `ui::fonts` embeds twelve faces and none of them is a symbol font:
+    /// does not fail a build. None of the faces `ui::fonts` embeds is a symbol font:
     /// the arrows are covered, and the enclosed and technical blocks are not.
     #[test]
     fn no_reader_facing_string_needs_a_missing_glyph() {

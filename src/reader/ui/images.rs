@@ -51,6 +51,15 @@ use std::collections::HashMap;
 /// megabytes, not hundreds.
 const LRU_CAPACITY: usize = 48;
 
+/// How many settled declines `evict` will hold past [`LRU_CAPACITY`] before dropping the oldest
+/// anyway.
+///
+/// Each one is a `src` and a sentence, not a texture, so the ceiling is about the queue rather
+/// than about memory: without it a page of unloadable pictures grows `order` without bound and
+/// the cap stops being a cap. One page's worth of them, so the answer survives a page that is
+/// nothing but declines and `clear_page` still takes them all at the next commit.
+const DECLINES_KEPT: usize = LRU_CAPACITY;
+
 pub enum State {
     Offered,
     Loading,
@@ -353,14 +362,29 @@ impl ImageStore {
     /// `referer_requests`, which are the reader's account of what it disclosed. Skipping
     /// pending entries can leave `order` briefly over capacity; it drains as they resolve.
     fn evict(&mut self) {
+        // A settled decline holds no texture, so evicting one frees nothing this cache exists
+        // to free, and it costs the memory `refuses_retry` is. Dropped, the entry reverts to
+        // `None`: the placeholder offers "load from host" again and the next "load all"
+        // re-issues a request whose answer was already known. That is the eviction bug two
+        // functions down, in the one shape the pending guard cannot see.
+        self.trim(LRU_CAPACITY, true);
+        // Sparing them is not keeping them forever. A page can carry more declines than the
+        // cache holds entries, and skipping every one of them left `order` growing with the
+        // page instead of bounded by the cap — the queue that the pass above exists to bound.
+        // Past `DECLINES_KEPT` the oldest goes anyway: an offer to re-request one picture is
+        // the cheaper failure, and it is the one already accepted for a pending entry.
+        self.trim(LRU_CAPACITY + DECLINES_KEPT, false);
+    }
+
+    /// Evict from the front of `order` until it fits `limit`. `spare_declines` is which of the
+    /// two passes in [`evict`](Self::evict) this is; a pending entry is spared by both, because
+    /// re-offering one is a duplicate third-party request rather than a repeated answer.
+    fn trim(&mut self, limit: usize, spare_declines: bool) {
         let mut i = 0;
-        while self.order.len() > LRU_CAPACITY && i < self.order.len() {
-            // A settled decline holds no texture, so evicting one frees nothing this cache
-            // exists to free, and it costs the memory `refuses_retry` is. Dropped, the entry
-            // reverts to `None`: the placeholder offers "load from host" again and the next
-            // "load all" re-issues a request whose answer was already known. That is the
-            // eviction bug two functions down, in the one shape the pending guard cannot see.
-            if self.is_pending(&self.order[i]) || self.refuses_retry(&self.order[i]) {
+        while self.order.len() > limit && i < self.order.len() {
+            if self.is_pending(&self.order[i])
+                || (spare_declines && self.refuses_retry(&self.order[i]))
+            {
                 i += 1;
                 continue;
             }
@@ -722,7 +746,10 @@ mod tests {
     fn only_a_permanent_failure_refuses_a_retry() {
         let mut store = ImageStore::default();
         store.fail("/a.png", Failure::transient("connection reset".to_owned()));
-        store.fail("/b.svg", Failure::permanent("SVG not shown".to_owned()));
+        store.fail(
+            "/b.svg",
+            Failure::permanent("SVG images are not supported".to_owned()),
+        );
         assert!(!store.refuses_retry("/a.png"), "a second request may work");
         assert!(store.refuses_retry("/b.svg"), "a second request cannot");
         // A picture nobody has asked about yet is not a refusal.
@@ -787,6 +814,32 @@ mod tests {
         assert!(
             store.refuses_retry("/big.png"),
             "the one entry that must not be re-requested is the one that was dropped"
+        );
+    }
+
+    /// And sparing them has a ceiling of its own.
+    ///
+    /// Every entry on this page is a decline the first pass steps over, so before
+    /// `DECLINES_KEPT` the queue grew with the page and `LRU_CAPACITY` bounded nothing. What
+    /// survives is the newest, which is the part of the page a reader is still near.
+    #[test]
+    fn a_page_of_settled_declines_is_still_bounded() {
+        let mut store = ImageStore::default();
+        let n = (LRU_CAPACITY + DECLINES_KEPT) * 2;
+        for i in 0..n {
+            store.fail(
+                &format!("/n{i}.png"),
+                Failure::permanent("image is 9000x9000".to_owned()),
+            );
+            store.evict();
+        }
+        assert!(
+            store.order.len() <= LRU_CAPACITY + DECLINES_KEPT,
+            "declines are spared, not unbounded"
+        );
+        assert!(
+            store.refuses_retry(&format!("/n{}.png", n - 1)),
+            "the newest decline is the one still worth remembering"
         );
     }
 

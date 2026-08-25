@@ -2,7 +2,7 @@
 
 `README.md` carries product status, commands, module layout, and measurements.
 Module-level `//!` comments carry subsystem rationale and are the primary design record.
-`docs/phase0-findings.md` records measured decisions; `docs/sites-checked.md` is the host
+`docs/findings.md` records measured decisions; `docs/sites-checked.md` is the host
 ledger. This file contains only rules useful across tasks. Reference symbols, not line numbers.
 
 ## What this is
@@ -22,10 +22,10 @@ All five gates in `.github/workflows/ci.yml` must pass:
     cargo fmt --all -- --check
     cargo clippy --all-targets --locked -- -D warnings
     cargo test --locked
-    cargo clippy --all-targets --locked --features gui,tools -- -D warnings
-    cargo test --locked --features gui,tools
+    cargo clippy --all-targets --locked --features gui -- -D warnings
+    cargo test --locked --features gui
 
-The default job never compiles egui. The second job uses explicit `gui,tools` features, never
+The default job never compiles egui. The second job names `gui` explicitly, never
 `--all-features`. Tests do not call `eframe::run_native`. CI installs no apt packages; native
 libraries are opened at runtime rather than linked at build time.
 
@@ -62,7 +62,7 @@ flatten used by `render::inline_text`.
 
 Per-site boolean extraction overrides were measured and removed. Profiles are data with a
 floor and a report; do not add `force_thread` or equivalent. Nested replies extend the generic
-thread detector. See `docs/phase0-findings.md` before reopening either decision.
+thread detector. See `docs/findings.md` before reopening either decision.
 
 ## Reader boundaries
 
@@ -134,7 +134,7 @@ pipeline and reports a rewrite, and a search, before dispatch.
 A builtin rewrite ships only when all four conditions hold:
 
 1. **Same operator.** Never route through a third-party frontend.
-2. **Cited.** Name a measured failure in `docs/phase0-findings.md`.
+2. **Cited.** Name a measured failure in `docs/findings.md`.
 3. **Offline.** Compile it in; never fetch or auto-update the table.
 4. **Reported.** Report it before the request so failure cannot hide the destination.
 
@@ -163,19 +163,17 @@ interstitial. Result entries carry `image: None`: the engines serve result favic
 own image hosts. `LoadOptions::search` is off in `BARE`, which is how a stale shape is
 diagnosed. Adding an engine means a table row, a fixture, and a `Choice` in `prefs::fields`.
 
-## Corpus safety
+## Personal browsing
 
-Never commit, unignore, quote, or paste corpus output. `corpus.jsonl`, `urls.jsonl`,
-`fetched.jsonl`, `signals.jsonl`, `extract.json`, `cache/`, and `extracted/` are real browsing
-history. Do not name hosts learned from them in code, tests, docs, or commit messages.
-
-Corpus sampling is by recency, never `visit_count`.
+Triage runs against sites somebody actually reads. Do not name a host learned that way in code,
+tests, docs, or commit messages unless it earns a row under Site rules above, and never commit
+or paste the output of a local triage run.
 
 ## Testing
 
-Regression tests use synthetic `#[cfg(test)]` fixtures with no network and no corpus. Test
-everything decidable without an `egui::Context`; compile UI dispatch and texture upload, and use
-named `hww-shot` scenes for visual behavior. A pure function under `ui/` may be tested when its
+Regression tests use synthetic `#[cfg(test)]` fixtures with no network. Test everything
+decidable without an `egui::Context`; compile UI dispatch and texture upload, and use named
+`hww-shot` scenes for visual behavior. A pure function under `ui/` may be tested when its
 failure is otherwise invisible, but make that argument at the test rather than citing precedent.
 
 Do not relax tests that enforce IR purity, hostname boundaries, profile soundness, origin-only

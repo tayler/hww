@@ -28,7 +28,7 @@
 //! is open keeps working, which is what makes watching the text reflow useful.
 //!
 //! The glyphs are ASCII `-` and `+` on purpose. Every character this reader draws has to be in
-//! one of the twelve faces `ui::fonts` embeds, and reaching for `\u{2212}` would reopen a
+//! one of the faces `ui::fonts` embeds, and reaching for `\u{2212}` would reopen a
 //! question ASCII closes.
 
 use crate::reader::prefs::{self, Control, Field, FieldId, Group, Value};
