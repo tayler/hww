@@ -498,7 +498,7 @@ pub fn fields() -> Vec<Field> {
                 "Magnifies the whole window, borders and spacing included, the way a browser's \
                  zoom does. Text size changes the type; this scales everything.",
             ),
-            keys: "Ctrl+ + - 0",
+            keys: crate::reader::menu::ZOOM_SETTING,
             control: Slider {
                 min: Settings::ZOOM_MIN,
                 max: Settings::ZOOM_MAX,

@@ -41,6 +41,80 @@
 /// egui's default.
 pub const SUBMENU_MARKER: &str = "\u{203A}";
 
+/// Every key spec these tables put on screen, spelled for the modifier this platform's reader
+/// actually presses.
+///
+/// `app::handle_keys` binds `Modifiers::COMMAND`, which egui maps to Cmd on macOS and Ctrl
+/// everywhere else, and it binds Back and Forward to `Cmd+[`/`]` alongside `Alt`+arrows. A
+/// table that hardcoded `Ctrl+L` therefore advertised, on a Mac, a key that does nothing; the
+/// zoom rows were wrong the same way, since the zoom is egui's own and egui's own is Cmd there.
+/// The reader was told so once, in a footnote under the help card — a thing to read rather than
+/// a thing the label says.
+///
+/// `cfg`-selected consts, and here rather than computed under `ui/`, so this stays wording that
+/// `cargo test` can read: the menu and the help card still have to agree, and the agreement test
+/// still runs in the default job. It simply checks a different pair of tables on each platform,
+/// which is the point.
+///
+/// The two blocks are written out in full rather than composed from a `MOD` const. `concat!`
+/// takes literals and not consts, so a composed spelling would mean building these strings at
+/// run time; and a spec is not always the modifier swapped, as `BACK` shows.
+#[cfg(not(target_os = "macos"))]
+mod keyspec {
+    pub const OPEN_LOCATION: &str = "Ctrl+L";
+    pub const ZOOM_IN: &str = "Ctrl++";
+    pub const ZOOM_OUT: &str = "Ctrl+-";
+    pub const ZOOM_RESET: &str = "Ctrl+0";
+    pub const BACK: &str = "Alt+Left";
+    pub const FORWARD: &str = "Alt+Right";
+
+    pub const HELP_OPEN_LOCATION: &str = "Ctrl+L or o";
+    pub const HELP_BACK: &str = "Alt+Left / Backspace";
+    pub const HELP_FIND: &str = "/ or Ctrl+F · Enter / Shift+Enter";
+    pub const HELP_ZOOM: &str = "Ctrl++ / Ctrl+- / Ctrl+0";
+    pub const HELP_FOOTNOTE: &str = "Zoom is egui's: Ctrl +/-/0, Ctrl+wheel, pinch.";
+
+    /// The status strip's three tooltips. They name a key inside a sentence rather than as a
+    /// spec, so they cannot be composed from the consts above, and they are wording the reader
+    /// sees, so they are here rather than as literals under `ui/`.
+    pub const TIP_BACK: &str = "Back (Alt+Left)";
+    pub const TIP_FORWARD: &str = "Forward (Alt+Right)";
+    pub const TIP_URL_BAR: &str = "Click to edit (Ctrl+L)";
+
+    /// The settings panel's own spelling of the zoom keys, which is a row of three rather than
+    /// a spec the keycap splitter reads.
+    pub const ZOOM_SETTING: &str = "Ctrl+ + - 0";
+}
+
+#[cfg(target_os = "macos")]
+mod keyspec {
+    pub const OPEN_LOCATION: &str = "Cmd+L";
+    pub const ZOOM_IN: &str = "Cmd++";
+    pub const ZOOM_OUT: &str = "Cmd+-";
+    pub const ZOOM_RESET: &str = "Cmd+0";
+    pub const BACK: &str = "Cmd+[";
+    pub const FORWARD: &str = "Cmd+]";
+
+    pub const HELP_OPEN_LOCATION: &str = "Cmd+L or o";
+    pub const HELP_BACK: &str = "Cmd+[ / Backspace";
+    pub const HELP_FIND: &str = "/ or Cmd+F · Enter / Shift+Enter";
+    pub const HELP_ZOOM: &str = "Cmd++ / Cmd+- / Cmd+0";
+    pub const HELP_FOOTNOTE: &str = "Zoom is egui's: Cmd +/-/0, Cmd+wheel, pinch.";
+
+    /// The status strip's three tooltips. They name a key inside a sentence rather than as a
+    /// spec, so they cannot be composed from the consts above, and they are wording the reader
+    /// sees, so they are here rather than as literals under `ui/`.
+    pub const TIP_BACK: &str = "Back (Cmd+[)";
+    pub const TIP_FORWARD: &str = "Forward (Cmd+])";
+    pub const TIP_URL_BAR: &str = "Click to edit (Cmd+L)";
+
+    /// The settings panel's own spelling of the zoom keys, which is a row of three rather than
+    /// a spec the keycap splitter reads.
+    pub const ZOOM_SETTING: &str = "Cmd+ + - 0";
+}
+
+pub use keyspec::*;
+
 /// What a menu item does when it is chosen.
 ///
 /// Everything here is something the reader could already do; the bar adds no capability. The
@@ -193,7 +267,7 @@ pub fn bar() -> Vec<Menu> {
             items: vec![
                 Item::Run {
                     label: "Search or open a URL...",
-                    keys: "Ctrl+L",
+                    keys: OPEN_LOCATION,
                     command: C::OpenLocation,
                     needs: N::Nothing,
                 },
@@ -255,19 +329,19 @@ pub fn bar() -> Vec<Menu> {
             items: vec![
                 Item::Run {
                     label: "Zoom in",
-                    keys: "Ctrl++",
+                    keys: ZOOM_IN,
                     command: C::ZoomIn,
                     needs: N::Nothing,
                 },
                 Item::Run {
                     label: "Zoom out",
-                    keys: "Ctrl+-",
+                    keys: ZOOM_OUT,
                     command: C::ZoomOut,
                     needs: N::Nothing,
                 },
                 Item::Run {
                     label: "Actual size",
-                    keys: "Ctrl+0",
+                    keys: ZOOM_RESET,
                     command: C::ZoomReset,
                     needs: N::Nothing,
                 },
@@ -340,13 +414,13 @@ pub fn bar() -> Vec<Menu> {
             items: vec![
                 Item::Run {
                     label: "Back",
-                    keys: "Alt+Left",
+                    keys: BACK,
                     command: C::Back,
                     needs: N::Back,
                 },
                 Item::Run {
                     label: "Forward",
-                    keys: "Alt+Right",
+                    keys: FORWARD,
                     command: C::Forward,
                     needs: N::Forward,
                 },
@@ -382,12 +456,12 @@ pub const HELP: &[(&str, &str)] = &[
     ("Space / PgDn", "page down · Shift+Space pages up"),
     ("g / G", "top / bottom"),
     (
-        "Ctrl+L or o",
+        HELP_OPEN_LOCATION,
         "URL bar · Enter opens an address, or searches for words",
     ),
     ("Tab / Shift+Tab", "cycle links · Enter follows"),
-    ("Alt+Left / Backspace", "back"),
-    ("Alt+Right", "forward · the mouse side buttons do both"),
+    (HELP_BACK, "back"),
+    (FORWARD, "forward · the mouse side buttons do both"),
     (
         "r / R",
         "reload · reload bare: no rewrite rule, no site profile, no search shape",
@@ -395,14 +469,11 @@ pub const HELP: &[(&str, &str)] = &[
     ("i / I", "load focused image · load all, naming their hosts"),
     ("t", "outline"),
     ("p", "page info: how this page arrived"),
-    (
-        "/ or Ctrl/Cmd+F · Enter / Shift+Enter",
-        "find in page · next / previous match",
-    ),
+    (HELP_FIND, "find in page · next / previous match"),
     ("z / Z", "collapse focused reply · collapse all"),
     ("y / Y", "copy page URL · copy focused link"),
     ("[ / ]", "narrow / widen the reading measure"),
-    ("Ctrl++ / Ctrl+- / Ctrl+0", "zoom in · out · actual size"),
+    (HELP_ZOOM, "zoom in · out · actual size"),
     ("d", "cycle theme"),
     (",", "settings"),
     ("F10", "the menu bar"),
@@ -533,6 +604,11 @@ mod tests {
     /// somewhere in the help table, so the two surfaces cannot claim different keys for the same
     /// command. This does **not** verify `app::handle_keys`; see the module doc for why not, and
     /// for what closing that would cost.
+    ///
+    /// Both tables are drawn from [`keyspec`], so this checks a different pair of strings on
+    /// macOS than it does anywhere else. That is the intent: the failure it catches is one block
+    /// of specs updated and the other left behind, which is exactly how a platform whose menu
+    /// nobody on this project opens would start lying.
     #[test]
     fn the_menu_and_the_help_card_agree() {
         let help: String = HELP.iter().map(|(k, _)| format!("{k} ")).collect();
@@ -544,9 +620,10 @@ mod tests {
             if keys.is_empty() {
                 continue;
             }
-            // `Ctrl+L` is written `Ctrl+L or o` on the card, and `/` is one of several ways to
-            // reach find, so a substring match against the whole spec column is the right test:
-            // it catches a menu that advertises a key the card has never heard of.
+            // `OPEN_LOCATION` is written `HELP_OPEN_LOCATION` on the card, and `/` is one of
+            // several ways to reach find, so a substring match against the whole spec column is
+            // the right test: it catches a menu that advertises a key the card has never heard
+            // of.
             let bare = keys.trim();
             assert!(
                 help.contains(bare)
