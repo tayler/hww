@@ -488,7 +488,7 @@ fn catalog(port: u16) -> Vec<Scene> {
         ),
         scene(
             "about",
-            "the About card: all three sentences, not the first one in a toast",
+            "the About card: every line of it, not the first one in a toast",
             // `Step::Run`, not F10 and a row of Tabs: Help, About hww is the item's only
             // route, and a synthetic Tab does not land focus inside an egui popup, so the key
             // route photographs an open menu and never the card. The card used to be a

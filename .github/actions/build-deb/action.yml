@@ -56,8 +56,8 @@ runs:
     - name: Verify installed licenses
       shell: bash
       run: |
-        test -f /usr/share/doc/hww/LICENSE-MIT
-        test -f /usr/share/doc/hww/LICENSE-APACHE
+        test -f /usr/share/doc/hww/LICENSE
+        test -f /usr/share/doc/hww/NOTICE
         for license in fonts/LICENSE-*.txt; do
           installed=/usr/share/doc/hww/fonts/$(basename "$license")
           if ! cmp -s "$license" "$installed"; then

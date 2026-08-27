@@ -2536,7 +2536,7 @@ impl ReaderApp {
     /// It was a `flash` of `ABOUT[0]` alone, which put the one uncontroversial sentence in a
     /// six-second pill and left the two that say what the program actually refuses to do
     /// unreachable from the running reader. They are `pub const`, so nothing warned. A card
-    /// rather than a longer toast, because three sentences is reading rather than status, and
+    /// rather than a longer toast, because this much is reading rather than status, and
     /// the reader already has a floating surface shaped for it.
     fn about_overlay(&mut self, ctx: &egui::Context, pal: &theme::Palette) {
         if !self.chrome.about_open {
