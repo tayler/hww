@@ -25,16 +25,19 @@ All five gates in `.github/workflows/ci.yml` must pass on Linux:
     cargo clippy --all-targets --locked --features gui -- -D warnings
     cargo test --locked --features gui
 
-The last two run again on Windows in `gui-windows`, which blocks the same merges. The
-default-feature pair is not repeated there: what it guards is a property of the feature, not of
-the platform.
+The last two run again on Windows in `gui-windows` and on macOS in `gui-macos`, which block
+the same merges. The default-feature pair is not repeated in either: what it guards is a
+property of the feature, not of the platform.
 
 The default job never compiles egui. The second job names `gui` explicitly, never
 `--all-features`. Tests do not call `eframe::run_native`. CI installs no apt packages; native
 libraries are opened at runtime rather than linked at build time. The Windows jobs install NASM
 and only NASM, which is a build-time assembler for `aws-lc-sys`'s vendored C, not a library
 anything links against; the rule about linking is unchanged. Do not add a second package to
-either platform without saying in the workflow which build fails without it.
+either platform without saying in the workflow which build fails without it. The macOS jobs
+install nothing at all, and for a third reason again: `aws-lc-sys` takes its perlasm path on
+Apple targets, and the AppKit, Metal, and CoreGraphics that winit and wgpu do link at build
+time ship with the runner's SDK.
 
 `Cargo.lock` is committed because this crate ships binaries.
 
@@ -193,9 +196,20 @@ boundaries.
 
 ## Portability and style
 
-Linux and Windows are verified and both ship a binary; macOS is neither. Use
+Linux, Windows, and macOS are verified and all three ship a binary. Use
 `Modifiers::COMMAND`, never a literal Ctrl; it maps to Cmd on macOS and Ctrl elsewhere.
-Back/forward support both Alt+arrows and Cmd+brackets.
+Back/forward support both Alt+arrows and Cmd+brackets. What a table *says* about a key is
+`menu::keyspec`, which is `cfg`-selected: never write a modifier into a menu row, a help row, a
+`prefs` field, or the help card's footnote, or a Mac reader is told to press a key nothing binds.
+
+The macOS bundle is ad-hoc signed and carries no Developer ID. Nothing may depend on
+notarization, on a Gatekeeper-clean first launch, or on a Homebrew cask. The deployment floor is
+one number in three places — `[env] MACOSX_DEPLOYMENT_TARGET` in `.cargo/config.toml`,
+`LSMinimumSystemVersion` in `packaging/build-dmg.sh`, and the `minos` that
+`.github/actions/build-macos` asserts against the linked binary. Raise all three together or
+none: the floor comes from the environment rather than the runner, and `cc-rs` compiles
+`aws-lc-sys` separately, so a C object built against a newer SDK silently raises it. That is the
+macOS counterpart to `+crt-static` below.
 
 Every distribution stages its license texts through `hww_install_licenses` in
 `packaging/licenses.sh`; no packaging script names a license file itself. The binary embeds

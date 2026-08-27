@@ -33,7 +33,7 @@ cargo run --features gui -- --why <url>          # the extractor's account, no w
 | `render` | Plain text |
 | `ir` | Document / Block / Inline / Thread / Comment / Entries / Entry |
 | `reader` | Reading model: inline runs, outline, history, threads, image decoding, notices, the menu bar and every setting as data |
-| GUI | egui reader: links, back/forward, outline, find, threads, images, menu bar, settings panel. **Linux and Windows verified**, both with a published binary; macOS is believed to build and is not tested |
+| GUI | egui reader: links, back/forward, outline, find, threads, images, menu bar, settings panel. **Linux, Windows, and macOS verified**, all three with a published binary |
 | feeds, gemini, gopher, markdown | not started |
 | archive | not started |
 
@@ -115,13 +115,77 @@ write to. `--why`, `--show-rewrites`, `--show-profiles`, and `--show-engines` th
 nothing on Windows and only their exit codes survive. Use a Linux build or `cargo run` for
 triage.
 
+## Installing on macOS
+
+Stable Apple Silicon builds are published on the same
+[Releases page](https://github.com/tayler/hww/releases). They are `aarch64` only. An Intel Mac
+is not covered by a published binary and builds from source instead, which needs the Xcode
+Command Line Tools and a stable Rust toolchain:
+
+```
+cargo install --git https://github.com/tayler/hww --locked --features gui
+```
+
+macOS 11 Big Sur or later is required, which the disk image itself enforces.
+
+Download `hww-<version>-aarch64-macos.dmg` and `SHA256SUMS`, then check the image against the
+published hash before opening it. macOS ships `shasum` rather than `sha256sum`, so compare the
+two lines this prints:
+
+```
+shasum -a 256 hww-*-aarch64-macos.dmg
+grep aarch64-macos SHA256SUMS
+```
+
+With the [GitHub CLI](https://cli.github.com) installed, one further check is available. It is
+optional, and it answers a different question than the hash does: not whether the file matches
+the release, but whether the release was built by this repository's own workflow from this
+repository's own source.
+
+```
+gh attestation verify hww-*-aarch64-macos.dmg --repo tayler/hww
+```
+
+Open the image and drag `hww.app` onto the `Applications` shortcut beside it, then eject the
+image. There is nothing else to install: every font is compiled into the binary, and settings
+are the only thing hww ever writes, to `~/Library/Application Support/hww`.
+
+The app is ad-hoc signed, which is the minimum an Apple Silicon binary needs to run at all, and
+is not a Developer ID. Gatekeeper therefore refuses the first launch with *"hww Not Opened —
+Apple could not verify..."*. Open **System Settings › Privacy & Security**, scroll to the
+message naming hww, and choose **Open Anyway**; it appears there for about an hour after the
+refusal. The old Control-click → **Open** shortcut no longer works on Sequoia and later. If you
+would rather not visit System Settings, `xattr -d com.apple.quarantine /Applications/hww.app`
+strips the download flag the check reads and does the same job in one command. A certificate
+that would remove that prompt costs money and identifies a publisher; the hash and the
+attestation above answer the same question without one.
+
+Each successful push to `main` also attaches a temporary `hww-macos-arm64` artifact to its
+[CI workflow run](https://github.com/tayler/hww/actions/workflows/ci.yml), on the same 14-day
+expiry as the Linux and Windows ones. As with those, GitHub wraps every artifact in a ZIP of its
+own, so that download is a ZIP containing the disk image.
+
+Remove hww by dragging the app to the Trash and running
+`rm -rf ~/Library/Application\ Support/hww`. As on the other two platforms, nothing else was
+written: no page content, no reading history.
+
+The flags that print nothing on Windows do print here. `#![windows_subsystem = "windows"]` is
+inert on this target, so the app is an ordinary console binary as well as a bundle, and the
+triage commands work by naming the executable inside it:
+
+```
+/Applications/hww.app/Contents/MacOS/hww --why https://example.com/article
+```
+
 ## Running
 
 A stable Rust toolchain new enough for edition 2024 (1.85 or later), and a C toolchain. Every
 native library in the graph is opened at runtime rather than linked at build time, so no
 graphics, font, or windowing package has to be installed first; the C compiler is for
 `aws-lc-sys`, which arrives under rustls and builds vendored sources rather than linking a
-system TLS library. On Windows that target also assembles, so NASM must be on PATH.
+system TLS library. On Windows that target also assembles, so NASM must be on PATH; on macOS the
+Xcode Command Line Tools supply the compiler and no separate assembler is needed, since
+`aws-lc-sys` takes its perlasm path there.
 
 ```
 cargo run --features gui                          # the reader, URL bar focused
@@ -362,10 +426,12 @@ git push origin v0.1.0
 ```
 
 The tag workflow checks the tag against `Cargo.toml`, verifies that the commit belongs to
-`main`, then builds on two runners: the Debian package on Ubuntu 22.04, which pins its glibc
-floor, and the Windows archive on a Windows runner. Both are installed or run where they are
-built. One `SHA256SUMS` covers the pair, one attestation names both, and the release publishes
-them together, so a tag that fails on either platform publishes nothing.
+`main`, then builds on three runners: the Debian package on Ubuntu 22.04, which pins its glibc
+floor, the Windows archive on a Windows runner, and the macOS disk image on an Apple Silicon
+runner, whose floor comes from `MACOSX_DEPLOYMENT_TARGET` in `.cargo/config.toml` rather than
+from the host and is asserted against the linked binary. All three are installed or run where
+they are built. One `SHA256SUMS` covers the set, one attestation names all of them, and the
+release publishes them together, so a tag that fails on any platform publishes nothing.
 
 Every distribution carries the same license texts, staged by `packaging/licenses.sh`, which both
 build scripts source: the crate's `LICENSE` and `NOTICE` where the reader lands, and the font
