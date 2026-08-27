@@ -49,6 +49,7 @@ use crate::reader::notice::{
     IMAGES_ARE_OFF, Notice,
 };
 use crate::reader::outline::{self, OutlineEntry};
+use crate::reader::pagecache::{PageCache, stash_under};
 use crate::reader::pageinfo;
 use crate::reader::prefs;
 use crate::reader::settings::{self, Settings};
@@ -208,6 +209,39 @@ struct Ready {
     /// The masthead favicon is stamped with the same id, so a late reply cannot land on the
     /// next page.
     req: ReqId,
+    /// The options this document was fetched under, so a Back that would be made with different
+    /// ones fetches instead of being answered from memory.
+    ///
+    /// **Not `ReaderApp::last_opts`**, which by the time this page is filed away already holds
+    /// the options of the navigation replacing it: `navigate` writes it at dispatch. Filing with
+    /// that would put a `Shift+R` page under the default options and hand it back on an ordinary
+    /// Back. The rule is `reader::pagecache`'s: the cache may only answer with the page the
+    /// fetch it replaced would have produced.
+    opts: LoadOptions,
+    /// When the document arrived from the network.
+    ///
+    /// Survives a trip through the page cache unchanged, so a page restored twice still reports
+    /// the age of the fetch rather than the age of the last restore.
+    fetched: Instant,
+    /// Put back on screen from memory rather than fetched. Everything else this page reports
+    /// describes the fetch above, which stays true because the page-info panel says this first.
+    restored: bool,
+}
+
+impl Ready {
+    /// How this page got into the column, for `pageinfo::rows`.
+    ///
+    /// Here rather than at the panel so the two fields above are read in one place: the age is
+    /// the *fetch*'s, so a page put back twice still reports how old the document is.
+    fn arrival(&self) -> pageinfo::Arrival {
+        if self.restored {
+            pageinfo::Arrival::FromMemory {
+                age: self.fetched.elapsed(),
+            }
+        } else {
+            pageinfo::Arrival::Fetched
+        }
+    }
 }
 
 #[derive(Default)]
@@ -234,6 +268,10 @@ pub struct ReaderApp {
     settings_dirty: bool,
     last_saved: Instant,
     history: History,
+    /// The documents Back and Forward can open without asking the site again, keyed by the
+    /// entry each belongs to. Filled by [`ReaderApp::commit`] as a page leaves the column and
+    /// emptied by [`ReaderApp::restore`] as one comes back; see `reader::pagecache`.
+    pages: PageCache<Box<Ready>>,
     page: Page,
     /// The navigation every reply is matched against. Anything older is stale by definition.
     current: Option<ReqId>,
@@ -464,6 +502,7 @@ impl ReaderApp {
             settings_dirty: false,
             last_saved: Instant::now(),
             history: History::new(),
+            pages: PageCache::new(),
             page: Page::Idle,
             current: None,
             rewrite_notice: None,
@@ -522,6 +561,10 @@ impl ReaderApp {
 
     /// Dispatch a navigation. **Nothing on screen changes here except the chrome.**
     ///
+    /// Back and Forward reach this only when they have to: [`ReaderApp::arrive`] tries the page
+    /// cache first and comes here on a miss. Every other navigation — a link, a typed URL,
+    /// `reload`, `Shift+R`, Retry — arrives here directly and always asks the site.
+    ///
     /// The resets that belong to the page being *fetched* are not done here; they are
     /// [`ReaderApp::commit`]'s, and they run when a document actually takes the column. Doing
     /// them at dispatch is what used to clear the textures, collapse state, and scroll offset of
@@ -529,7 +572,7 @@ impl ReaderApp {
     fn navigate(&mut self, url: Url, opts: LoadOptions, push: bool) {
         // `mint_page`, not `mint`: it also tells the pool which page is current, so the images
         // queued on the one being left are dropped instead of run ahead of this fetch.
-        let req = self.net.mint_page();
+        let req = self.begin(opts);
         // The page on screen stays on screen. Taken rather than borrowed so a chain of
         // abandoned loads, Back pressed twice inside one slow fetch, carries the same page
         // forward instead of falling to blank on the second hop.
@@ -542,11 +585,6 @@ impl ReaderApp {
             // A failure owns the viewport already; there is nothing under it to keep.
             Page::Idle | Page::Failed { .. } => None,
         };
-        self.last_opts = opts;
-        self.current = Some(req);
-        self.rewrite_notice = None;
-        self.pending_link = None;
-        self.pending_href = None;
         if push {
             // A navigation that never committed gets no entry of its own. Clicking a second link
             // before the first has answered is ordinary now that the page stays clickable, and
@@ -641,15 +679,139 @@ impl ReaderApp {
     }
 
     fn go_back(&mut self) {
-        if let Some(url) = self.history.back().cloned() {
-            self.navigate(url, self.opts, false);
+        if self.history.back().is_some() {
+            self.arrive();
         }
     }
 
     fn go_forward(&mut self) {
-        if let Some(url) = self.history.forward().cloned() {
-            self.navigate(url, self.opts, false);
+        if self.history.forward().is_some() {
+            self.arrive();
         }
+    }
+
+    /// The cursor has moved. Put the page it names into the column, from memory if the reader
+    /// still has it and from the network if not.
+    ///
+    /// The one place the page cache is consulted, which is why no other navigation needs to opt
+    /// out of it: `reload`, `Shift+R`, `Retry`, a link, and a typed URL all reach `navigate`
+    /// directly. A check inside `navigate` would have needed a flag argument at every call site
+    /// and would have been the wrong shape.
+    fn arrive(&mut self) {
+        let Some(id) = self.history.current_id() else {
+            return;
+        };
+        if self.keep_shown(id) || self.restore(id) {
+            return;
+        }
+        let Some(url) = self.history.current().cloned() else {
+            return;
+        };
+        self.navigate(url, self.opts, false);
+    }
+
+    /// The cursor has landed on the entry whose page is *already in the column*. Cancel the
+    /// navigation in flight over it and keep it.
+    ///
+    /// Following a link and pressing Back before the reply arrives is this case, and without it
+    /// the reader re-downloads the page they are looking at. It fires only during a navigation:
+    /// with nothing in flight the cursor has just moved off `shown_entry` by definition.
+    ///
+    /// Not [`Page::restore_shown`], which puts the page back into the `Loading` it is holding —
+    /// that is the state being cancelled.
+    fn keep_shown(&mut self, id: EntryId) -> bool {
+        if self.shown_entry != Some(id) {
+            return false;
+        }
+        let Some(page) = self.page.take_shown() else {
+            return false;
+        };
+        self.resume(&page);
+        // No `commit` here, deliberately: this page never left the column, so its textures, its
+        // collapsed threads, its find position and its scroll offset are all still its own and
+        // resetting them would be the jolt `commit` was moved out of `navigate` to avoid.
+        //
+        // The one half of `commit` that still has to run is the prune: this is a page
+        // transition, `navigate` truncated the branch ahead when it dispatched the fetch being
+        // cancelled, and the pages kept for the entries it dropped are charged against the
+        // budget with nothing able to ask for them again.
+        self.prune_pages();
+        self.page = Page::Ready(page);
+        true
+    }
+
+    /// Put a page back on screen without a request.
+    ///
+    /// Misses, and falls back to a fetch, when the entry's page was evicted, was never kept, or
+    /// was read under other options; see `reader::pagecache` for why the last of those is a miss
+    /// rather than a hit.
+    fn restore(&mut self, id: EntryId) -> bool {
+        let Some(mut page) = self.pages.take(id, self.opts) else {
+            return false;
+        };
+        page.restored = true;
+        self.adopt(&mut page);
+        self.install(page);
+        true
+    }
+
+    /// Re-stamp a page for a navigation of its own, and make whatever was in flight stale.
+    ///
+    /// A page that goes back on screen without a fetch still needs a live navigation id, for
+    /// both of the jobs `navigate` mints one for: every reply still outstanding for the fetch
+    /// this abandons fails its `self.current` guard and is dropped, and the pool is told which
+    /// page is current so the images queued on the one being left are dropped too. The worker
+    /// still runs its request to completion — correlation, not cancellation.
+    ///
+    /// [`Ready::req`] is re-stamped rather than carried, and that is the half worth stating.
+    /// Left stale, `Msg::Image`'s match would drop every reply this page asked for, so
+    /// `ImagePolicy::Auto` would go silently dead on restored pages and nowhere else; and a
+    /// reply from the page's *earlier* visit could still be accepted, putting a picture on a
+    /// page whose disclosure counters have just been cleared.
+    fn adopt(&mut self, page: &mut Ready) {
+        page.req = self.begin(self.opts);
+    }
+
+    /// Hand the column back to the page that never left it, and make the navigation over it
+    /// stale.
+    ///
+    /// The mirror of [`ReaderApp::adopt`], and re-stamping here would be wrong for the reason
+    /// it is right there. `commit` does not run on this path, so `ImageStore` still holds this
+    /// page's entries, the disclosures recorded for its outstanding requests, and its counters.
+    /// A fresh id orphans all three: every image reply in flight fails the `Ready::req` guard
+    /// in `Msg::Image` and `Msg::ImageDropped`, which leaves a placeholder on `Loading` that
+    /// `is_pending` refuses to re-request, `any_pending` pinning the repaint floor for the life
+    /// of the page, a `Set-Cookie` uncounted, and a host standing in the panel for a request
+    /// whose result was thrown away. `ImagePolicy::Auto` stops too, since `image_pass` asks
+    /// whether the page on screen is the current navigation.
+    ///
+    /// The page's own id is still the live one. It is the fetch over it that has to go stale,
+    /// which is what publishing an id other than its own achieves.
+    fn resume(&mut self, page: &Ready) {
+        self.net.resume_page(page.req);
+        self.take_over(page.req, page.opts);
+    }
+
+    /// Mint the navigation id and make everything the one it replaces left behind stale.
+    ///
+    /// Shared by `navigate` and [`ReaderApp::adopt`] because the set is not obvious from any one
+    /// field — it is "everything that makes an in-flight reply stale, plus the click marks on the
+    /// link that started it". Written out at both, a sixth field added later lands in `navigate`
+    /// alone and only pages put back from memory misbehave.
+    fn begin(&mut self, opts: LoadOptions) -> ReqId {
+        let req = self.net.mint_page();
+        self.take_over(req, opts);
+        req
+    }
+
+    /// Everything a navigation id takes over apart from minting it, shared with
+    /// [`ReaderApp::resume`], which adopts the id of the page already in the column instead.
+    fn take_over(&mut self, req: ReqId, opts: LoadOptions) {
+        self.current = Some(req);
+        self.last_opts = opts;
+        self.rewrite_notice = None;
+        self.pending_link = None;
+        self.pending_href = None;
     }
 
     // ---------------------------------------------------------------- images
@@ -1013,27 +1175,38 @@ impl ReaderApp {
         // "this may not be the page you asked for" is not a thing to say once and withdraw.
         let outline = outline::build(&loaded.doc.blocks);
         let masthead = title::masthead(&loaded.doc);
-        let fragment = self
-            .history
-            .current()
-            .and_then(|u| u.fragment().map(str::to_owned));
         let req = self.current.unwrap_or_else(|| self.net.mint_page());
-        // Before the page is installed, so `jump_to_fragment` below overrides the reset rather
-        // than being overridden by it.
-        self.commit();
-        // The strip line lasts until the navigation ends. The page is up; the rewrite bar
-        // owns the remark from here.
-        self.rewrite_notice = None;
-        let page = Ready {
+        self.install(Box::new(Ready {
             loaded,
             outline,
             masthead,
             req,
-        };
+            // Sound here and nowhere later: `drain` reaches `settle` only when
+            // `self.current == Some(req)`, and `navigate` writes `current` and `last_opts`
+            // in the same call, so the two cannot disagree about which navigation this is.
+            opts: self.last_opts,
+            fetched: Instant::now(),
+            restored: false,
+        }));
+    }
+
+    /// Put a page in the column. Both a fetch and a restore end here.
+    ///
+    /// Extracted from `settle` so the two cannot drift: a restore has to do everything an
+    /// arriving fetch does except produce the document, in the same order and for the same
+    /// reasons, and a reset added to one path and not the other is invisible until a reader
+    /// finds it.
+    fn install(&mut self, page: Box<Ready>) {
+        // Before the page is installed, so `jump_to_fragment` below overrides the reset rather
+        // than being overridden by it. Also where the outgoing page is filed away.
+        self.commit();
+        // The strip line lasts until the navigation ends. The page is up; the rewrite bar
+        // owns the remark from here.
+        self.rewrite_notice = None;
         // After `commit`, which cleared the outgoing page's index, and before the page is
         // installed, which is the last moment the document is not behind `self.page`.
         self.image_blocks = image_blocks(&page.loaded.doc);
-        self.page = Page::Ready(Box::new(page));
+        self.page = Page::Ready(page);
         // Where this page was left, if it is a page the reader has been on: Back, Forward and
         // `r` all arrive here with the cursor on an entry that has been read before, and
         // `commit` has just reset the column to the top. A link followed, or a URL typed, mints
@@ -1044,7 +1217,15 @@ impl ReaderApp {
             .map_or(0.0, |id| self.history.offset_of(id));
         if restore > 0.0 {
             self.scroll_offset = Some(restore);
-        } else if let Some(f) = fragment {
+        } else if let Some(f) = self
+            .history
+            .current()
+            .and_then(|u| u.fragment().map(str::to_owned))
+        {
+            // Read here rather than passed in. Both callers would compute it from
+            // `self.history.current()` and `commit` does not touch the stack, so a parameter
+            // would be the one input the two paths could still drift on — which is the thing
+            // this function was extracted to prevent.
             self.jump_to_fragment(&f);
         }
     }
@@ -1071,6 +1252,11 @@ impl ReaderApp {
         self.current = Some(self.net.mint_page());
         self.rewrite_notice = rewrite_notice;
         self.history = History::new();
+        // For the same reason the stack is replaced rather than pushed onto. Ids are monotonic
+        // for the process, so nothing here could collide; a cache carried between scenes would
+        // make one scene's picture depend on how many ran ahead of it, which is a picture that
+        // changes without the page changing.
+        self.pages.clear();
         self.history.push(url.clone());
         match result {
             Ok(loaded) => self.settle(loaded),
@@ -1093,10 +1279,39 @@ impl ReaderApp {
     /// above all its scroll offset. Resetting the offset at dispatch is what made a click jolt
     /// the page to the top before anything had arrived.
     ///
-    /// Called from both places a page actually takes the column, `settle` and the `Msg::Failed`
-    /// arm of `drain`, and from `present`, so the screenshot tool cannot drift from the
-    /// navigation path.
+    /// Called from every place a page actually takes the column: `install`, on behalf of both
+    /// an arriving fetch and a restore from memory; the `Msg::Failed` and `Msg::Panicked` arms
+    /// of `drain`, where an error screen replaces the page it was fetched over; and `present`,
+    /// so the screenshot tool cannot drift from the navigation path. `keep_shown` is the one
+    /// transition that does not, because its page never leaves the column; it calls
+    /// [`ReaderApp::prune_pages`] for the half of this that still applies.
+    ///
+    /// It also *keeps* the page being replaced, rather than only clearing the state derived from
+    /// it. Here because this is the one function every page transition passes through, so a
+    /// fourth transition added later cannot forget to file the page it displaced — the same
+    /// argument that put the resets here. See `reader::pagecache` for what is kept and why.
     fn commit(&mut self) {
+        // The page leaving the column, kept for the entry it belongs to rather than dropped.
+        // Taken, never cloned: a `Ready` is a document, an outline and a masthead, and the one
+        // copy of it moves from the column into the cache and back out again.
+        //
+        // `stash_under` is what keeps a reload from filing its own outgoing document under the
+        // entry the reloaded one is about to occupy, and `holds` covers the entry that was
+        // truncated away while its page was still on screen — `navigate` discards the branch
+        // ahead at dispatch, so by the time a reply lands the outgoing page may name nothing.
+        if let Some(id) = stash_under(self.shown_entry, self.history.current_id())
+            && self.history.holds(id)
+            && let Some(page) = self.page.take_shown()
+        {
+            // `prov.chars` *is* `doc.text_len()`, computed once in `session::load`. Re-walking
+            // the block tree on every navigation to learn what the fetch already measured
+            // would be the same number for more work.
+            let (cost, opts) = (page.loaded.prov.chars, page.opts);
+            self.pages.insert(id, page, cost, opts);
+        }
+        // Paired with the insert above rather than left to the caller, because they are one
+        // rule: file the page leaving the column, drop every page the stack can no longer reach.
+        self.prune_pages();
         // Textures and the disclosure counters both die with the page they belong to: the
         // page-info panel answers how the page on screen arrived, not what the session has
         // done since it started.
@@ -1123,6 +1338,17 @@ impl ReaderApp {
         // at an arbitrary offset.
         self.scroll_delta = 0.0;
         self.scroll_to_block = None;
+    }
+
+    /// Drop every kept page the history stack can no longer reach.
+    ///
+    /// A page kept for an entry that has been truncated away is memory nothing can spend:
+    /// `navigate` discards the branch ahead the moment it dispatches, so the entries a Back
+    /// filled the cache for can stop existing while their pages are still held. Called from
+    /// `commit`, which pairs it with the insert, and from `keep_shown`, which is the one page
+    /// transition that does not commit.
+    fn prune_pages(&mut self) {
+        self.pages.retain(|id| self.history.holds(id));
     }
 
     /// The page the reading column is drawing, which during a navigation is the outgoing one.
@@ -2240,6 +2466,7 @@ impl ReaderApp {
                 &r.loaded.prov,
                 &self.images.counts(),
                 notice::carries_rtl(&r.loaded.doc),
+                r.arrival(),
             ),
             None => Vec::new(),
         };
@@ -2821,6 +3048,9 @@ mod tests {
                 prov: crate::session::Provenance::fixture(url.as_str()),
             },
             req: ReqId::for_test(req),
+            opts: LoadOptions::default(),
+            fetched: Instant::now(),
+            restored: false,
         })
     }
 

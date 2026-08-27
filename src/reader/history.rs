@@ -4,10 +4,16 @@
 //! arrives with it; reading history at rest is a whole second doctrine, and none of the
 //! reading experience depends on it.
 //!
-//! An entry remembers where the reader was in it. Back re-fetches — there is no document cache —
-//! so the arriving page would otherwise open at the top, which is the one thing every other
-//! browser does not do. The offset is in points, written every frame by the reader and read once
-//! when the page commits.
+//! An entry remembers where the reader was in it. The offset is in points, written every frame
+//! by the reader and read once when the page commits, and it is needed either way: a page the
+//! reader still has opens where it was left because the offset says so, and a page that had to
+//! be fetched again opens there for the same reason.
+//!
+//! What Back does *not* always do any more is ask the site again. [`reader::pagecache`] keeps
+//! the documents this stack can still return to, so the common Back is a move in memory rather
+//! than a request; see that module for what is kept and why. This stack is that cache's primary
+//! bound — a page whose entry is gone from here is a page nothing can navigate to — which is
+//! why [`History::holds`] exists.
 //!
 //! Entries carry an [`EntryId`] because an index is not a name. `go_back` moves the cursor and
 //! only then dispatches the fetch, so for the length of that fetch the page on screen belongs to
@@ -23,6 +29,11 @@ use url::Url;
 /// Monotonic for the process rather than for one [`History`], which matters because `present`
 /// hands the reader a whole new stack: a counter that restarted would mint an id the reader may
 /// still be holding from the stack before it.
+///
+/// The page cache sharpened this. Keyed by index, the old failure was the outgoing page's
+/// *offset* landing on the incoming one; keyed by index, the cache would file the outgoing
+/// page's whole *document* under the arriving page's entry, and a later Back would open a page
+/// the reader never asked for. Same mechanism, an order of magnitude worse symptom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntryId(u64);
 
@@ -161,6 +172,16 @@ impl History {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Whether `id` still names an entry. False once `push` or `replace` has truncated it away,
+    /// which is the moment a page kept for it becomes memory nothing can spend.
+    ///
+    /// The whole of what the page cache asks this stack. It answers one id at a time rather than
+    /// handing out the list, so nothing outside here walks the entries to decide what is
+    /// reachable, and `PageCache::retain` needs no `Vec` to be given.
+    pub fn holds(&self, id: EntryId) -> bool {
+        self.entries.iter().any(|e| e.id == id)
     }
 }
 
@@ -367,6 +388,46 @@ mod tests {
             "c took b's index and b's offset with it"
         );
         assert_eq!(h.offset_of(b), 0.0, "a discarded entry has no position");
+    }
+
+    // ------------------------------------------------- what the cache may keep
+
+    #[test]
+    fn the_stack_names_every_entry_it_still_holds() {
+        let mut h = History::new();
+        let mut ids = Vec::new();
+        for s in ["https://a/", "https://b/", "https://c/"] {
+            h.push(u(s));
+            ids.push(h.current_id().unwrap());
+        }
+        assert!(ids.iter().all(|id| h.holds(*id)));
+        h.back();
+        assert!(
+            ids.iter().all(|id| h.holds(*id)),
+            "moving the cursor discards nothing"
+        );
+    }
+
+    /// The guard that keeps the page cache from holding a document nothing can navigate to.
+    #[test]
+    fn a_truncated_entry_is_no_longer_held() {
+        let mut h = History::new();
+        h.push(u("https://a/"));
+        h.push(u("https://b/"));
+        let b = h.current_id().unwrap();
+        h.back();
+        h.push(u("https://c/"));
+        assert!(!h.holds(b));
+        assert_eq!(h.len(), 2);
+    }
+
+    #[test]
+    fn an_id_from_another_stack_is_never_held() {
+        let mut h = History::new();
+        h.push(u("https://a/"));
+        let mut other = History::new();
+        other.push(u("https://z/"));
+        assert!(!h.holds(other.current_id().unwrap()));
     }
 
     /// `vertical_scroll_offset` panics on an infinity, and a `NaN` would stick.

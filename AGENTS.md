@@ -99,9 +99,12 @@ Height caches invalidate when layout-affecting state changes. Use `allocate_spac
 `add_space`, for skipped blocks.
 
 A navigation keeps the outgoing page visible until commit. `navigate` creates a request;
-`ReaderApp::commit` creates the arriving page and owns document resets such as textures,
-collapsed threads, find position, and scroll offset. Code describing the visible page goes
-through `ReaderApp::shown`.
+`ReaderApp::install` puts a page in the column and `ReaderApp::commit` owns document resets such
+as textures, collapsed threads, find position, and scroll offset. `commit` also hands the
+outgoing page to `reader::pagecache`, and drops in the same breath every page the stack can no
+longer reach; that pairing is what lets Back and Forward re-open a document instead of fetching
+it again. `pagecache::stash_under` decides which entry a page is kept for, and a reload keeps
+none. Code describing the visible page goes through `ReaderApp::shown`.
 
 Only `reader/ui/theme.rs` may contain `Color32`. Form owns layout and type; `Palette` owns
 colours and `dark_mode`. Chrome uses `theme::chrome_font`; page text uses the page family.
