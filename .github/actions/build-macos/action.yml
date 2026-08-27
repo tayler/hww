@@ -121,7 +121,7 @@ runs:
         # `cmp` rather than the Windows action's archive listing: a truncated or stale text fails
         # here too. Driven off the repository glob, so a face added with its license is checked
         # without editing this file.
-        for license in LICENSE-MIT LICENSE-APACHE; do
+        for license in LICENSE NOTICE; do
           if ! cmp -s "$license" "$app/Contents/Resources/$license"; then
             printf '%s is missing from the bundle or differs\n' "$license" >&2
             exit 1
