@@ -23,7 +23,11 @@ runs:
       shell: bash
       run: |
         test "$RUNNER_OS" = Windows
-        rustc -vV | grep -qx 'host: x86_64-pc-windows-msvc'
+        # Captured, not piped, for the reason spelled out in the macOS action: `grep -q` exits
+        # at the match, rustc has two more lines to write, and `pipefail` reports the resulting
+        # SIGPIPE as the pipeline's status even though the assertion held.
+        rustc_version=$(rustc -vV)
+        grep -qx 'host: x86_64-pc-windows-msvc' <<<"$rustc_version"
         if [[ -n "${RUSTFLAGS:-}" ]]; then
           printf 'RUSTFLAGS is set (%s); it discards the +crt-static in .cargo/config.toml\n' \
             "$RUSTFLAGS" >&2

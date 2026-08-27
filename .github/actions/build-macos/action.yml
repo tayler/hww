@@ -31,7 +31,22 @@ runs:
       shell: bash
       run: |
         test "$RUNNER_OS" = macOS
-        rustc -vV | grep -qx 'host: aarch64-apple-darwin'
+        # Captured, not piped. Every step here runs under `bash -e -o pipefail`, and a consumer
+        # that exits at its match closes the pipe under a producer that is still writing:
+        # `host:` is the fifth of seven lines `rustc -vV` prints, and rustc restores SIGPIPE to
+        # its default disposition so that `rustc ... | head` works, so it dies of signal 13 on
+        # the next line. `pipefail` then takes the pipeline's status from that signal rather
+        # than from the assertion, and the step fails with 141 having proved exactly what it
+        # was asked to prove. A here-string has no writer to kill. The same shape appears twice
+        # more below and once in the Windows action.
+        #
+        # The `printf '%s\n' "$var" | grep -q` pipelines further down are left as they are, and
+        # that is a judgement rather than an oversight: `printf` is a bash builtin writing a
+        # whole small payload in one `write()` that the 64K pipe buffer swallows, so there is no
+        # moment at which the reader can close first. That holds only while those payloads stay
+        # small. One that outgrows the buffer belongs here with the rest.
+        rustc_version=$(rustc -vV)
+        grep -qx 'host: aarch64-apple-darwin' <<<"$rustc_version"
 
     # No `setup-nasm` here, and its absence is deliberate rather than an oversight: `aws-lc-sys`
     # takes its perlasm/clang path on Apple targets, so the assembler question the Windows
@@ -57,11 +72,14 @@ runs:
       run: |
         bin=target/release/hww
         test -f "$bin"
-        floor=$(vtool -show-build "$bin" | awk '$1 == "minos" { print $2; exit }')
+        # Captured for the reason given at the platform check, and reused by the failure branch
+        # so the report cannot describe a second invocation of `vtool`.
+        build=$(vtool -show-build "$bin")
+        floor=$(awk '$1 == "minos" { print $2; exit }' <<<"$build")
         if [[ "$floor" != "11.0" ]]; then
           printf 'hww was linked against minos %s, not 11.0; MACOSX_DEPLOYMENT_TARGET did not take\n' \
             "${floor:-<none>}" >&2
-          vtool -show-build "$bin" >&2
+          printf '%s\n' "$build" >&2
           exit 1
         fi
 
@@ -115,7 +133,10 @@ runs:
         # signature is the ad-hoc one this project ships: a Developer ID would be a surprise,
         # and README.md's Gatekeeper paragraph would be wrong.
         codesign --verify --strict --verbose=2 "$app"
-        codesign -dvv "$app" 2>&1 | grep -q 'Signature=adhoc'
+        # Captured for the reason given at the platform check: `codesign -dvv` prints several
+        # more lines after `Signature=`.
+        signature=$(codesign -dvv "$app" 2>&1)
+        grep -q 'Signature=adhoc' <<<"$signature"
 
         # By content, not by name. The mounted image is readable, so this takes the deb action's
         # `cmp` rather than the Windows action's archive listing: a truncated or stale text fails
