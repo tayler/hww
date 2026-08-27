@@ -1,0 +1,153 @@
+name: Build and verify macOS package
+description: Build the GUI binary, package it as a signed .app in a .dmg, and verify the image
+
+# Every assertion here exists because no human opens this app before it is published: this
+# action is the only thing standing between a broken bundle and a release.
+#
+# One thing it cannot assert, by construction. Nothing downloaded on a runner carries
+# `com.apple.quarantine`, so the Gatekeeper refusal a reader meets on first launch — and the
+# System Settings route past it that README.md documents — is untested here. A green job says
+# the bundle is well-formed and runs; it does not say the documented first-launch flow is
+# accurate. That needs a real Mac and a real download.
+
+inputs:
+  version:
+    description: Image version; empty produces a development version
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # The deb action pins a glibc floor here and the Windows action pins the static CRT. What
+    # this pins is the architecture the artifact name claims: a runner that moved back to Intel
+    # would produce a file called `aarch64` that no Apple Silicon Mac would run natively, and
+    # nothing downstream would notice.
+    #
+    # The deployment floor is *not* pinned by the runner. It comes from
+    # `MACOSX_DEPLOYMENT_TARGET` in `.cargo/config.toml`, and the step below asserts it against
+    # the linked binary rather than trusting either the host or the toolchain.
+    - name: Verify build platform
+      shell: bash
+      run: |
+        test "$RUNNER_OS" = macOS
+        rustc -vV | grep -qx 'host: aarch64-apple-darwin'
+
+    # No `setup-nasm` here, and its absence is deliberate rather than an oversight: `aws-lc-sys`
+    # takes its perlasm/clang path on Apple targets, so the assembler question the Windows
+    # action answers does not arise.
+    #
+    # Nothing else is installed either, but not for the `gui` job's reason. On Linux every
+    # native library in this graph is opened at runtime; on macOS winit and wgpu link AppKit,
+    # Metal, and CoreGraphics at build time through the `objc2` crates. They ship with the SDK
+    # the runner already has, so there is nothing to install — a different fact with the same
+    # consequence, and worth saying so nobody adds a package list looking for the first one.
+    - name: Build release binary
+      shell: bash
+      run: cargo build --locked --release --features gui --bin hww
+
+    # Asked of the binary, not of the toolchain. `rustc --print=deployment-target` would report
+    # 11.0 correctly in exactly the case this exists to catch: `cc-rs` compiles `aws-lc-sys`'s
+    # vendored C separately, and the linker takes the maximum `minos` across every object, so one
+    # C object built against the runner's SDK default raises the floor of a binary rustc still
+    # describes as 11.0. This is the direct analogue of the Windows action's `VCRUNTIME140` grep:
+    # assert the property the config file claims to set, on the artifact that ships.
+    - name: Verify the deployment floor
+      shell: bash
+      run: |
+        bin=target/release/hww
+        test -f "$bin"
+        floor=$(vtool -show-build "$bin" | awk '$1 == "minos" { print $2; exit }')
+        if [[ "$floor" != "11.0" ]]; then
+          printf 'hww was linked against minos %s, not 11.0; MACOSX_DEPLOYMENT_TARGET did not take\n' \
+            "${floor:-<none>}" >&2
+          vtool -show-build "$bin" >&2
+          exit 1
+        fi
+
+    - name: Build macOS package
+      shell: bash
+      env:
+        HWW_DMG_VERSION: ${{ inputs.version }}
+      run: |
+        if [[ -z "$HWW_DMG_VERSION" ]]; then
+          unset HWW_DMG_VERSION
+        fi
+        packaging/build-dmg.sh
+
+    # One step rather than four, because the trap that detaches the image has to live in the same
+    # `run:` block as the attach that created it. A failed assertion in a later step would
+    # otherwise leave the volume mounted for the rest of the job.
+    - name: Verify the disk image
+      shell: bash
+      env:
+        HWW_DMG_VERSION: ${{ inputs.version }}
+      run: |
+        # Named by count rather than by glob, as in the Windows action. `build-dmg.sh` removes
+        # only the image it is about to write, so a dist/ holding a previous build's dmg would
+        # make this a two-word string that every command below would read differently.
+        shopt -s nullglob
+        dmgs=(dist/*.dmg)
+        if [[ "${#dmgs[@]}" -ne 1 ]]; then
+          printf 'expected one image in dist/, found %d: %s\n' "${#dmgs[@]}" "${dmgs[*]}" >&2
+          exit 1
+        fi
+        dmg=${dmgs[0]}
+        if [[ -n "$HWW_DMG_VERSION" ]]; then
+          test "$dmg" = "dist/hww-${HWW_DMG_VERSION}-aarch64-macos.dmg"
+        fi
+
+        mnt=$RUNNER_TEMP/hww-dmg
+        rm -rf "$mnt"
+        mkdir -p "$mnt"
+        trap 'hdiutil detach "$mnt" >/dev/null 2>&1 || hdiutil detach "$mnt" -force >/dev/null 2>&1' EXIT
+        hdiutil attach -readonly -nobrowse -mountpoint "$mnt" "$dmg"
+
+        app=$mnt/hww.app
+        test -x "$app/Contents/MacOS/hww"
+        test -f "$app/Contents/Info.plist"
+        test -f "$app/Contents/Resources/hww.icns"
+        test -L "$mnt/Applications"
+
+        # The signature is sealed over `Contents`, so this is also what proves the icon and the
+        # license texts were staged before `codesign` ran rather than after it. `--strict`
+        # refuses a bundle whose sealed resources no longer match. The second check is that the
+        # signature is the ad-hoc one this project ships: a Developer ID would be a surprise,
+        # and README.md's Gatekeeper paragraph would be wrong.
+        codesign --verify --strict --verbose=2 "$app"
+        codesign -dvv "$app" 2>&1 | grep -q 'Signature=adhoc'
+
+        # By content, not by name. The mounted image is readable, so this takes the deb action's
+        # `cmp` rather than the Windows action's archive listing: a truncated or stale text fails
+        # here too. Driven off the repository glob, so a face added with its license is checked
+        # without editing this file.
+        for license in LICENSE-MIT LICENSE-APACHE; do
+          if ! cmp -s "$license" "$app/Contents/Resources/$license"; then
+            printf '%s is missing from the bundle or differs\n' "$license" >&2
+            exit 1
+          fi
+        done
+        for license in fonts/LICENSE-*.txt; do
+          bundled=$app/Contents/Resources/fonts/$(basename "$license")
+          if ! cmp -s "$license" "$bundled"; then
+            printf '%s is missing from the bundle or differs\n' "$bundled" >&2
+            exit 1
+          fi
+        done
+
+        # Run it from the read-only mount, which also proves it needs no write access to its own
+        # bundle. `--show-engines` is a load-and-exit path that opens no window; `--bogus-flag`
+        # is the unknown-flag path, which exits 2.
+        #
+        # Unlike Windows, the output is asserted and not only the exit code:
+        # `#![windows_subsystem = "windows"]` is inert here, so this is an ordinary console
+        # binary and the flags README.md tells Windows readers print nothing do print here.
+        # Asserted by shape rather than by content: `src/sites.rs` is the only file that names a
+        # host, and a CI file that grepped for one would be the second.
+        engines=$("$app/Contents/MacOS/hww" --show-engines)
+        printf '%s\n' "$engines" | grep -qE '^search '
+        set +e
+        "$app/Contents/MacOS/hww" --bogus-flag
+        status=$?
+        set -e
+        test "$status" -eq 2

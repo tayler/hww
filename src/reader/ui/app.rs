@@ -2517,12 +2517,16 @@ impl ReaderApp {
                 });
             ui.add_space(theme::snap(opts.base_size_pt * 0.3));
             ui.separator();
+            // The sentence that used to open this — "Ctrl means Cmd on macOS" — is gone: the
+            // specs above now say Cmd on a Mac, so there is nothing left to translate. What
+            // remains is the one fact the table cannot carry, that the zoom is egui's own and
+            // reaches further than the three keys listed. The wording is `menu::HELP_FOOTNOTE`
+            // rather than a literal here, for the reason every other reader-facing string is
+            // outside `ui/`.
             ui.label(
-                RichText::new(
-                    "Ctrl means Cmd on macOS. Zoom is egui's: Ctrl +/-/0, Ctrl+wheel, pinch.",
-                )
-                .color(pal.dim)
-                .font(theme::chrome_font(&opts)),
+                RichText::new(menu::HELP_FOOTNOTE)
+                    .color(pal.dim)
+                    .font(theme::chrome_font(&opts)),
             );
         });
     }

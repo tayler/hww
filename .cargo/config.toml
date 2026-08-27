@@ -16,3 +16,22 @@
 # on purpose means documenting the redistributable in README.md instead.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# The macOS floor. Left unset, rustc defaults `aarch64-apple-darwin` to 11.0, but `cc-rs`
+# compiles `aws-lc-sys`'s vendored C separately and the linker takes the *maximum* `minos`
+# across every object handed to it: one C object built against the runner's SDK default raises
+# the whole binary's floor, and nothing in the build says it happened. The artifact would then
+# silently require whatever macOS the runner happened to be on.
+#
+# Unconditional, unlike the rustflags above, and deliberately so rather than by omission.
+# Cargo's `[env]` has no per-target form, but the variable is inert on every non-Apple
+# toolchain, and it *must* reach build scripts, since `cc-rs` is half the problem. Setting it
+# in `.github/actions/build-macos` instead would make a local Mac build differ from CI, which
+# is the same argument the `+crt-static` comment above makes for living in this file.
+#
+# 11.0 is rustc's own floor for this target and the release Metal is available in. It is one
+# number in three places: here, `LSMinimumSystemVersion` in `packaging/build-dmg.sh`, and the
+# `minos` the build action asserts against the linked binary. If `wgpu`, `objc2`, or
+# `aws-lc-sys` ever refuse to build against it, raise all three rather than dropping the pin.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "11.0"
