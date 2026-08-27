@@ -528,7 +528,7 @@ pub fn idle() -> Splash {
         wordmark: "hww",
         tagline: "A new browser for the human-wide web.",
         keys: &[
-            ("Ctrl+L", "Search or open a URL"),
+            (crate::reader::menu::OPEN_LOCATION, "Search or open a URL"),
             ("?", "Keyboard shortcuts"),
         ],
     }
@@ -780,7 +780,11 @@ mod tests {
     fn the_splash_names_its_keys() {
         let s = idle();
         assert!(!s.wordmark.is_empty());
-        assert!(s.keys.iter().any(|(k, _)| *k == "Ctrl+L"));
+        assert!(
+            s.keys
+                .iter()
+                .any(|(k, _)| *k == crate::reader::menu::OPEN_LOCATION)
+        );
         assert!(s.keys.iter().any(|(k, _)| *k == "?"));
         assert!(s.keys.iter().all(|(_, what)| !what.is_empty()));
     }
