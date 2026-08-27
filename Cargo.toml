@@ -34,6 +34,13 @@ eframe = { version = "0.36.1", default-features = false, features = ["wgpu", "x1
 winit = { version = "0.30", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico"], optional = true }
 
+# The Windows icon resource only; see `build.rs`. Declared unconditionally rather than under
+# `[target.'cfg(windows)'.build-dependencies]`, because which platform a target table is
+# matched against for build dependencies is a corner of cargo not worth depending on. The
+# script asks `CARGO_CFG_TARGET_OS` instead, which has one meaning.
+[build-dependencies]
+winresource = "0.1"
+
 # Both binaries need the GUI, so both carry `required-features`. Nothing here prints page text
 # to a terminal: untrusted text carrying an escape sequence is an injection surface, so triage
 # is headless `--why` on the application and every string it prints goes through

@@ -19,9 +19,13 @@
 //! only from `gui`, and this module is compiled and tested without it. No request leaves the
 //! machine, nothing is written, and what is read is two public desktop settings.
 //!
-//! There is no `cfg` for the platforms that do not work this way. On macOS and Windows winit
-//! answers first and this is never consulted; if it were, the commands would simply not be
-//! there and it would report knowing nothing, which is the same answer.
+//! Windows and macOS are excluded by [`ASKS_THE_DESKTOP`] rather than left to fail on their
+//! own. winit answers first on both, so nothing here is ever consulted for a palette, and the
+//! commands are not reliably absent either: `gdbus` and `gsettings` ship with the GTK runtimes
+//! and MSYS2 installs that plenty of Windows machines have on PATH. `hww.exe` is a
+//! GUI-subsystem binary and Windows hands a console child of one its own console window, so
+//! asking anyway costs a flash of consoles at startup and one that the `gdbus monitor` behind
+//! [`watch`] would hold open for the rest of the session.
 //!
 //! Only [`watch`] starts any of it. `hww-shot` never calls it, so a screenshot of
 //! `--theme system` stays what it always was rather than following the machine that took it.
@@ -46,6 +50,10 @@ const LIGHT: u8 = 2;
 /// The desktop's preference, as last read. Process-global because that is what it describes:
 /// one desktop, one answer, consulted from wherever a palette is chosen.
 static SCHEME: AtomicU8 = AtomicU8::new(UNKNOWN);
+
+/// Whether this is a desktop winit cannot answer for, which is every one but Windows and
+/// macOS. See the module comment for what asking costs on the two that can answer.
+const ASKS_THE_DESKTOP: bool = !cfg!(any(target_os = "windows", target_os = "macos"));
 
 /// Whether the desktop asks for dark. `None` when nothing has been asked or nothing answered,
 /// which is not "light": the caller decides what to do without an answer.
@@ -101,12 +109,17 @@ fn piped(cmd: &mut Command) -> Option<Watch> {
 /// Read the preference now, then follow it. `wake` is called on every change, after the new
 /// value is stored, so a repaint sees it.
 ///
-/// Returns `None` when the desktop published no preference, or when the change signal could not
-/// be subscribed to. A `None` from the second case still leaves a correct value in [`SCHEME`]:
-/// the theme is right at startup and simply stops tracking, which is the right degradation for
-/// a desktop that answered a question once and cannot be asked again.
+/// Returns `None` on a platform winit answers for, when the desktop published no preference, or
+/// when the change signal could not be subscribed to. A `None` from the last case still leaves a
+/// correct value in [`SCHEME`]: the theme is right at startup and simply stops tracking, which
+/// is the right degradation for a desktop that answered a question once and cannot be asked
+/// again.
 #[must_use = "dropping the watch stops it"]
 pub fn watch(wake: impl Fn() + Send + 'static) -> Option<Watch> {
+    if !ASKS_THE_DESKTOP {
+        return None;
+    }
+
     let now = query()?;
     SCHEME.store(encode(now), Ordering::Relaxed);
 

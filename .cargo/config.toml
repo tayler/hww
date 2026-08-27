@@ -1,0 +1,18 @@
+# The Windows binary links the CRT statically, so hww.exe runs on a clean Windows install with
+# no Visual C++ Redistributable to fetch first. It is the same argument as the Debian package's
+# pinned glibc floor: a reader whose first act is to send somebody to a download page is not a
+# reader that opens.
+#
+# Scoped to the target rather than set in `build.rustflags`, so it never touches a Linux build
+# and applies to a local Windows build exactly as it does in CI. It is not scoped away from
+# build scripts: no cargo invocation here passes `--target`, and without one cargo applies the
+# host triple's flags to build scripts and proc macros too. `build.rs` is a no-op off Windows
+# and links nothing, so a statically linked one costs nothing.
+#
+# What this cannot survive is a `RUSTFLAGS` environment variable. Cargo drops `target.*.rustflags`
+# entirely when that is set, with no warning, and the binary goes back to wanting the
+# redistributable README.md promises nobody needs. `.github/actions/build-windows` refuses to
+# build with `RUSTFLAGS` set for that reason, and greps the result either way. Dropping the flag
+# on purpose means documenting the redistributable in README.md instead.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

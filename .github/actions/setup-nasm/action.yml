@@ -1,0 +1,31 @@
+name: Install NASM
+description: Install the assembler aws-lc-sys needs to build on Windows
+
+# `aws-lc-sys` arrives under rustls, which arrives under reqwest, and it assembles its own
+# x86-64 sources rather than shipping a pure-C fallback for this target. This is not an
+# optimization: with no assembler on PATH the build stops. The crate does vendor prebuilt
+# `.obj` blobs, but `use_prebuilt_nasm()` reaches for them only under the `prebuilt-nasm`
+# feature or `AWS_LC_SYS_PREBUILT_NASM=1`, and `aws-lc-rs` leaves that feature off by default,
+# so without this action the build panics with "NASM command not found". Enabling the feature
+# is the alternative, and it is the wrong one: a README that tells people to run
+# `gh attestation verify` should not hand them a binary whose crypto came in precompiled.
+#
+# Chocolatey is the runner image's own package manager, so this pulls in no third-party action.
+# The version is pinned for the same reason every external action in this workflow is pinned to
+# a SHA: this package assembles the crypto in a binary the release attests to, and taking
+# whatever `choco install` resolves to that day is the one unpinned input in that chain.
+# `choco install` puts nasm.exe somewhere that is not on PATH until the next step, hence the
+# explicit append rather than trusting the installer.
+
+runs:
+  using: composite
+  steps:
+    - name: Install NASM
+      shell: bash
+      run: |
+        choco install nasm --version 2.16.3 --no-progress --yes
+        printf '%s\n' 'C:\Program Files\NASM' >>"$GITHUB_PATH"
+
+    - name: Verify NASM
+      shell: bash
+      run: nasm -v

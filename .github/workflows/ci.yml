@@ -47,9 +47,9 @@ jobs:
   # actually fails for want of it, and say here which one and why: an apt list nobody can
   # justify is how CI accretes.
   #
-  # Linux only for now. Add a compile-only macOS/Windows matrix when either platform gains a
-  # user; until then its cost would guard platforms nobody runs. No test may call
-  # `eframe::run_native`.
+  # Windows is gated in its own job below, because it now has a published binary to guard.
+  # macOS still does not, and until it does a job for it would cost runner time to protect
+  # nobody. No test may call `eframe::run_native`.
   gui:
     name: gui
     runs-on: ubuntu-latest
@@ -71,12 +71,52 @@ jobs:
       - name: Test
         run: cargo test --locked --features gui
 
+  # The other half of the reader's supported surface. Windows earns a blocking job because it
+  # earns a published binary; a platform that ships without a gate is a platform whose breakage
+  # is discovered by whoever downloaded it.
+  #
+  # The default-feature pair is not repeated here. What it guards is compile-time absence of
+  # the image path and the GUI dependency graph, which is a property of the feature and not of
+  # the platform, and the `ci` job already proves it. Windows runners bill at 2x; spending that
+  # to re-prove it would buy nothing.
+  #
+  # NASM is installed because `aws-lc-sys` assembles from source on this target. See the
+  # action's own comment for why the vendored prebuilt objects are not the answer.
+  gui-windows:
+    name: gui (windows)
+    runs-on: windows-latest
+    # Every script in this file is bash, and the composite actions it calls declare bash for the
+    # same reason. Git Bash ships on the runner; leaving the default pwsh in place would mean
+    # two shells with two quoting rules describing one build.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - uses: ./.github/actions/setup-nasm
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked --features gui -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --features gui
+
   # A fixed older userspace sets the binary's glibc floor. This job follows both test jobs and
   # exists only for a push to main, so pull requests prove the source without publishing it.
   package:
     name: Ubuntu package
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [ci, gui]
+    needs: [ci, gui, gui-windows]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -99,17 +139,99 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # The Windows half of the same development artifact. Its own job rather than a matrix leg on
+  # `package`: the two share no step, since one asserts a glibc floor and installs a .deb and
+  # the other asserts a static CRT and runs an .exe.
+  package-windows:
+    name: Windows package
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [ci, gui, gui-windows]
+    runs-on: windows-latest
+    # Every script in this file is bash, and the composite actions it calls declare bash for the
+    # same reason. Git Bash ships on the runner; leaving the default pwsh in place would mean
+    # two shells with two quoting rules describing one build.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - uses: ./.github/actions/build-windows
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hww-windows-amd64
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  # The release's Windows archive, built on a Windows runner and handed to `release` through a
+  # workflow artifact, because one job cannot run on two operating systems and the release has
+  # to be published from one place with one set of checksums.
+  #
+  # This job takes the version straight off the tag without re-deriving it from Cargo.toml.
+  # `release` owns that check and refuses to publish anything if it fails, so the worst a bad
+  # tag costs here is a wasted runner, and `release` asserts the filename it downloaded carries
+  # the version it verified.
+  windows-release-build:
+    name: Windows release build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [ci, gui, gui-windows]
+    runs-on: windows-latest
+    # Every script in this file is bash, and the composite actions it calls declare bash for the
+    # same reason. Git Bash ships on the runner; leaving the default pwsh in place would mean
+    # two shells with two quoting rules describing one build.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+
+      # A workflow expression cannot strip the `v`, and the archive name must not carry one:
+      # `hww-v0.1.0-...zip` reads as a version called `v0.1.0`.
+      - name: Read version from the tag
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: printf 'version=%s\n' "${TAG#v}" >>"$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/build-windows
+        with:
+          version: ${{ steps.version.outputs.version }}
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hww-windows-amd64
+          path: dist/*.zip
+          if-no-files-found: error
+
   # Stable tags build independently from the development artifact. The runner pins the package's
   # glibc floor; the local action fails if GitHub moves it away from Ubuntu 22.04 / glibc 2.35.
   release:
     name: Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [ci, gui]
+    needs: [ci, gui, gui-windows, windows-release-build]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
       id-token: write
       attestations: write
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -150,16 +272,32 @@ jobs:
         with:
           version: ${{ steps.version.outputs.version }}
 
+      # Downloaded with the CLI this job already uses rather than a fourth pinned action. The
+      # artifact was built by `windows-release-build` from the same tag, in the same run.
+      - name: Download the Windows archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --name hww-windows-amd64 --dir dist
+
+      # The Windows job named that file from an unverified tag; this is the first point where
+      # the version in it meets the version this job checked against Cargo.toml.
+      - name: Verify the Windows archive version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: test -f "dist/hww-${VERSION}-x86_64-windows.zip"
+
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum *.deb >SHA256SUMS
+          sha256sum *.deb *.zip >SHA256SUMS
           sha256sum --check SHA256SUMS
 
-      - name: Attest Debian package
+      - name: Attest packages
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/*.deb
+          subject-path: |
+            dist/*.deb
+            dist/*.zip
 
       - name: Publish release
         env:
@@ -167,7 +305,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            dist/*.deb dist/SHA256SUMS \
+            dist/*.deb dist/*.zip dist/SHA256SUMS \
             --draft \
             --generate-notes \
             --title "hww $VERSION" \

@@ -612,10 +612,10 @@ mod tests {
     #[test]
     fn the_timeout_bounds_the_whole_fetch_not_each_hop() {
         use std::io::Write;
-        let budget = Duration::from_millis(900);
+        let budget = Duration::from_millis(1200);
         let port = serve(move |i, s| {
             // Comfortably inside the budget on its own; six of them are not.
-            std::thread::sleep(Duration::from_millis(300));
+            std::thread::sleep(Duration::from_millis(500));
             let _ = s.write_all(
                 format!(
                     "HTTP/1.1 302 Found\r\nLocation: /hop{}\r\nContent-Length: 0\r\n\r\n",
@@ -628,9 +628,12 @@ mod tests {
             timeout: budget,
             ..Limits::HTML
         };
+        // The clock starts once the client exists. Building one loads the platform root
+        // store, tens of milliseconds here and far more on a cold Windows runner, and that
+        // cost was being charged to the redirect chain the assertion is about.
+        let fetcher = Fetcher::new().unwrap();
         let start = Instant::now();
-        let err = Fetcher::new()
-            .unwrap()
+        let err = fetcher
             .get_with(&local(port, "/hop0"), None, &limits)
             .unwrap_err();
         let elapsed = start.elapsed();

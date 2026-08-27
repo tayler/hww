@@ -17,7 +17,7 @@ Use `render::TextOpts` or `reader::opts::ReadOpts`.
 
 ## CI
 
-All five gates in `.github/workflows/ci.yml` must pass:
+All five gates in `.github/workflows/ci.yml` must pass on Linux:
 
     cargo fmt --all -- --check
     cargo clippy --all-targets --locked -- -D warnings
@@ -25,9 +25,16 @@ All five gates in `.github/workflows/ci.yml` must pass:
     cargo clippy --all-targets --locked --features gui -- -D warnings
     cargo test --locked --features gui
 
+The last two run again on Windows in `gui-windows`, which blocks the same merges. The
+default-feature pair is not repeated there: what it guards is a property of the feature, not of
+the platform.
+
 The default job never compiles egui. The second job names `gui` explicitly, never
 `--all-features`. Tests do not call `eframe::run_native`. CI installs no apt packages; native
-libraries are opened at runtime rather than linked at build time.
+libraries are opened at runtime rather than linked at build time. The Windows jobs install NASM
+and only NASM, which is a build-time assembler for `aws-lc-sys`'s vendored C, not a library
+anything links against; the rule about linking is unchanged. Do not add a second package to
+either platform without saying in the workflow which build fails without it.
 
 `Cargo.lock` is committed because this crate ships binaries.
 
@@ -186,8 +193,21 @@ boundaries.
 
 ## Portability and style
 
-Only Linux is verified. Use `Modifiers::COMMAND`, never a literal Ctrl; it maps to Cmd on macOS
-and Ctrl elsewhere. Back/forward support both Alt+arrows and Cmd+brackets.
+Linux and Windows are verified and both ship a binary; macOS is neither. Use
+`Modifiers::COMMAND`, never a literal Ctrl; it maps to Cmd on macOS and Ctrl elsewhere.
+Back/forward support both Alt+arrows and Cmd+brackets.
+
+Every distribution stages its license texts through `hww_install_licenses` in
+`packaging/licenses.sh`; no packaging script names a license file itself. The binary embeds
+every face in `fonts/` with `include_bytes!`, so the OFL and Bitstream Vera texts have to travel
+with it, and `hww_check_font_licenses` fails the build when a face has no covering
+`fonts/LICENSE-*.txt` or a license text covers no face. A new packaging format sources that file.
+
+`src/bin/hww.rs` is a GUI-subsystem executable on Windows, so nothing it prints reaches a
+console there. No diagnostic may exist only as something that binary writes to stdout, and no
+test may assert on its output. `.cargo/config.toml` owns the `+crt-static` flag that keeps
+`hww.exe` free of a Visual C++ Redistributable; `build.rs` exists only to attach the icon
+resource and must stay a no-op off Windows.
 
 Rust edition 2024 and let-chains are in use. Extend module `//!` comments when rationale changes
 instead of adding it here. Clippy runs with `-D warnings`; land code clean.
