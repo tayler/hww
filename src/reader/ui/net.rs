@@ -407,6 +407,17 @@ impl Net {
         req
     }
 
+    /// Publish a navigation id the reader already holds, without minting one.
+    ///
+    /// For `ReaderApp::keep_shown`, where the navigation in flight is abandoned in favour of
+    /// the page still in the column. That page's automatic images are queued against *its* id,
+    /// so a fresh one here would have the pool discard every one of them for a page nobody
+    /// left. Its manual requests are fetched whatever the current page is, but their replies
+    /// are matched against the same id at the other end; see `Ready::req`.
+    pub fn resume_page(&self, req: ReqId) {
+        self.page.store(req.raw(), Ordering::Relaxed);
+    }
+
     pub fn submit(&self, job: Job) {
         // A closed channel means every worker died. The *receiver* lives in the pool, not
         // here, so holding the sender does not keep it open. `spawn_worker` refills the pool

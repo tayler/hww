@@ -37,6 +37,10 @@ pub mod menu;
 pub mod notice;
 pub mod opts;
 pub mod outline;
+/// Which pages Back and Forward can open without asking the site again. No egui types, so the
+/// fast CI job tests it, which is the point: the mistakes are eviction arithmetic and none of
+/// them show in a screenshot.
+pub mod pagecache;
 /// How a page arrived, as labelled rows for the page-info panel. No egui types, so the fast
 /// CI job tests it. `notice`'s quiet half: what does not rise to interrupting the column.
 pub mod pageinfo;

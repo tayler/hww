@@ -43,7 +43,7 @@ use image::codecs::png::PngEncoder;
 use image::{ImageEncoder, RgbaImage};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufWriter, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -184,6 +184,35 @@ fn article_linking(href: &str) -> String {
         1,
     )
 }
+
+/// The two documents the page-cache scene navigates between, served by `serve` at `/one` and
+/// `/two`. Both carry a link to the other, so the scene can be a real Follow rather than a
+/// second typed URL, and both clear `ir::THIN_TEXT` so no extraction bar joins the picture.
+const KEPT_ONE: &str = r#"
+<html lang="en"><head><title>The page you came back to</title></head><body>
+<article>
+<h1>The page you came back to</h1>
+<p>Back and forward re-open the document the reader still has, so returning to this page costs
+no request at all. The page-info panel says so in as many words, because every other row in it
+describes a fetch and this visit did not make one.</p>
+<p>What is not kept is the pictures. Their textures and the tally of hosts they were fetched
+from both belong to the page as it was read, and a Back that quietly re-contacted every one of
+them would be the opposite of what the image policy promises.</p>
+<p><a href="/two">Onwards to the second page</a></p>
+</article></body></html>
+"#;
+
+const KEPT_TWO: &str = r#"
+<html lang="en"><head><title>The page you went to</title></head><body>
+<article>
+<h1>The page you went to</h1>
+<p>Following this link pushed an entry onto the stack and left the page before it in memory,
+filed under the entry it belongs to. Pressing Back now moves the cursor and finds it there
+instead of asking the site a second time.</p>
+<p>The document that comes back opens where it was left, which it did before this cache existed
+too: the offset is remembered by the history entry and not by the page.</p>
+</article></body></html>
+"#;
 
 const ARTICLE: &str = r#"
 <html lang="en"><head><title>Reading without the rest of it</title>
@@ -632,6 +661,37 @@ fn catalog(port: u16) -> Vec<Scene> {
                 // same machines this does. Worth revisiting with a pointer-click step, which
                 // would be a better way to drive both scenes.
                 vec![page(ARTICLE_URL, ARTICLE), Step::Nav(stall)],
+            )
+        },
+        // Two real navigations, not injected pages: `present` resets the history to a single
+        // entry, so the only way to photograph a page that came back from memory is to go
+        // somewhere and press Back. `Command::Back` rather than a key, for the reason
+        // `Step::Run` exists.
+        //
+        // Volatile, and not for the usual reason. Nothing in this picture counts seconds —
+        // `pageinfo::ago` floors at a minute precisely so it could be compared — but the
+        // fixture server binds an ephemeral port, and the panel's Address row prints the whole
+        // URL, so the hash moves on every run. What the scene is worth is the path: `Back`
+        // through `run_command` into `restore` and out at a drawn page, which no unit test
+        // reaches. The row's group, its position ahead of every Response row, its wording and
+        // its ages are all asserted in `reader::pageinfo`, where `cargo test` can read them.
+        Scene {
+            settle_ms: 400,
+            volatile: true,
+            ..scene(
+                "pageinfo-restored",
+                "page info on a page put back from memory rather than fetched again",
+                vec![
+                    Step::Nav(format!("http://127.0.0.1:{port}/one")),
+                    Step::Wait(30),
+                    // Absolute: `session::classify_link` parses the href, and the reader
+                    // only ever sees absolutised ones because `html::extract` joins them.
+                    Step::Follow(format!("http://127.0.0.1:{port}/two")),
+                    Step::Wait(30),
+                    Step::Run(Command::Back),
+                    Step::Wait(4),
+                    Step::Run(Command::TogglePageInfo),
+                ],
             )
         },
         Scene {
@@ -1133,8 +1193,9 @@ fn sketch(img: &RgbaImage) -> String {
 
 /// A loopback server for the scenes that are genuinely about the network.
 ///
-/// It exists so `images-loaded` and `loading` are real: a real request, a real decode, a real
-/// hang. Bound to 127.0.0.1 on a port the OS picks, serving four paths and nothing else.
+/// It exists so `images-loaded`, `loading` and `pageinfo-restored` are real: a real request, a
+/// real decode, a real hang, a real Back. Bound to 127.0.0.1 on a port the OS picks, serving the
+/// paths matched below and nothing else.
 fn serve() -> std::io::Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
@@ -1149,14 +1210,15 @@ fn serve() -> std::io::Result<u16> {
                 let req = String::from_utf8_lossy(&buf[..n]);
                 let path = req.split_whitespace().nth(1).unwrap_or("/").to_owned();
                 let _ = match path.as_str() {
-                    "/photo.png" => {
-                        let head = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            photo.len()
-                        );
-                        stream
-                            .write_all(head.as_bytes())
-                            .and_then(|()| stream.write_all(&photo))
+                    "/photo.png" => ok(&mut stream, "image/png", &photo),
+                    // Two ordinary documents, for the one scene that needs two *real*
+                    // navigations rather than injected pages: `present` resets the history to a
+                    // single entry, so a page cache can only be photographed by actually going
+                    // somewhere and coming back. They answer 200 with prose over the extraction
+                    // floor, or the thin-page and status bars would join the picture.
+                    "/one" | "/two" => {
+                        let body = if path == "/one" { KEPT_ONE } else { KEPT_TWO };
+                        ok(&mut stream, "text/html; charset=utf-8", body.as_bytes())
                     }
                     // The stall is the point: a document fetch that never answers is what the
                     // Loading state, and eventually LikelyBlocked, are made of.
@@ -1172,6 +1234,17 @@ fn serve() -> std::io::Result<u16> {
         }
     });
     Ok(port)
+}
+
+/// One 200 with a body, so no fixture path hand-rolls a response head of its own.
+fn ok(stream: &mut TcpStream, content_type: &str, body: &[u8]) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|()| stream.write_all(body))
 }
 
 fn gradient_png() -> Vec<u8> {

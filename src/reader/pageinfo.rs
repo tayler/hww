@@ -21,6 +21,7 @@
 
 use crate::fetch::Truncation;
 use crate::session::Provenance;
+use std::time::Duration;
 use url::Url;
 
 /// One labelled fact about the page.
@@ -96,11 +97,26 @@ pub struct Counts {
     pub referer_requests: usize,
 }
 
+/// How the page in the column got there.
+///
+/// Every other row in this module describes a request, and one of these two answers did not
+/// make one. Named rather than a bare `bool` or `Option<Duration>` so the call site reads as a
+/// statement about the page rather than as a flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    Fetched,
+    /// Back or forward re-opened a document the reader still had. `age` is how long ago the
+    /// fetch the rest of these rows describe actually happened.
+    FromMemory {
+        age: Duration,
+    },
+}
+
 /// Everything worth saying about how this page arrived, in reading order.
 ///
 /// `rtl` is the document's, not the provenance's: epaint has no bidi, so a Hebrew or Arabic
 /// page is a fact about what was extracted, and it has to survive the caution being closed.
-pub fn rows(prov: &Provenance, counts: &Counts, rtl: bool) -> Vec<Row> {
+pub fn rows(prov: &Provenance, counts: &Counts, rtl: bool, arrival: Arrival) -> Vec<Row> {
     use Group::*;
     let mut out = vec![Row::new(Address, "Address", prov.final_url.as_str())];
 
@@ -108,6 +124,28 @@ pub fn rows(prov: &Provenance, counts: &Counts, rtl: bool) -> Vec<Row> {
     // this row would just repeat the one above it.
     if prov.requested != prov.final_url {
         out.push(Row::new(Address, "Requested", prov.requested.as_str()));
+    }
+    // The first Route row, and ahead of every Response row, which is the whole disclosure
+    // argument: Route answers how the request got here, and this is the row that corrects it.
+    // A reader who is about to read `Downloaded 82 kB` has to have been told first that those
+    // bytes did not move for this visit.
+    //
+    // "the document", precisely: `ensure_favicon` does re-request the site icon on a restored
+    // page, because `clear_page` dropped it. "Nothing was requested" would be a lie of exactly
+    // the kind this panel exists not to tell.
+    if let Arrival::FromMemory { age } = arrival {
+        out.push(
+            Row::new(
+                Route,
+                "Restored",
+                format!("from memory, fetched {}", ago(age)),
+            )
+            .with_note(
+                "Back and forward re-open the document hww still had, so it was not requested \
+                 again and every row below describes that original fetch. Pictures are not kept \
+                 and are offered again, as on any page.",
+            ),
+        );
     }
     if let Some(to) = &prov.rewritten_to {
         let host = to.host_str().unwrap_or(to.as_str());
@@ -233,6 +271,24 @@ fn truncation_value(t: Truncation) -> Option<String> {
     })
 }
 
+/// How long ago, at the resolution a sentence deserves.
+///
+/// Floored at a minute rather than counting seconds, for two reasons. The common case is
+/// twenty seconds — follow a link, come back — and "fetched 23 seconds ago" invites the reader
+/// to care about a number that means nothing. And a row whose text changes every second is a
+/// row `hww-shot` cannot baseline, so the scene that photographs it would have to be `volatile`
+/// and would then never be compared again.
+fn ago(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        "less than a minute ago".to_owned()
+    } else if secs < 3600 {
+        format!("{} ago", plural((secs / 60) as usize, "minute"))
+    } else {
+        format!("{} ago", plural((secs / 3600) as usize, "hour"))
+    }
+}
+
 /// `1 hop` / `2 hops`, so no row reads `1 hop(s)`.
 ///
 /// The parenthesised plural is what fits when a string is fighting for space on a status
@@ -289,7 +345,7 @@ mod tests {
     /// The rows a page always has, so the panel is never empty on a page that loaded.
     #[test]
     fn a_clean_page_still_reports_how_it_arrived() {
-        let rows = rows(&prov(), &Counts::default(), false);
+        let rows = rows(&prov(), &Counts::default(), false, Arrival::Fetched);
         for label in [
             "Address",
             "Server answered",
@@ -318,11 +374,17 @@ mod tests {
     /// request did not end where it started.
     #[test]
     fn requested_appears_only_when_it_differs_from_the_address() {
-        assert!(find(&rows(&prov(), &Counts::default(), false), "Requested").is_none());
+        assert!(
+            find(
+                &rows(&prov(), &Counts::default(), false, Arrival::Fetched),
+                "Requested"
+            )
+            .is_none()
+        );
 
         let mut p = prov();
         p.final_url = Url::parse("https://example.com/b").unwrap();
-        let rows = rows(&p, &Counts::default(), false);
+        let rows = rows(&p, &Counts::default(), false, Arrival::Fetched);
         assert_eq!(
             find(&rows, "Requested").unwrap().value,
             "https://example.com/a"
@@ -339,7 +401,7 @@ mod tests {
             cookie_attempts: 0,
             referer_requests: 2,
         };
-        let rows = rows(&prov(), &counts, false);
+        let rows = rows(&prov(), &counts, false, Arrival::Fetched);
         let images = find(&rows, "Images loaded").unwrap();
         assert_eq!(images.value, "3, from 2 hosts");
         assert!(images.note.as_ref().unwrap().contains("cdn.example.net"));
@@ -365,14 +427,23 @@ mod tests {
             ..Counts::default()
         };
         assert_eq!(
-            find(&rows(&p, &counts, false), "Cookies discarded")
-                .unwrap()
-                .value,
+            find(
+                &rows(&p, &counts, false, Arrival::Fetched),
+                "Cookies discarded"
+            )
+            .unwrap()
+            .value,
             "5"
         );
 
         p.cookie_attempts = 0;
-        assert!(find(&rows(&p, &Counts::default(), false), "Cookies discarded").is_none());
+        assert!(
+            find(
+                &rows(&p, &Counts::default(), false, Arrival::Fetched),
+                "Cookies discarded"
+            )
+            .is_none()
+        );
     }
 
     /// Every way a body can arrive short gets a value, and a whole one gets no row.
@@ -387,7 +458,7 @@ mod tests {
         ] {
             let mut p = prov();
             p.truncation = t;
-            let rows = rows(&p, &Counts::default(), false);
+            let rows = rows(&p, &Counts::default(), false, Arrival::Fetched);
             assert!(find(&rows, "Transfer").is_some(), "{t:?} produced no row");
         }
     }
@@ -407,7 +478,7 @@ mod tests {
             cookie_attempts: 1,
             referer_requests: 1,
         };
-        for row in rows(&p, &counts, false) {
+        for row in rows(&p, &counts, false, memory()) {
             assert!(!row.value.contains('→'), "arrow in {:?}", row.value);
             assert!(!row.label.contains('→'));
             if let Some(n) = &row.note {
@@ -432,22 +503,25 @@ mod tests {
             cookie_attempts: 0,
             referer_requests: 1,
         };
-        let rows = rows(&p, &counts, false);
         let order = [
             Group::Address,
             Group::Route,
             Group::Response,
             Group::ThirdParties,
         ];
-        let mut last = 0usize;
-        for r in &rows {
-            let at = order.iter().position(|g| *g == r.group).unwrap();
-            assert!(at >= last, "{} is out of group order", r.label);
-            last = at;
-        }
-        for g in order {
-            assert!(rows.iter().any(|r| r.group == g), "{g:?} is empty here");
-            assert!(!g.title().is_empty());
+        // Both arrivals: the restored row is emitted mid-Route and must not break the run.
+        for arrival in [Arrival::Fetched, memory()] {
+            let rows = rows(&p, &counts, false, arrival);
+            let mut last = 0usize;
+            for r in &rows {
+                let at = order.iter().position(|g| *g == r.group).unwrap();
+                assert!(at >= last, "{} is out of group order", r.label);
+                last = at;
+            }
+            for g in order {
+                assert!(rows.iter().any(|r| r.group == g), "{g:?} is empty here");
+                assert!(!g.title().is_empty());
+            }
         }
     }
 
@@ -456,6 +530,67 @@ mod tests {
         assert_eq!(plural(1, "hop"), "1 hop");
         assert_eq!(plural(2, "hop"), "2 hops");
         assert_eq!(plural(0, "hop"), "0 hops");
+    }
+
+    // ------------------------------------------------- a page that was not fetched again
+
+    fn memory() -> Arrival {
+        Arrival::FromMemory {
+            age: Duration::from_secs(240),
+        }
+    }
+
+    /// The disclosure argument in one assertion. The panel draws rows in the order this
+    /// function emits them, so a "Restored" row after `Downloaded` would let the reader take
+    /// eleven rows of fetch accounting at face value before being told no fetch happened.
+    #[test]
+    fn a_restored_page_says_so_before_it_reports_the_fetch() {
+        let rows = rows(&prov(), &Counts::default(), false, memory());
+        let at = rows
+            .iter()
+            .position(|r| r.label == "Restored")
+            .expect("a restored page has the row");
+        assert_eq!(rows[at].group, Group::Route);
+        assert!(rows[at].value.contains("from memory"));
+        let first_response = rows
+            .iter()
+            .position(|r| r.group == Group::Response)
+            .expect("every page reports a response");
+        assert!(at < first_response, "the qualifier comes after the numbers");
+    }
+
+    /// The note must not claim more than it can. `ensure_favicon` re-requests the site icon on
+    /// a restored page, so "nothing was requested" would be false.
+    #[test]
+    fn the_restored_note_is_about_the_document_and_not_the_page() {
+        let rows = rows(&prov(), &Counts::default(), false, memory());
+        let note = find(&rows, "Restored")
+            .and_then(|r| r.note.as_deref())
+            .expect("the row carries a note");
+        assert!(note.contains("document"));
+        assert!(!note.to_lowercase().contains("nothing was requested"));
+    }
+
+    #[test]
+    fn a_fetched_page_has_no_restored_row() {
+        let rows = rows(&prov(), &Counts::default(), false, Arrival::Fetched);
+        assert!(find(&rows, "Restored").is_none());
+    }
+
+    /// Floored at a minute, which is what lets a scene photograph this row and be compared.
+    #[test]
+    fn the_age_of_a_restored_page_reads_as_a_sentence() {
+        for (secs, want) in [
+            (0, "less than a minute ago"),
+            (59, "less than a minute ago"),
+            (60, "1 minute ago"),
+            (120, "2 minutes ago"),
+            (3599, "59 minutes ago"),
+            (3600, "1 hour ago"),
+            (7200, "2 hours ago"),
+        ] {
+            assert_eq!(ago(Duration::from_secs(secs)), want, "at {secs}s");
+        }
     }
 
     #[test]
@@ -496,7 +631,7 @@ mod tests {
                 },
             ],
         });
-        let rows = rows(&p, &Counts::default(), false);
+        let rows = rows(&p, &Counts::default(), false, Arrival::Fetched);
         let row = find(&rows, "Site profile").expect("a row");
         assert_eq!(
             row.value,
@@ -515,7 +650,7 @@ mod tests {
     fn a_thin_page_notes_the_extraction_floor_on_article_text() {
         let mut p = prov();
         p.chars = crate::ir::THIN_TEXT - 1;
-        let rows_thin = rows(&p, &Counts::default(), false);
+        let rows_thin = rows(&p, &Counts::default(), false, Arrival::Fetched);
         let thin = find(&rows_thin, "Article text").unwrap();
         assert!(
             thin.note
@@ -525,18 +660,27 @@ mod tests {
         );
         p.chars = crate::ir::THIN_TEXT;
         assert!(
-            find(&rows(&p, &Counts::default(), false), "Article text")
-                .unwrap()
-                .note
-                .is_none()
+            find(
+                &rows(&p, &Counts::default(), false, Arrival::Fetched),
+                "Article text"
+            )
+            .unwrap()
+            .note
+            .is_none()
         );
     }
 
     /// The RTL caution's quiet half: a row, so dismissing the bar is not how the fact dies.
     #[test]
     fn an_rtl_page_reports_its_layout() {
-        assert!(find(&rows(&prov(), &Counts::default(), false), "Layout").is_none());
-        let rows_rtl = rows(&prov(), &Counts::default(), true);
+        assert!(
+            find(
+                &rows(&prov(), &Counts::default(), false, Arrival::Fetched),
+                "Layout"
+            )
+            .is_none()
+        );
+        let rows_rtl = rows(&prov(), &Counts::default(), true, Arrival::Fetched);
         let row = find(&rows_rtl, "Layout").expect("a row");
         assert_eq!(row.value, "right-to-left");
         assert!(row.note.as_deref().is_some_and(|n| n.contains("bidi")));
