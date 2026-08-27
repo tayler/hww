@@ -409,13 +409,22 @@ pub const HELP: &[(&str, &str)] = &[
     ("? / Esc / q", "this help · dismiss chrome · quit"),
 ];
 
-/// What `Help` ▸ `About hww` says. One sentence about what this is, and the two facts that are
-/// the whole point of it, which are absences and are therefore invisible from the inside.
+/// What `Help` ▸ `About hww` says. One sentence about what this is, the two facts that are the
+/// whole point of it, which are absences and are therefore invisible from the inside, and where
+/// the source is.
+///
+/// That last line carries its weight. Someone holding only the `.deb` or the `.zip` has a binary
+/// and a license text beside it and nothing saying what it was built from, and the AGPL is a
+/// license whose whole mechanism is that the source stays reachable. A reader that opens no
+/// connection it was not asked for cannot answer that by fetching anything, so the address is a
+/// literal here, tested for glyph coverage with every other string on this screen.
 pub const ABOUT: &[&str] = &[
     "hww is a reading client for the non-app web.",
     "It runs no JavaScript, applies no CSS from the page, and stores no cookies: the capability \
      is absent from the build rather than switched off.",
     "It makes no request you did not ask for, except the small site icon beside a page title.",
+    "Free software under the GNU Affero General Public License, version 3 or later. The source \
+     is at https://github.com/tayler/hww.",
 ];
 
 #[cfg(test)]

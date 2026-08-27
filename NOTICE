@@ -1,0 +1,34 @@
+hww — a reading client for the non-app web
+https://github.com/tayler/hww
+
+Copyright (C) 2026
+
+This program is free software: you can redistribute it and/or modify it under the terms
+of the GNU Affero General Public License as published by the Free Software Foundation,
+either version 3 of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU Affero General Public License for more details. The full text is in the
+LICENSE file beside this one, and at <https://www.gnu.org/licenses/>.
+
+
+ADDITIONAL TERMS UNDER SECTION 7
+
+  Name and logo, under sections 7(d) and 7(e).
+
+  This license grants rights in the code and none in the name "hww" or in the project
+  logo. Referring to the project needs no permission: call a fork "a fork of hww", say
+  that a program reads hww's settings file, name it in a comparison, write about it.
+  What needs permission is using the name or the logo as the identity of something
+  distributed — a modified build published as "hww", a package or executable named for
+  it, or any presentation implying that this project produced or endorsed the result.
+  Fork under the license and give the fork its own name.
+
+
+EMBEDDED FONTS
+
+  The binary compiles every face in fonts/ into itself, so a copy of hww is also a copy
+  of those faces. Atkinson Hyperlegible Next, IBM Plex, and Noto are under the SIL Open
+  Font License; DejaVu Serif is under the Bitstream Vera license. Their texts travel in
+  the fonts/ directory beside this file.

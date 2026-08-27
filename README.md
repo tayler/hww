@@ -367,10 +367,10 @@ floor, and the Windows archive on a Windows runner. Both are installed or run wh
 built. One `SHA256SUMS` covers the pair, one attestation names both, and the release publishes
 them together, so a tag that fails on either platform publishes nothing.
 
-Every distribution carries the same license texts, staged by `packaging/licenses.sh`, which
-both build scripts source: the crate's `LICENSE-MIT` and `LICENSE-APACHE` where the reader lands,
-and the font licenses under `fonts/` beside them. The binary embeds every face in `fonts/`, so a
-package without them redistributes those fonts without their terms. A new packaging format calls
+Every distribution carries the same license texts, staged by `packaging/licenses.sh`, which both
+build scripts source: the crate's `LICENSE` and `NOTICE` where the reader lands, and the font
+licenses under `fonts/` beside them. The binary embeds every face in `fonts/`, so a package
+without them redistributes those fonts without their terms. A new packaging format calls
 `hww_install_licenses` instead of listing files, and a face added without its license text fails
 the build.
 
@@ -381,18 +381,31 @@ tilde is a dpkg ordering rule and means nothing to a ZIP.
 
 ## License
 
-Licensed under either of
+Licensed under the GNU Affero General Public License, version 3 or later
+([LICENSE](LICENSE) or <https://www.gnu.org/licenses/agpl-3.0.html>).
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+Section 13 does not arise for a desktop client, which serves nobody over a network; it is here
+for the shape this code would take if it ever did. The extraction pipeline is the part of hww
+worth lifting, and a hosted version of it is the one derivative that plain GPL would let stay
+closed.
 
-at your option.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in this crate by you, as defined in the Apache-2.0 license, shall be dual licensed
-as above, without any additional terms or conditions.
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
+in this crate by you shall be licensed as above, without any additional terms or conditions.
 
 The embedded faces keep their own terms: Atkinson Hyperlegible Next, IBM Plex, and Noto under
 the SIL Open Font License, DejaVu Serif under the Bitstream Vera license. The texts are in
 `fonts/` and ship in every package.
+
+### Name and logo
+
+The license grants rights in the code and none in the name `hww` or the logo under
+`assets/logo/`. Sections 7(d) and 7(e) of the AGPL provide for a notice of this kind, so this is
+an additional term under the license rather than a request standing beside it. It is stated in
+[NOTICE](NOTICE), which ships in every package: a term that reached only this file would reach
+nobody holding the `.deb` or the `.zip`, who are the people it is addressed to.
+
+Referring to the project needs no permission: call a fork "a fork of hww", say that a program
+reads hww's settings file, name it in a comparison, write about it. What needs permission is
+using the name or the logo as the identity of something distributed — a modified build published
+as `hww`, a package or executable named for it, or any presentation implying that this project
+produced or endorsed the result. Fork under the license and give the fork its own name.

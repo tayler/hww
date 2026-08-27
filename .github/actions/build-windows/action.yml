@@ -97,10 +97,15 @@ runs:
         fi
         zip=${zips[0]}
         7z l "$zip"
-        names=$(7z l -ba "$zip")
-        for entry in hww.exe LICENSE-MIT LICENSE-APACHE; do
-          printf '%s\n' "$names" | grep -qF "\\$entry"
-        done
+        # `tr -d` because 7z.exe writes CRLF: every check below would otherwise have to
+        # tolerate a trailing carriage return, and the anchored one could not.
+        names=$(7z l -ba "$zip" | tr -d '\r')
+        printf '%s\n' "$names" | grep -qF '\hww.exe'
+        # Anchored where the pair of names was not: the font texts are LICENSE-*.txt under
+        # fonts\, so an unanchored \LICENSE is satisfied by one of those and would pass an
+        # archive carrying no crate license at all.
+        printf '%s\n' "$names" | grep -qE '\\LICENSE$'
+        printf '%s\n' "$names" | grep -qF '\NOTICE'
         # The archive carries the licenses of the faces the binary embeds, asked against the
         # repository glob so a face added with its license text is checked without editing this.
         for license in fonts/LICENSE-*.txt; do
