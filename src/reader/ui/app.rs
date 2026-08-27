@@ -2048,7 +2048,7 @@ impl ReaderApp {
                             self.history.can_go_back(),
                             egui::Button::new("←").frame(false),
                         )
-                        .on_hover_text("Back (Alt+Left)")
+                        .on_hover_text(menu::TIP_BACK)
                         .clicked()
                     {
                         action = Some(StripAction::Back);
@@ -2058,7 +2058,7 @@ impl ReaderApp {
                             self.history.can_go_forward(),
                             egui::Button::new("→").frame(false),
                         )
-                        .on_hover_text("Forward (Alt+Right)")
+                        .on_hover_text(menu::TIP_FORWARD)
                         .clicked()
                     {
                         action = Some(StripAction::Forward);
@@ -2069,7 +2069,7 @@ impl ReaderApp {
                     let shown = self.status_url();
                     if ui
                         .add(egui::Button::new(RichText::new(shown).color(pal.fg)).frame(false))
-                        .on_hover_text("Click to edit (Ctrl+L)")
+                        .on_hover_text(menu::TIP_URL_BAR)
                         .clicked()
                     {
                         action = Some(StripAction::OpenUrlBar);

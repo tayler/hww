@@ -33,5 +33,12 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # number in three places: here, `LSMinimumSystemVersion` in `packaging/build-dmg.sh`, and the
 # `minos` the build action asserts against the linked binary. If `wgpu`, `objc2`, or
 # `aws-lc-sys` ever refuse to build against it, raise all three rather than dropping the pin.
+#
+# `force = true` because without it cargo defers to a value already in the environment, and this
+# is a floor rather than a default. CI would still catch a raised floor — the build action reads
+# `minos` off the linked binary — but `packaging/build-dmg.sh` would not, and a local image built
+# under a shell that exports this variable (conda, a Homebrew profile, another project's direnv)
+# would claim `LSMinimumSystemVersion 11.0` over a binary linked higher. That is the crash on a
+# missing symbol the plist key exists to turn into a sentence.
 [env]
-MACOSX_DEPLOYMENT_TARGET = "11.0"
+MACOSX_DEPLOYMENT_TARGET = { value = "11.0", force = true }

@@ -118,9 +118,15 @@ triage.
 ## Installing on macOS
 
 Stable Apple Silicon builds are published on the same
-[Releases page](https://github.com/tayler/hww/releases). They are `aarch64` only: an Intel Mac
-is not covered, and `cargo install --locked --features gui` is the route there. macOS 11 Big Sur
-or later is required, which the disk image itself enforces.
+[Releases page](https://github.com/tayler/hww/releases). They are `aarch64` only. An Intel Mac
+is not covered by a published binary and builds from source instead, which needs the Xcode
+Command Line Tools and a stable Rust toolchain:
+
+```
+cargo install --git https://github.com/tayler/hww --locked --features gui
+```
+
+macOS 11 Big Sur or later is required, which the disk image itself enforces.
 
 Download `hww-<version>-aarch64-macos.dmg` and `SHA256SUMS`, then check the image against the
 published hash before opening it. macOS ships `shasum` rather than `sha256sum`, so compare the

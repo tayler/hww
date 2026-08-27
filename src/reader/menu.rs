@@ -74,6 +74,13 @@ mod keyspec {
     pub const HELP_ZOOM: &str = "Ctrl++ / Ctrl+- / Ctrl+0";
     pub const HELP_FOOTNOTE: &str = "Zoom is egui's: Ctrl +/-/0, Ctrl+wheel, pinch.";
 
+    /// The status strip's three tooltips. They name a key inside a sentence rather than as a
+    /// spec, so they cannot be composed from the consts above, and they are wording the reader
+    /// sees, so they are here rather than as literals under `ui/`.
+    pub const TIP_BACK: &str = "Back (Alt+Left)";
+    pub const TIP_FORWARD: &str = "Forward (Alt+Right)";
+    pub const TIP_URL_BAR: &str = "Click to edit (Ctrl+L)";
+
     /// The settings panel's own spelling of the zoom keys, which is a row of three rather than
     /// a spec the keycap splitter reads.
     pub const ZOOM_SETTING: &str = "Ctrl+ + - 0";
@@ -93,6 +100,13 @@ mod keyspec {
     pub const HELP_FIND: &str = "/ or Cmd+F · Enter / Shift+Enter";
     pub const HELP_ZOOM: &str = "Cmd++ / Cmd+- / Cmd+0";
     pub const HELP_FOOTNOTE: &str = "Zoom is egui's: Cmd +/-/0, Cmd+wheel, pinch.";
+
+    /// The status strip's three tooltips. They name a key inside a sentence rather than as a
+    /// spec, so they cannot be composed from the consts above, and they are wording the reader
+    /// sees, so they are here rather than as literals under `ui/`.
+    pub const TIP_BACK: &str = "Back (Cmd+[)";
+    pub const TIP_FORWARD: &str = "Forward (Cmd+])";
+    pub const TIP_URL_BAR: &str = "Click to edit (Cmd+L)";
 
     /// The settings panel's own spelling of the zoom keys, which is a row of three rather than
     /// a spec the keycap splitter reads.
