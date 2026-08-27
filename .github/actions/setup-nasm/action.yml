@@ -1,0 +1,26 @@
+name: Install NASM
+description: Install the assembler aws-lc-sys needs to build on Windows
+
+# `aws-lc-sys` arrives under rustls, which arrives under reqwest, and it assembles its own
+# x86-64 sources rather than shipping a pure-C fallback for this target. Without an assembler
+# on PATH it reaches instead for the prebuilt `.obj` blobs vendored inside the crate — objects
+# nobody in this build chain compiled. A README that tells people to run `gh attestation
+# verify` should not hand them a binary whose crypto came in precompiled, so the assembler is
+# installed and the assembly is built from source.
+#
+# Chocolatey is the runner image's own package manager, so this pulls in no third-party action.
+# `choco install` puts nasm.exe somewhere that is not on PATH until the next step, hence the
+# explicit append rather than trusting the installer.
+
+runs:
+  using: composite
+  steps:
+    - name: Install NASM
+      shell: bash
+      run: |
+        choco install nasm --no-progress --yes
+        printf '%s\n' 'C:\Program Files\NASM' >>"$GITHUB_PATH"
+
+    - name: Verify NASM
+      shell: bash
+      run: nasm -v

@@ -49,3 +49,19 @@ runs:
         grep -Fx 'Icon=hww' /usr/share/applications/hww.desktop
         grep -Fx 'StartupWMClass=hww' /usr/share/applications/hww.desktop
         test -f /usr/share/icons/hicolor/256x256/apps/hww.png
+
+    # The binary embeds every face in fonts/, so the installed package has to carry their
+    # licenses. Asked against the repository glob rather than a list written here: a face added
+    # with its license text is checked from then on with no edit to this file.
+    - name: Verify installed licenses
+      shell: bash
+      run: |
+        test -f /usr/share/doc/hww/LICENSE-MIT
+        test -f /usr/share/doc/hww/LICENSE-APACHE
+        for license in fonts/LICENSE-*.txt; do
+          installed=/usr/share/doc/hww/fonts/$(basename "$license")
+          if ! cmp -s "$license" "$installed"; then
+            printf '%s is missing from the installed package or differs\n' "$installed" >&2
+            exit 1
+          fi
+        done

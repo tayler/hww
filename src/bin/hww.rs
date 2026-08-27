@@ -2,6 +2,19 @@
 //!
 //! The binary requires the `gui` feature; keeping that feature off by default leaves the core
 //! library, tests, and local tools free of the image subresource path and GUI dependency graph.
+//!
+//! On Windows this is a GUI-subsystem executable, which is the only way to open a reader from
+//! Explorer or the taskbar without a console window opening behind it. The cost is that the
+//! process is given no console to write to, so on Windows every line below that prints —
+//! `--why`, `--show-rewrites`, `--show-profiles`, `--show-engines`, and the argument errors
+//! that exit 2 — goes nowhere, and only the exit code survives. Triage is a Linux build or
+//! `cargo run`, and no diagnostic may exist only as something this binary prints. `hww-shot`
+//! is deliberately left a console binary; it reports for a living.
+//!
+//! The attribute is ignored on every other target, so it needs no `cfg`. It also cannot reach
+//! a test harness: there are no tests in this file, and cargo pipes a test binary's handles
+//! regardless of subsystem.
+#![windows_subsystem = "windows"]
 
 use hww::reader::{settings, ui};
 

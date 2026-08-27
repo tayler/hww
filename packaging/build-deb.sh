@@ -12,25 +12,14 @@ if [[ ! -x "$binary" ]]; then
     exit 1
 fi
 
-cargo_version=$(
-    awk -F ' *= *' '
-        /^\[package\]$/ { package = 1; next }
-        /^\[/ { package = 0 }
-        package && /^version *=/ {
-            gsub(/"/, "", $2)
-            print $2
-            exit
-        }
-    ' Cargo.toml
-)
-if [[ -z "$cargo_version" ]]; then
-    printf 'could not read the package version from Cargo.toml\n' >&2
-    exit 1
-fi
+# shellcheck source=packaging/version.sh
+source packaging/version.sh
+# shellcheck source=packaging/licenses.sh
+source packaging/licenses.sh
 
-revision=${GITHUB_RUN_NUMBER:-$(git rev-list --count HEAD)}
-sha=${GITHUB_SHA:-$(git rev-parse HEAD)}
-short_sha=${sha:0:7}
+# `~` sorts below everything in a Debian version, so a development package built after 0.1.0
+# was tagged still upgrades cleanly to 0.1.0 itself. That ordering is dpkg's alone, which is
+# why it is spelled here and not in version.sh.
 version=${HWW_DEB_VERSION:-"${cargo_version}~git${revision}.${short_sha}"}
 architecture=$(dpkg --print-architecture)
 
@@ -45,8 +34,7 @@ for size in 16 32 48 64 128 256 512; do
         "assets/logo/hww-${size}.png" \
         "$stage/usr/share/icons/hicolor/${size}x${size}/apps/hww.png"
 done
-install -Dm644 LICENSE-MIT "$stage/usr/share/doc/hww/LICENSE-MIT"
-install -Dm644 LICENSE-APACHE "$stage/usr/share/doc/hww/LICENSE-APACHE"
+hww_install_licenses "$stage/usr/share/doc/hww"
 
 installed_size=$(du -sk "$stage" | cut -f1)
 install -d "$stage/DEBIAN"

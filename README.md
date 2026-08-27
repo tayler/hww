@@ -33,7 +33,7 @@ cargo run --features gui -- --why <url>          # the extractor's account, no w
 | `render` | Plain text |
 | `ir` | Document / Block / Inline / Thread / Comment / Entries / Entry |
 | `reader` | Reading model: inline runs, outline, history, threads, image decoding, notices, the menu bar and every setting as data |
-| GUI | egui reader: links, back/forward, outline, find, threads, images, menu bar, settings panel. **Linux verified**; macOS and Windows are believed to build and are not tested |
+| GUI | egui reader: links, back/forward, outline, find, threads, images, menu bar, settings panel. **Linux and Windows verified**, both with a published binary; macOS is believed to build and is not tested |
 | feeds, gemini, gopher, markdown | not started |
 | archive | not started |
 
@@ -69,11 +69,59 @@ If `HWW_CONFIG_DIR` was set when hww ran, remove that directory instead of the d
 directory. The downloaded ZIP and `.deb` are ordinary files and can be deleted separately.
 hww writes no page content or reading history to disk.
 
+## Installing on Windows
+
+Stable 64-bit Windows builds are published on the same
+[Releases page](https://github.com/tayler/hww/releases). Download
+`hww-<version>-x86_64-windows.zip` and `SHA256SUMS`, then check the archive against the
+published hash before extracting it. PowerShell has no `sha256sum`, so compare the two lines
+this prints:
+
+```
+$zip = Get-Item hww-*-x86_64-windows.zip
+(Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+Select-String -Path SHA256SUMS -Pattern $zip.Name
+```
+
+With the [GitHub CLI](https://cli.github.com) installed, one further check is available. It is
+optional, and it answers a different question than the hash does: not whether the file matches
+the release, but whether the release was built by this repository's own workflow from this
+repository's own source.
+
+```
+gh attestation verify $zip --repo tayler/hww
+```
+
+Extract the archive and run `hww.exe` from the folder it creates. There is nothing to install:
+the binary links the C runtime statically, so no Visual C++ Redistributable is needed, and
+settings are the only thing it ever writes, to `%APPDATA%\hww`.
+
+The binary is not code-signed, so the first run raises SmartScreen's *"Windows protected your
+PC"*. Choose **More info**, then **Run anyway**. A certificate that would remove that prompt
+costs money and identifies a publisher; the hash and the attestation above answer the same
+question without one.
+
+Each successful push to `main` also attaches a temporary `hww-windows-amd64` artifact to its
+[CI workflow run](https://github.com/tayler/hww/actions/workflows/ci.yml), on the same 14-day
+expiry as the Linux one. GitHub wraps every artifact in a ZIP of its own, so that download is a
+ZIP containing the release ZIP.
+
+Remove hww by deleting the extracted folder and `%APPDATA%\hww`. As on Linux, nothing else was
+written: no page content, no reading history.
+
+One flag behaves differently here. `hww.exe` is a GUI-subsystem executable, which is what keeps
+a console window from opening behind the reader, and Windows gives such a process no console to
+write to. `--why`, `--show-rewrites`, `--show-profiles`, and `--show-engines` therefore print
+nothing on Windows and only their exit codes survive. Use a Linux build or `cargo run` for
+triage.
+
 ## Running
 
-A stable Rust toolchain new enough for edition 2024 (1.85 or later) is the only prerequisite.
-Every native library in the graph is opened at runtime rather than linked at build time, so
-there is no system package to install first.
+A stable Rust toolchain new enough for edition 2024 (1.85 or later), and a C toolchain. Every
+native library in the graph is opened at runtime rather than linked at build time, so no
+graphics, font, or windowing package has to be installed first; the C compiler is for
+`aws-lc-sys`, which arrives under rustls and builds vendored sources rather than linking a
+system TLS library. On Windows that target also assembles, so NASM must be on PATH.
 
 ```
 cargo run --features gui                          # the reader, URL bar focused
@@ -304,10 +352,22 @@ git push origin v0.1.0
 ```
 
 The tag workflow checks the tag against `Cargo.toml`, verifies that the commit belongs to
-`main`, builds and installs the package, creates its checksum and provenance attestation, and
-publishes the release. After it succeeds, advance `Cargo.toml` and `Cargo.lock` on `main` to
-the next intended release version. Development packages use `~git` versions below that future
-release, so upgrades preserve Debian version ordering.
+`main`, then builds on two runners: the Debian package on Ubuntu 22.04, which pins its glibc
+floor, and the Windows archive on a Windows runner. Both are installed or run where they are
+built. One `SHA256SUMS` covers the pair, one attestation names both, and the release publishes
+them together, so a tag that fails on either platform publishes nothing.
+
+Every distribution carries the same license texts, staged by `packaging/licenses.sh`, which
+both build scripts source: the crate's `LICENSE-MIT` and `LICENSE-APACHE` where the reader lands,
+and the font licenses under `fonts/` beside them. The binary embeds every face in `fonts/`, so a
+package without them redistributes those fonts without their terms. A new packaging format calls
+`hww_install_licenses` instead of listing files, and a face added without its license text fails
+the build.
+
+After it succeeds, advance `Cargo.toml` and `Cargo.lock` on `main` to the next intended release
+version. Development packages use `~git` versions below that future release, so upgrades
+preserve Debian version ordering; the Windows archive spells the same version `-git`, since the
+tilde is a dpkg ordering rule and means nothing to a ZIP.
 
 ## License
 
@@ -322,3 +382,7 @@ at your option.
 Unless you explicitly state otherwise, any contribution intentionally submitted for
 inclusion in this crate by you, as defined in the Apache-2.0 license, shall be dual licensed
 as above, without any additional terms or conditions.
+
+The embedded faces keep their own terms: Atkinson Hyperlegible Next, IBM Plex, and Noto under
+the SIL Open Font License, DejaVu Serif under the Bitstream Vera license. The texts are in
+`fonts/` and ship in every package.

@@ -1,0 +1,94 @@
+name: Build and verify Windows package
+description: Build the GUI binary, package it, and verify the archive runs
+
+inputs:
+  version:
+    description: Archive version; empty produces a development version
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # The deb action pins its glibc floor here. The equivalent for this target is the toolchain
+    # itself: `.cargo/config.toml` sets `+crt-static` for `x86_64-pc-windows-msvc` and nothing
+    # else, so a runner that moved to a GNU host would build a binary with none of the
+    # properties the steps below go on to assert.
+    - name: Verify build platform
+      shell: bash
+      run: |
+        test "$RUNNER_OS" = Windows
+        rustc -vV | grep -qx 'host: x86_64-pc-windows-msvc'
+
+    - uses: ./.github/actions/setup-nasm
+
+    - name: Build release binary
+      shell: bash
+      run: cargo build --locked --release --features gui --bin hww
+
+    # `+crt-static` is only worth setting if it took. A PE import table stores the name of each
+    # DLL it needs as plain ASCII, so grep answers this without dumpbin and without a Visual
+    # Studio developer shell. If either name appears, the binary wants a Visual C++
+    # Redistributable that the README promises nobody has to install.
+    - name: Verify no redistributable dependency
+      shell: bash
+      run: |
+        for dll in VCRUNTIME140 MSVCP140; do
+          if grep -aq "$dll" target/release/hww.exe; then
+            printf 'hww.exe imports %s; the static CRT did not take\n' "$dll" >&2
+            exit 1
+          fi
+        done
+
+    - name: Build Windows package
+      shell: bash
+      env:
+        HWW_ZIP_VERSION: ${{ inputs.version }}
+      run: |
+        if [[ -z "$HWW_ZIP_VERSION" ]]; then
+          unset HWW_ZIP_VERSION
+        fi
+        packaging/build-zip.sh
+
+    - name: Inspect Windows package
+      shell: bash
+      env:
+        HWW_ZIP_VERSION: ${{ inputs.version }}
+      run: |
+        zip=$(echo dist/*.zip)
+        test -f "$zip"
+        7z l "$zip"
+        names=$(7z l -ba "$zip")
+        for entry in hww.exe LICENSE-MIT LICENSE-APACHE; do
+          printf '%s\n' "$names" | grep -qF "\\$entry"
+        done
+        # The archive carries the licenses of the faces the binary embeds, asked against the
+        # repository glob so a face added with its license text is checked without editing this.
+        for license in fonts/LICENSE-*.txt; do
+          printf '%s\n' "$names" | grep -qF "\\fonts\\$(basename "$license")"
+        done
+        if [[ -n "$HWW_ZIP_VERSION" ]]; then
+          test "$zip" = "dist/hww-${HWW_ZIP_VERSION}-x86_64-windows.zip"
+        fi
+
+    # The deb action installs its package and asks the system where hww ended up. The same
+    # question here is whether the archive contains a binary that actually starts: every DLL
+    # import resolves, the CRT is there, argv parsing runs. It is asked with exit codes rather
+    # than output because `hww` is a GUI-subsystem executable and has no console to print to —
+    # see the module comment in src/bin/hww.rs. `--show-engines` is a load-and-exit path that
+    # opens no window; `--bogus-flag` is the unknown-flag path, which exits 2.
+    - name: Run the packaged binary
+      shell: bash
+      run: |
+        # Extracted under dist/, which is gitignored, and not into $RUNNER_TEMP: that variable
+        # holds a Windows path, and Git Bash cannot glob through `D:\a\_temp`.
+        rm -rf dist/unpacked
+        7z x -odist/unpacked dist/*.zip >/dev/null
+        exe=$(echo dist/unpacked/hww-*/hww.exe)
+        test -f "$exe"
+        "$exe" --show-engines
+        set +e
+        "$exe" --bogus-flag
+        status=$?
+        set -e
+        test "$status" -eq 2

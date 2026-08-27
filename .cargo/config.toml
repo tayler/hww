@@ -1,0 +1,10 @@
+# The Windows binary links the CRT statically, so hww.exe runs on a clean Windows install with
+# no Visual C++ Redistributable to fetch first. It is the same argument as the Debian package's
+# pinned glibc floor: a reader whose first act is to send somebody to a download page is not a
+# reader that opens.
+#
+# Scoped to the target rather than set as RUSTFLAGS, so it never reaches a build script, never
+# touches a Linux build, and applies to a local Windows build exactly as it does in CI. Dropping
+# it means documenting the redistributable in README.md instead.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
