@@ -30,12 +30,22 @@ version=${HWW_DMG_VERSION:-"${cargo_version}-git${revision}.${short_sha}"}
 short_version=$cargo_version
 build_version=$revision
 
-for tool in iconutil codesign hdiutil; do
+for tool in iconutil codesign hdiutil lipo; do
     if ! command -v "$tool" >/dev/null; then
         printf '%s is not on PATH; a macOS bundle cannot be built without it\n' "$tool" >&2
         exit 1
     fi
 done
+
+# The filename below claims an architecture, so ask the binary rather than the host. The CI
+# action pins this by checking the rustc host triple, which says nothing about a local build on
+# an Intel Mac or about a binary handed in as `$1`: either would produce a file called `aarch64`
+# holding an app no Apple Silicon Mac runs natively, with nothing anywhere reporting it.
+arch=$(lipo -archs "$binary")
+if [[ "$arch" != arm64 ]]; then
+    printf 'the image is named aarch64 and %s is %s\n' "$binary" "$arch" >&2
+    exit 1
+fi
 
 # The image's root, laid out the way it will be seen when it mounts: the application beside a
 # symlink to /Applications, which is the drag-to-install gesture every Mac reader already knows.
