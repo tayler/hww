@@ -74,9 +74,17 @@ hww_check_font_licenses() {
 # the reader lands on; the font texts sit under `fonts/` beside them, in the same shape in every
 # distribution, so one answer to "which fonts is this and under what terms" fits all of them.
 hww_install_licenses() {
-    local root=$1 license
+    local root=$1 license list
 
     hww_check_font_licenses || return 1
+
+    # Collected before the loop rather than piped into it. A `done < <(hww_font_licenses)`
+    # discards that function's exit status, so its empty-`fonts/` guard could not fail a build:
+    # the body would simply not run and this would return 0 having installed no font licenses.
+    # `hww_check_font_licenses` passes vacuously on an empty `fonts/` — both of its loops skip —
+    # so this is the only thing standing between an empty `fonts/` and a package that ships the
+    # crate's own pair and nothing else.
+    list=$(hww_font_licenses) || return 1
 
     mkdir -p "$root"
     cp LICENSE-MIT LICENSE-APACHE "$root/"
@@ -84,7 +92,8 @@ hww_install_licenses() {
 
     mkdir -p "$root/fonts"
     while IFS= read -r license; do
+        [[ -n "$license" ]] || continue
         cp "$license" "$root/fonts/"
         chmod 0644 "$root/fonts/$(basename "$license")"
-    done < <(hww_font_licenses)
+    done <<<"$list"
 }

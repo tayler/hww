@@ -14,30 +14,60 @@ runs:
     # itself: `.cargo/config.toml` sets `+crt-static` for `x86_64-pc-windows-msvc` and nothing
     # else, so a runner that moved to a GNU host would build a binary with none of the
     # properties the steps below go on to assert.
+    #
+    # `RUSTFLAGS` is refused rather than merged: cargo discards `target.*.rustflags` outright
+    # when that variable is set, so a step that exported it anywhere earlier in the job would
+    # silently produce a dynamically linked CRT. Refusing here names the cause; the grep below
+    # would only report the symptom.
     - name: Verify build platform
       shell: bash
       run: |
         test "$RUNNER_OS" = Windows
         rustc -vV | grep -qx 'host: x86_64-pc-windows-msvc'
+        if [[ -n "${RUSTFLAGS:-}" ]]; then
+          printf 'RUSTFLAGS is set (%s); it discards the +crt-static in .cargo/config.toml\n' \
+            "$RUSTFLAGS" >&2
+          exit 1
+        fi
 
     - uses: ./.github/actions/setup-nasm
 
+    # `HWW_REQUIRE_ICON` turns build.rs's cosmetic warning into a failure; see its module
+    # comment. This is the build whose output ships, so the icon is not cosmetic here.
     - name: Build release binary
       shell: bash
+      env:
+        HWW_REQUIRE_ICON: "1"
       run: cargo build --locked --release --features gui --bin hww
 
     # `+crt-static` is only worth setting if it took. A PE import table stores the name of each
     # DLL it needs as plain ASCII, so grep answers this without dumpbin and without a Visual
     # Studio developer shell. If either name appears, the binary wants a Visual C++
     # Redistributable that the README promises nobody has to install.
+    #
+    # The exit status is read rather than tested for truth. grep answers 1 for "not found" and 2
+    # for "could not read the file", and an `if` cannot tell them apart: a moved or missing
+    # hww.exe would report both DLLs absent and pass the one step that exists to prove the
+    # opposite.
     - name: Verify no redistributable dependency
       shell: bash
       run: |
+        exe=target/release/hww.exe
+        test -f "$exe"
         for dll in VCRUNTIME140 MSVCP140; do
-          if grep -aq "$dll" target/release/hww.exe; then
-            printf 'hww.exe imports %s; the static CRT did not take\n' "$dll" >&2
-            exit 1
-          fi
+          found=0
+          grep -aq "$dll" "$exe" || found=$?
+          case "$found" in
+            0)
+              printf 'hww.exe imports %s; the static CRT did not take\n' "$dll" >&2
+              exit 1
+              ;;
+            1) ;;
+            *)
+              printf 'grep could not read %s (exit %s)\n' "$exe" "$found" >&2
+              exit 1
+              ;;
+          esac
         done
 
     - name: Build Windows package
@@ -55,8 +85,17 @@ runs:
       env:
         HWW_ZIP_VERSION: ${{ inputs.version }}
       run: |
-        zip=$(echo dist/*.zip)
-        test -f "$zip"
+        # Named by count rather than by glob. `build-zip.sh` removes only the archive it is
+        # about to write, so a dist/ holding a previous build's zip — a dev version followed by
+        # a versioned one — would make this a two-word string that `test -f` rejects with a
+        # message about neither file, and that 7z would read as its first match alone.
+        shopt -s nullglob
+        zips=(dist/*.zip)
+        if [[ "${#zips[@]}" -ne 1 ]]; then
+          printf 'expected one archive in dist/, found %d: %s\n' "${#zips[@]}" "${zips[*]}" >&2
+          exit 1
+        fi
+        zip=${zips[0]}
         7z l "$zip"
         names=$(7z l -ba "$zip")
         for entry in hww.exe LICENSE-MIT LICENSE-APACHE; do
@@ -83,9 +122,16 @@ runs:
         # Extracted under dist/, which is gitignored, and not into $RUNNER_TEMP: that variable
         # holds a Windows path, and Git Bash cannot glob through `D:\a\_temp`.
         rm -rf dist/unpacked
-        7z x -odist/unpacked dist/*.zip >/dev/null
-        exe=$(echo dist/unpacked/hww-*/hww.exe)
-        test -f "$exe"
+        shopt -s nullglob
+        zips=(dist/*.zip)
+        if [[ "${#zips[@]}" -ne 1 ]]; then
+          printf 'expected one archive in dist/, found %d: %s\n' "${#zips[@]}" "${zips[*]}" >&2
+          exit 1
+        fi
+        7z x -odist/unpacked "${zips[0]}" >/dev/null
+        exes=(dist/unpacked/hww-*/hww.exe)
+        test "${#exes[@]}" -eq 1
+        exe=${exes[0]}
         "$exe" --show-engines
         set +e
         "$exe" --bogus-flag
