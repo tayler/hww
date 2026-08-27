@@ -32,7 +32,7 @@ cargo run --features gui -- --why <url>          # the extractor's account, no w
 | `session` | The pipeline in one place; the rewrite and search notices reported before dispatch |
 | `render` | Plain text |
 | `ir` | Document / Block / Inline / Thread / Comment / Entries / Entry |
-| `reader` | Reading model: inline runs, outline, history, threads, image decoding, notices, the menu bar and every setting as data |
+| `reader` | Reading model: inline runs, outline, history, the page cache, threads, image decoding, notices, the menu bar and every setting as data |
 | GUI | egui reader: links, back/forward, outline, find, threads, images, menu bar, settings panel. **Linux verified**; macOS and Windows are believed to build and are not tested |
 | feeds, gemini, gopher, markdown | not started |
 | archive | not started |
@@ -225,6 +225,16 @@ The rest is accounting for the page on screen, and it lives behind the italic `i
 encoding, bytes downloaded against characters extracted, the redirect chain, cookies discarded,
 images loaded and their hosts. Facts worth being able to ask for, not worth a permanent ribbon of six-point
 text beside the URL.
+
+Back and forward re-open the document hww still has rather than asking the site for it again,
+so returning to a page you were reading costs no request for it and lands where you left it. What is
+kept is bounded by the back stack — a page whose entry is gone is gone with it — and by a text
+budget past which the oldest are dropped and fetched again. Pictures are not kept: their
+textures and the tally of hosts they came from belong to the page as it was read, and a Back
+that quietly re-contacted every one of them is the thing the image policy exists to refuse. A
+restored page says so as the first row of its page-info panel, above the fetch it is still
+reporting, because every other row there describes a request this visit did not make. Nothing
+about any of it touches disk; it is gone with the process, like the history stack it follows.
 
 One centred reading column, measured in characters (`[` and `]`). Zoom is egui's own, so
 `Ctrl`+`+`/`-`/`0`, `Ctrl`+wheel, and trackpad pinch behave the way a browser does. Themes are
