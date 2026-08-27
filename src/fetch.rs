@@ -613,12 +613,16 @@ mod tests {
     fn the_timeout_bounds_the_whole_fetch_not_each_hop() {
         use std::io::Write;
         let budget = Duration::from_millis(1200);
+        let hop = Duration::from_millis(1000);
         let port = serve(move |i, s| {
-            // Comfortably inside the budget on its own; six of them are not.
-            std::thread::sleep(Duration::from_millis(500));
+            // Inside the budget on its own, so a per-hop timeout would never fire; six of
+            // them run to five times it. `Connection: close` because the client otherwise
+            // pools a socket the server drops in the same breath, and reusing it races into
+            // a transport error instead of the timeout under test.
+            std::thread::sleep(hop);
             let _ = s.write_all(
                 format!(
-                    "HTTP/1.1 302 Found\r\nLocation: /hop{}\r\nContent-Length: 0\r\n\r\n",
+                    "HTTP/1.1 302 Found\r\nLocation: /hop{}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
                     i + 1
                 )
                 .as_bytes(),
@@ -637,8 +641,13 @@ mod tests {
             .get_with(&local(port, "/hop0"), None, &limits)
             .unwrap_err();
         let elapsed = start.elapsed();
+        // Bounded correctly, the second hop runs out of budget at ~1.2s. Bounded per hop,
+        // six 1s hops end in `TooManyRedirects` at ~6s. The ceiling sits between the two
+        // with 1.8s of slack, because a contended runner oversleeps and a tight multiple of
+        // the budget made this the flakiest test in the suite.
+        let ceiling = budget + hop * 2;
         assert!(
-            elapsed < budget * 2,
+            elapsed < ceiling,
             "the chain ran {elapsed:?} against a {budget:?} budget"
         );
         // Out of time, not out of redirects.
