@@ -126,6 +126,9 @@ runs:
         test -f "$app/Contents/Info.plist"
         test -f "$app/Contents/Resources/hww.icns"
         test -L "$mnt/Applications"
+        # Presence only. Whether the window looks right needs an eye on a real Mac, but a
+        # missing file here means every reader gets Finder's default window instead.
+        test -f "$mnt/.DS_Store"
 
         # The signature is sealed over `Contents`, so this is also what proves the icon and the
         # license texts were staged before `codesign` ran rather than after it. `--strict`
