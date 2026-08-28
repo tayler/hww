@@ -38,6 +38,12 @@ hww_install_licenses "$stage/usr/share/doc/hww"
 
 installed_size=$(du -sk "$stage" | cut -f1)
 install -d "$stage/DEBIAN"
+# `desktop-file-utils` is a dependency for one reason: its dpkg trigger is what refreshes the
+# MIME cache, and without that refresh the `MimeType=` line in hww.desktop never reaches any
+# other application's "Open with…" menu. It is installed on every desktop Ubuntu already, so it
+# costs nothing in practice; the installs where it is absent are exactly the minimal ones where
+# nothing else would run `update-desktop-database`, and there the door would fail silently and
+# read as "hww does not do that".
 cat >"$stage/DEBIAN/control" <<EOF
 Package: hww
 Version: $version
@@ -46,7 +52,7 @@ Priority: optional
 Architecture: $architecture
 Maintainer: hww contributors
 Installed-Size: $installed_size
-Depends: libc6 (>= 2.35), libgcc-s1
+Depends: libc6 (>= 2.35), libgcc-s1, desktop-file-utils
 Description: quiet reading client for the non-app web
  hww reads stripped, server-rendered HTML without JavaScript, CSS, cookies,
  advertisements, or automatic third-party article-image requests.

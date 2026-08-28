@@ -36,7 +36,7 @@
 //! never covered by it. `no_label_leaks_an_internal_name` is what keeps the field names out.
 
 use crate::reader::opts::{FontChoice, ImagePolicy, ReadOpts, Theme};
-use crate::reader::settings::Settings;
+use crate::reader::settings::{OpenOn, Settings};
 
 /// Which heading a field sits under, in the order the panel draws them.
 ///
@@ -51,18 +51,22 @@ pub enum Group {
     Replies,
     Window,
     Search,
+    Library,
+    History,
     Privacy,
 }
 
 impl Group {
     /// Every group, in panel order.
-    pub const ALL: [Group; 7] = [
+    pub const ALL: [Group; 9] = [
         Group::Text,
         Group::Theme,
         Group::Page,
         Group::Replies,
         Group::Window,
         Group::Search,
+        Group::Library,
+        Group::History,
         Group::Privacy,
     ];
 
@@ -75,6 +79,8 @@ impl Group {
             Group::Replies => "Replies",
             Group::Window => "Window",
             Group::Search => "Search",
+            Group::Library => "Library",
+            Group::History => "History",
             Group::Privacy => "Privacy",
         }
     }
@@ -94,6 +100,18 @@ impl Group {
             Group::Search => Some(
                 "Typing words rather than an address searches. The words go to the engine \
                  chosen here, and hww names it on screen before the request leaves.",
+            ),
+            Group::Library => Some(
+                "The pages you asked hww to keep, one keypress at a time. Nothing is added here \
+                 that you did not name. Dates are shown in UTC.",
+            ),
+            // The one group in the panel describing something hww writes without being asked, so
+            // it says so in the first clause rather than after the reader has read past it.
+            Group::History => Some(
+                "hww writes down every page it draws for you, so you can find one again. It \
+                 records the address and the title, once per page and not once per visit, and \
+                 nothing about what you did on it. Switch it off and hww stops; forget it and \
+                 the list is gone.",
             ),
             Group::Privacy => Some(
                 "hww has no cookie store, sends no Referer for pages, and makes no request you \
@@ -122,13 +140,16 @@ pub enum FieldId {
     StopIndentingAfter,
     ShowMenuBar,
     SearchEngine,
+    KeepLibrary,
+    OpenOn,
+    KeepHistory,
     SendImageReferer,
 }
 
 impl FieldId {
     /// Every field. Walked by the tests, and by nothing else: the panel walks [`fields`],
     /// which carries the order and the grouping.
-    pub const ALL: [FieldId; 15] = [
+    pub const ALL: [FieldId; 18] = [
         FieldId::LineWidth,
         FieldId::TextSize,
         FieldId::LineSpacing,
@@ -143,6 +164,9 @@ impl FieldId {
         FieldId::StopIndentingAfter,
         FieldId::ShowMenuBar,
         FieldId::SearchEngine,
+        FieldId::KeepLibrary,
+        FieldId::OpenOn,
+        FieldId::KeepHistory,
         FieldId::SendImageReferer,
     ];
 
@@ -170,6 +194,9 @@ impl FieldId {
             FieldId::ScrollStep => (None, "scroll_lines"),
             FieldId::ShowMenuBar => (None, "show_menu_bar"),
             FieldId::SearchEngine => (None, "search_engine"),
+            FieldId::KeepLibrary => (None, "keep_library"),
+            FieldId::OpenOn => (None, "open_on"),
+            FieldId::KeepHistory => (None, "keep_history"),
             FieldId::SendImageReferer => (None, "send_image_referer"),
         }
     }
@@ -312,6 +339,24 @@ const SEARCH_ENGINES: &[Choice] = &[
         "Marginalia",
         "Excellent for essays, documentation, and small non-commercial sites, but poor for \
          shopping or current topics.",
+    ),
+];
+
+/// What hww shows when it opens with no page named. The default is first, which is the library:
+/// six months of hww should leave something to come back to, and a reader who saved a page last
+/// week should meet it rather than a wordmark.
+///
+/// An empty library still opens on the splash whichever of these is chosen, so first run is
+/// unchanged; the note says so, because a reader who picks "your library" and then sees a
+/// wordmark would otherwise think the setting did nothing.
+const OPEN_ON: &[Choice] = &[
+    choice_note(
+        "Your library",
+        "Opens on the pages you have kept. With nothing kept yet, hww opens as it always has.",
+    ),
+    choice_note(
+        "Nothing",
+        "Opens on the hww wordmark with the address bar ready, whatever you have kept.",
     ),
 ];
 
@@ -577,6 +622,41 @@ pub fn fields() -> Vec<Field> {
             control: Choice(SEARCH_ENGINES),
         },
         Field {
+            id: F::KeepLibrary,
+            group: G::Library,
+            label: "Keep pages",
+            note: Some(
+                "Lets you save the page you are reading and open the list later. Turning this off \
+                 stops hww saving anything new; it does not remove what you have already saved, \
+                 which is what forget everything below is for.",
+            ),
+            keys: crate::reader::menu::KEEP_PAGE,
+            control: Toggle,
+        },
+        Field {
+            id: F::OpenOn,
+            group: G::Library,
+            label: "When hww opens",
+            note: Some("What is on screen when you start hww without naming a page."),
+            keys: "",
+            control: Choice(OPEN_ON),
+        },
+        Field {
+            id: F::KeepHistory,
+            group: G::History,
+            label: "Remember pages you visit",
+            note: Some(
+                "Keeps a list of the pages hww has shown you, most recent first; h opens it. \
+                 Turning this off stops hww writing anything new; it does not remove what is \
+                 already there, which is what forget history below is for.",
+            ),
+            // No key, unlike Keep pages above it. `h` opens the list rather than recording a
+            // page, and a key printed beside a switch reads as the key that works the switch;
+            // the note names it where it can say what it does.
+            keys: "",
+            control: Toggle,
+        },
+        Field {
             id: F::SendImageReferer,
             group: G::Privacy,
             label: "Send the site name when loading images",
@@ -625,6 +705,12 @@ pub fn get(s: &Settings, id: FieldId) -> Value {
                 .position(|&e| e == s.search_engine)
                 .unwrap_or(0),
         ),
+        FieldId::OpenOn => Value::Index(match s.open_on {
+            OpenOn::Library => 0,
+            OpenOn::Nothing => 1,
+        }),
+        FieldId::KeepLibrary => Value::Bool(s.keep_library),
+        FieldId::KeepHistory => Value::Bool(s.keep_history),
         FieldId::ShowLinkAddresses => Value::Bool(s.read.show_link_urls),
         FieldId::Zoom => Value::Num(s.zoom_factor),
         FieldId::ScrollStep => Value::Num(s.scroll_lines),
@@ -705,6 +791,23 @@ pub fn set(s: &mut Settings, id: FieldId, v: Value) {
         FieldId::SearchEngine => {
             if let Some(e) = v.index().and_then(|i| crate::sites::EngineId::ALL.get(i)) {
                 s.search_engine = *e;
+            }
+        }
+        FieldId::OpenOn => {
+            s.open_on = match v.index() {
+                Some(0) => OpenOn::Library,
+                Some(1) => OpenOn::Nothing,
+                _ => s.open_on,
+            }
+        }
+        FieldId::KeepLibrary => {
+            if let Some(b) = v.boolean() {
+                s.keep_library = b;
+            }
+        }
+        FieldId::KeepHistory => {
+            if let Some(b) = v.boolean() {
+                s.keep_history = b;
             }
         }
         FieldId::ShowLinkAddresses => {
@@ -790,8 +893,8 @@ mod tests {
             }
         }
         assert!(
-            leaves.len() >= 15,
-            "expected at least fourteen settings, walked {}",
+            leaves.len() >= 18,
+            "expected at least eighteen settings, walked {}",
             leaves.len()
         );
 
@@ -883,6 +986,9 @@ mod tests {
                 | FieldId::StopIndentingAfter
                 | FieldId::ShowMenuBar
                 | FieldId::SearchEngine
+                | FieldId::KeepLibrary
+                | FieldId::OpenOn
+                | FieldId::KeepHistory
                 | FieldId::SendImageReferer => true,
             };
             assert!(listed);

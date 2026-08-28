@@ -1605,6 +1605,8 @@ fn entry_from(card: &ElementRef, walk: &Walk<'_>, depth: usize) -> Option<crate:
         href,
         summary,
         published,
+        // A card says where it goes in its own words. See `ir::Entry::address`.
+        address: None,
         image,
     })
 }

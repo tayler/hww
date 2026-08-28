@@ -4,8 +4,10 @@
 //! this is hand-rolled over the `serde_json` already in the tree, and it also carries the
 //! zoom factor, which is egui's state rather than ours.
 //!
-//! Nothing here is page content. The archive (reading history at rest) is a whole second
-//! doctrine and is deliberately not started; this file holds preferences and nothing else.
+//! Nothing here is page content. What the reader asked hww to *keep* is a second file in this
+//! same directory and a second doctrine: see [`crate::reader::archive`], which is the module to
+//! read before adding anything else to this program that writes to disk. This file holds
+//! preferences, including the two switches that govern that one.
 
 use crate::reader::opts::ReadOpts;
 use crate::sites::EngineId;
@@ -39,6 +41,28 @@ pub struct Settings {
     /// stays the only place in the crate that spells a host out.
     #[serde(deserialize_with = "engine_or_default")]
     pub search_engine: crate::sites::EngineId,
+    /// Whether hww may write the library at all.
+    ///
+    /// The archive doctrine's off switch. Off means hww stops keeping pages; it does not mean
+    /// what is already kept disappears, and the panel puts "forget everything" in the same group
+    /// for exactly that reason — a switch that silently discarded the library would be as much a
+    /// surprise as one that silently retained it. See [`crate::reader::archive`].
+    pub keep_library: bool,
+    /// Whether hww may write down the pages it draws.
+    ///
+    /// The archive doctrine's second switch, and the one that governs a record nobody asked for
+    /// page by page. On by default, which is why the group it sits in prints the file's path and
+    /// carries the button that empties it: see [`crate::reader::archive`], where the cost of that
+    /// default is argued rather than assumed. Off stops the writing and leaves what is already
+    /// there, exactly as [`Settings::keep_library`] does, because the two switches must not mean
+    /// different things by the same word.
+    pub keep_history: bool,
+    /// What hww opens on when the command line names no page.
+    ///
+    /// Not a styling choice, so it is here rather than in [`ReadOpts`]. A reader who wants the
+    /// bare splash back should not have to argue with the application about it.
+    #[serde(deserialize_with = "opens_on_or_default")]
+    pub open_on: OpenOn,
     /// Whether the menu bar is drawn.
     ///
     /// The one setting here that exists because of a chrome decision rather than a reading one.
@@ -73,6 +97,44 @@ where
     })
 }
 
+/// What is on screen when hww starts with no page named.
+///
+/// The home screen is not a new surface: `ReaderApp::new` takes the same builtin-view path `b`
+/// takes, so opening on the library is literally "hww opened with the library" and inherits find,
+/// the outline, scrolling, Tab focus, and correct menu gating with no special casing. Drawing
+/// library entries into the idle screen instead would have forked the page model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenOn {
+    /// The library, when there is anything in it. An empty one still opens on the splash: first
+    /// run is unchanged, because nothing has happened yet and there is nothing to report.
+    #[default]
+    Library,
+    /// The splash and an open URL bar, which is what hww has always done.
+    Nothing,
+}
+
+/// An `open_on` this binary does not know falls back to the default, for the same reason
+/// [`engine_or_default`] exists: `#[serde(default)]` covers a *missing* field and not an
+/// unparseable one, and without this a binary predating a later value would lose every other
+/// setting in the file and write the defaults back over it.
+fn opens_on_or_default<'de, D>(d: D) -> Result<OpenOn, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Known(OpenOn),
+        Unknown(serde::de::IgnoredAny),
+    }
+    use serde::Deserialize as _;
+    Ok(match Wire::deserialize(d)? {
+        Wire::Known(v) => v,
+        Wire::Unknown(_) => OpenOn::default(),
+    })
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -81,6 +143,9 @@ impl Default for Settings {
             send_image_referer: true,
             scroll_lines: 3.0,
             search_engine: crate::sites::EngineId::default(),
+            keep_library: true,
+            keep_history: true,
+            open_on: OpenOn::default(),
             show_menu_bar: true,
         }
     }
@@ -161,6 +226,17 @@ pub fn settings_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("settings.json"))
 }
 
+/// Where the library file lives, beside the settings.
+///
+/// One directory, deliberately. Saved items are arguably state rather than configuration, which
+/// on Linux is `XDG_STATE_HOME`, but the archive doctrine (`reader::archive`) is about *what* is
+/// written and *who asked for it*, not about which spec-blessed folder it lands in. A second
+/// directory would double the uninstall instructions in README for no privacy gain, and
+/// `HWW_CONFIG_DIR` would then override half of what hww writes.
+pub fn archive_path() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("library.json"))
+}
+
 /// Load, or fall back to defaults with a reason.
 ///
 /// A parse failure returns the defaults *and* the complaint rather than refusing to start.
@@ -199,14 +275,25 @@ pub fn save(settings: &Settings) -> std::io::Result<()> {
     let Some(path) = settings_path() else {
         return Ok(());
     };
+    let json = serde_json::to_string_pretty(settings)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    write_atomically(&path, json.as_bytes())
+}
+
+/// Put `bytes` at `path` through a temporary file and a rename, creating the directory first.
+///
+/// Shared with [`crate::reader::archive`] rather than copied there. Both files live in the same
+/// directory, both are hand-editable JSON the reader would rather not lose to a crash, and the
+/// three durability steps below are the sort of thing that gets copied once correctly and then
+/// diverges: a second copy that forgot `sync_dir` would be indistinguishable from this one until
+/// a machine lost power.
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let Some(dir) = path.parent() else {
         return Ok(());
     };
     std::fs::create_dir_all(dir)?;
     let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(settings)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    write_then_rename(&tmp, &path, dir, json.as_bytes()).inspect_err(|_| {
+    write_then_rename(&tmp, path, dir, bytes).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
 }
@@ -263,6 +350,9 @@ mod tests {
         want.send_image_referer = false;
         want.scroll_lines = 5.0;
         want.show_menu_bar = false;
+        want.keep_library = false;
+        want.keep_history = false;
+        want.open_on = OpenOn::Nothing;
         save(&want).unwrap();
         let (got, err) = load();
         assert_eq!(got, want);
@@ -400,6 +490,45 @@ mod tests {
         assert_eq!(s.zoom_factor, 1.4);
         assert!(!s.show_menu_bar);
         assert!(!s.send_image_referer);
+    }
+
+    /// The archive's three switches survive the file, and an existing installation's file —
+    /// which has none of them — keeps the library on rather than silently having it off.
+    ///
+    /// The history's default is asserted here too, and it is the assertion worth having: it is
+    /// the one switch that writes without being asked, so a build that shipped it defaulting the
+    /// other way, or silently flipping under an older file, would be a different program from the
+    /// one README describes.
+    #[test]
+    fn the_library_switches_round_trip_and_default_on() {
+        let older: Settings = serde_json::from_str(r#"{"zoom_factor": 1.5}"#).unwrap();
+        assert!(
+            older.keep_library,
+            "an existing file must not turn keeping off"
+        );
+        assert!(older.keep_history, "nor history");
+        assert_eq!(older.open_on, OpenOn::Library);
+        assert!(Settings::default().keep_history);
+
+        let want = Settings {
+            keep_library: false,
+            keep_history: false,
+            open_on: OpenOn::Nothing,
+            ..Settings::default()
+        };
+        let text = serde_json::to_string(&want).unwrap();
+        assert_eq!(serde_json::from_str::<Settings>(&text).unwrap(), want);
+    }
+
+    /// The unknown-value fallback, on the newest enum in the file. Without it a binary predating
+    /// a later choice loses every other setting in the file and writes the defaults back.
+    #[test]
+    fn an_unknown_open_on_costs_only_that_field() {
+        let json = r#"{"open_on": "the-weather", "zoom_factor": 1.4, "keep_library": false}"#;
+        let s: Settings = serde_json::from_str(json).expect("the file still parses");
+        assert_eq!(s.open_on, OpenOn::default());
+        assert_eq!(s.zoom_factor, 1.4);
+        assert!(!s.keep_library);
     }
 
     /// A value of the wrong shape entirely, not just an unknown name.

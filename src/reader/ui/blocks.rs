@@ -207,6 +207,18 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
         } else {
             runs(ui, &title, &set, ctx);
         }
+        // Under the headline and above the dek, in the same dim as the date across from it.
+        // `small_font` and not `chrome_font`: the address belongs to the page the row points at,
+        // and this module's rule is that the page's words are set in the page's family. It is a
+        // label rather than a link — the headline is the link, and a row with two of them would
+        // give Tab two stops to the same place.
+        if let Some(addr) = &e.address {
+            ui.label(
+                RichText::new(addr)
+                    .font(theme::small_font(ctx.opts))
+                    .color(ctx.pal.dim),
+            );
+        }
         blocks_ui(ui, &e.summary, ctx, None);
     }
 }

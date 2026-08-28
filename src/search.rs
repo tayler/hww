@@ -240,6 +240,9 @@ pub fn parse(html: &Html, base: &Url, shape: &SearchShape) -> Vec<Entry> {
             href: Some(href),
             summary,
             published: None,
+            // The engines print a breadcrumb of their own inside the result, which arrives as
+            // part of `summary`. See `ir::Entry::address`.
+            address: None,
             // Result favicons come from the engine's own image host
             // (`imgs.search.brave.com`, `external-content.duckduckgo.com`). Carrying one would
             // put a third-party image offer on every row of the page.

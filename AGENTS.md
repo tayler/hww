@@ -8,8 +8,11 @@ ledger. This file contains only rules useful across tasks. Reference symbols, no
 ## What this is
 
 hww is a second browser for stripped, non-app HTML, with text and GUI renderers. Feeds,
-gemini, gopher, Markdown, and archive are not started. Nothing writes page content to disk;
-only `settings.json` survives a run.
+gemini, gopher, and Markdown are not started. Nothing writes page content to disk. Two files
+survive a run, both in `settings::config_dir()`: `settings.json`, and `library.json`, which holds
+the pages the reader asked hww to keep and nothing else. **Read `src/reader/archive.rs` before
+adding anything that writes to disk** — the archive doctrine is there, and it is the rule, not
+this paragraph.
 
 Everything maps through `ir::Document`. Formats produce the IR and renderers consume it.
 Never put colour, fonts, dimensions, alignment, spacing, or other presentation in `src/ir.rs`.
@@ -82,7 +85,22 @@ not move under `ui/`. `reader/face` chooses family names; `reader/ui/fonts` regi
 
 The reading column contains page content only. Page remarks are infobars, error pages, or
 toasts. Positional markers such as `[image]`, `Block::Embed`, and `notice::PENDING` are the
-exceptions.
+exceptions. A document hww built itself is not a remark and does not breach the rule: the library
+and the history are titled documents of links that the reader reads and follows, and
+`search::document` already puts a locally-built document in that column. The rule is about keeping
+remarks *about* a page out of the column, and a list of addresses is not a remark about anything.
+
+A built view goes through `ReaderApp::install`/`commit` like every other page, never a fourth
+`Page` variant, so it inherits find, Tab, the outline, and menu gating. `builtin_view` is consulted
+at the top of `navigate` and nowhere else: `reload`, `follow`, and `arrive` all reach `navigate`,
+and `arrive` is the one that bites, because a built view is deliberately never cached and Back
+would otherwise hand `hww:library` to reqwest. It matches each address exactly, never the `hww`
+scheme, so no http(s) URL can be diverted from a real fetch. Never fabricate a `Provenance` that
+claims a server
+answered; `Provenance::built` carries an address and zeros, and `pageinfo::Arrival::Built` is what
+guarantees the zeros are never drawn. `notice::about_page` takes the arrival and returns nothing
+for a built page, or a two-item library trips the thin-extraction caution. A built view records
+nothing in the history: `hww:history` must not list itself.
 
 Reader-facing wording stays outside `ui/` so the default job tests it: page remarks in
 `reader/notice.rs`, menu and help rows in `reader/menu.rs`, setting labels and notes in
@@ -121,6 +139,30 @@ colours and `dark_mode`. Chrome uses `theme::chrome_font`; page text uses the pa
 Do not weaken the contrast tests.
 
 ## Privacy and network
+
+hww remembers two things and neither of them quietly. What the reader **names** is the library: a
+keypress, about one page, once, in the same category as `search_engine`. What hww **watched** is
+the history: the address and title of every page it drew, written without being asked, which is
+the record that makes a browser profile worth stealing. They are two tenants of one file, with
+`keep_library` and `keep_history` over them, and the doctrine that governs both is in
+`reader::archive` — read it before changing either. A new tenant is a new `archive::Kind` in the
+one file, never a second file, and it arrives with its own switch, its own row in `prefs::fields`,
+its own way to be forgotten, and its own line in README's uninstall paragraphs.
+
+History is on by default, so its disclosures are the load-bearing ones: the switch is in a group
+of its own with the file's path under it and the button that empties it beside it, and the record
+itself is a page the reader opens with `h`. Keep it one row per page rather than one per visit —
+`Archive::visit` moves and restamps an entry it has seen before — because a visit-by-visit trail
+is a different and sharper claim about a person, and nothing in hww has a use for it. The library
+cap refuses and the history cap evicts; that asymmetry is argued in `reader::archive` and is not
+an oversight to tidy up.
+
+Anything that persists must be able to be turned off *and* forgotten: a switch that silently
+retains what it already gathered is the quiet lie the notice system exists to refuse, and each
+switch forgets its own tenant and no other. Anything persisted is disclosed — the panel prints the
+file's path, page info says whether the page on screen is kept. Unknown fields, unknown enum variants, and unknown item kinds are carried through
+a load and a save untouched, because this is data the reader cannot retype; a corrupt file yields
+an empty store *and a complaint*, never a refusal to start.
 
 Privacy is compile-time absence. `reqwest` keeps `default-features = false`; do not add a
 dependency or feature that restores a cookie jar. Preserve manual redirect inspection,
@@ -191,8 +233,9 @@ failure is otherwise invisible, but make that argument at the test rather than c
 
 Do not relax tests that enforce IR purity, hostname boundaries, profile soundness, origin-only
 Referer, parser word boundaries, shared inline flattening, font registration, glyph coverage,
-contrast, settings exposure, menu and help agreement, iterative thread traversal, or layout-band
-boundaries.
+contrast, settings exposure, menu and help agreement, iterative thread traversal, layout-band
+boundaries, the archive's per-item tolerance and refusing cap, the scheme gate that keeps page
+content out of hww's own views, or the exact set of addresses `builtin_view` claims.
 
 ## Portability and style
 

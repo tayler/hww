@@ -67,6 +67,7 @@ mod keyspec {
     pub const ZOOM_RESET: &str = "Ctrl+0";
     pub const BACK: &str = "Alt+Left";
     pub const FORWARD: &str = "Alt+Right";
+    pub const KEEP_PAGE: &str = "Ctrl+D";
 
     pub const HELP_OPEN_LOCATION: &str = "Ctrl+L or o";
     pub const HELP_BACK: &str = "Alt+Left / Backspace";
@@ -94,6 +95,7 @@ mod keyspec {
     pub const ZOOM_RESET: &str = "Cmd+0";
     pub const BACK: &str = "Cmd+[";
     pub const FORWARD: &str = "Cmd+]";
+    pub const KEEP_PAGE: &str = "Cmd+D";
 
     pub const HELP_OPEN_LOCATION: &str = "Cmd+L or o";
     pub const HELP_BACK: &str = "Cmd+[ / Backspace";
@@ -125,6 +127,9 @@ pub enum Command {
     OpenLocation,
     Reload,
     ReloadBare,
+    KeepPage,
+    OpenLibrary,
+    OpenHistory,
     Quit,
     CopyPageUrl,
     CopyFocusedLink,
@@ -155,6 +160,8 @@ pub enum Command {
 /// the click is a toggle: one of these answers "is it on", and the command answers "turn it".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Checked {
+    /// The page on screen is in the reader's library. See `reader::archive`.
+    Kept,
     LinkAddresses,
     Outline,
     PageInfo,
@@ -172,6 +179,12 @@ pub enum Needs {
     Nothing,
     /// A page is on screen.
     Page,
+    /// A page that came from a request is on screen.
+    ///
+    /// Narrower than [`Needs::Page`], and the difference is the library itself: once a built
+    /// view is a real `Page::Ready`, `Page` is satisfied on it, and "keep this page" there would
+    /// offer to save the library into the library.
+    FetchedPage,
     /// Tab has landed on a link.
     FocusedLink,
     /// The page has at least one discussion in it.
@@ -282,6 +295,24 @@ pub fn bar() -> Vec<Menu> {
                     keys: "R",
                     command: C::ReloadBare,
                     needs: N::Page,
+                },
+                Item::Separator,
+                // A check mark rather than a Keep/Forget label that swaps. A tick already means
+                // "this is on" everywhere else in the bar, and `Checked` is the existing
+                // mechanism for a row whose state the reader can see at a glance.
+                Item::Check {
+                    label: "Keep this page",
+                    keys: KEEP_PAGE,
+                    command: C::KeepPage,
+                    checked: Checked::Kept,
+                    needs: N::FetchedPage,
+                },
+                // The one view worth reaching from the idle screen, so it needs nothing.
+                Item::Run {
+                    label: "Library",
+                    keys: "b",
+                    command: C::OpenLibrary,
+                    needs: N::Nothing,
                 },
                 Item::Separator,
                 Item::Run {
@@ -424,6 +455,16 @@ pub fn bar() -> Vec<Menu> {
                     command: C::Forward,
                     needs: N::Forward,
                 },
+                Item::Separator,
+                // Under this title rather than beside Library in File, because a reader looking
+                // for a page they read yesterday looks where Back is. It needs nothing: the
+                // pages it lists outlive the session, so it opens on the splash too.
+                Item::Run {
+                    label: "Pages you have visited",
+                    keys: "h",
+                    command: C::OpenHistory,
+                    needs: N::Nothing,
+                },
             ],
         },
         Menu {
@@ -472,6 +513,9 @@ pub const HELP: &[(&str, &str)] = &[
     (HELP_FIND, "find in page · next / previous match"),
     ("z / Z", "collapse focused reply · collapse all"),
     ("y / Y", "copy page URL · copy focused link"),
+    (KEEP_PAGE, "keep this page in your library"),
+    ("b", "open your library"),
+    ("h", "open the pages you have visited"),
     ("[ / ]", "narrow / widen the reading measure"),
     (HELP_ZOOM, "zoom in · out · actual size"),
     ("d", "cycle theme"),
@@ -541,6 +585,9 @@ mod tests {
             Command::OpenLocation,
             Command::Reload,
             Command::ReloadBare,
+            Command::KeepPage,
+            Command::OpenLibrary,
+            Command::OpenHistory,
             Command::Quit,
             Command::CopyPageUrl,
             Command::CopyFocusedLink,

@@ -80,6 +80,16 @@ pub struct Entry {
     /// The dek and anything else the card carried, minus the headline and the thumbnail.
     pub summary: Vec<Block>,
     pub published: Option<String>,
+    /// The address to show under the headline, for a list whose rows are hard to tell apart
+    /// without it. `None` on every entry a page produced: a card or a search result already says
+    /// where it goes in its own words, and printing the target of every headline on a front page
+    /// is what `ReadOpts::show_link_urls` is for.
+    ///
+    /// Semantics and not presentation, as `published` is: this says the address is part of what
+    /// the row *says*, and the renderer decides how it looks. See `reader::archive`, whose
+    /// history view is the one thing that sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
     pub image: Option<Image>,
 }
 

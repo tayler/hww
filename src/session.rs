@@ -153,6 +153,35 @@ pub struct Loaded {
     pub prov: Provenance,
 }
 
+impl Provenance {
+    /// The provenance of a page hww built itself: an address, and zeros.
+    ///
+    /// Every other field describes a request, and this page made none, so there is nothing
+    /// honest to put in them. **The zeros are only safe because `pageinfo::Arrival::Built` stops
+    /// them being drawn**; a `status: 200` here instead would be the plausible-looking failure
+    /// `docs/findings.md` names three times, with the panel reporting that a server answered a
+    /// request that was never sent.
+    ///
+    /// It lives here, beside the fields, rather than in the reader: a `Provenance` is thirteen
+    /// fields and two `Url`s, and the copy made at a call site is the copy that drifts.
+    pub fn built(url: Url) -> Self {
+        Self {
+            requested: url.clone(),
+            rewritten_to: None,
+            rule_appears_dead: false,
+            status: 0,
+            encoding: "UTF-8",
+            final_url: url,
+            bytes: 0,
+            chars: 0,
+            hops: vec![],
+            cookie_attempts: 0,
+            truncation: Truncation::Complete,
+            profile: None,
+        }
+    }
+}
+
 /// A plain 200 `Provenance`, for tests in this crate that need one to vary.
 ///
 /// It lives here rather than in each test module because a `Provenance` is eleven fields and

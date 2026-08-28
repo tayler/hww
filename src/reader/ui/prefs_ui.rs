@@ -46,6 +46,21 @@ use eframe::egui::{self, RichText, Ui};
 pub enum Event {
     Changed,
     ZoomSet(f32),
+    /// The Library group's "forget everything" was pressed.
+    ///
+    /// A value rather than a direct write, for the same reason [`Event::ZoomSet`] is one: the
+    /// library is not in `Settings` and this panel is handed nothing else. `app` owns the store
+    /// and the file, and it is also the only place that knows whether the library is the page on
+    /// screen and has to be redrawn under the reader.
+    ///
+    /// It needs no `Control` variant. `prefs_ui` already draws the per-group `reset` and the
+    /// foot's `reset all` outside the field walk, each calling a pure function a test can reach;
+    /// this is that pattern a third time. A `Control::Button` would be mechanism with one caller,
+    /// which is the standard that removed `force_thread`.
+    ForgetLibrary,
+    /// The History group's "forget history" was pressed. [`Event::ForgetLibrary`]'s argument,
+    /// one tenant over: the panel owns neither the store nor the file.
+    ForgetHistory,
 }
 
 /// Draw the panel. `open` is `Chrome::settings_open`, so `Esc`, `,`, the menu item and the
@@ -112,7 +127,8 @@ pub fn panel(
                                 let mut current: Option<Group> = None;
                                 for field in &fields {
                                     if current != Some(field.group) {
-                                        if current.is_some() {
+                                        if let Some(done) = current {
+                                            group_footer(ui, pal, &opts, done, &mut events);
                                             ui.add_space(theme::snap(opts.base_size_pt * 0.35));
                                             ui.separator();
                                             ui.add_space(theme::snap(opts.base_size_pt * 0.35));
@@ -129,6 +145,12 @@ pub fn panel(
                                     }
                                     row(ui, pal, &opts, field, settings, &mut events);
                                     ui.add_space(theme::snap(opts.base_size_pt * 0.45));
+                                }
+                                // The last group's footer, which the loop's own hook cannot
+                                // reach: it fires when the group *changes*, and nothing follows
+                                // the final one.
+                                if let Some(done) = current {
+                                    group_footer(ui, pal, &opts, done, &mut events);
                                 }
 
                                 ui.add_space(theme::snap(opts.base_size_pt * 0.2));
@@ -188,6 +210,58 @@ fn group_heading(
         wrapped(ui, pal.dim, opts, note);
     }
     ui.add_space(theme::snap(opts.base_size_pt * 0.3));
+}
+
+/// What a group has to say after its own settings, which today is the Library group and nothing
+/// else.
+///
+/// Below the fields rather than beside the heading, because "forget everything" is the second
+/// half of the switch above it and reads as a consequence of it; drawn from the heading it would
+/// sit above the setting it completes. And here rather than at the foot with `reset all`, because
+/// forgetting a library is not resetting a preference and must not be reachable by a button that
+/// says it is.
+fn group_footer(
+    ui: &mut Ui,
+    pal: &Palette,
+    opts: &crate::reader::opts::ReadOpts,
+    group: Group,
+    events: &mut Vec<Event>,
+) {
+    // Both tenants of `reader::archive`, each with the button that empties it under the switch
+    // that fills it. Two buttons and not one: "forget everything" must not quietly take the
+    // history with it, and a reader clearing a trail is not asking to lose the pages they saved
+    // on purpose.
+    let (label, hover, event) = match group {
+        Group::Library => (
+            "forget everything",
+            "Remove every page you have kept. This cannot be undone.",
+            Event::ForgetLibrary,
+        ),
+        Group::History => (
+            "forget history",
+            "Remove every page hww has written down. This cannot be undone, and it leaves the \
+             pages you have kept alone.",
+            Event::ForgetHistory,
+        ),
+        _ => return,
+    };
+    ui.horizontal(|ui| {
+        if ui.button(label).on_hover_text(hover).clicked() {
+            events.push(event);
+        }
+    });
+    // Under both groups, because both write to it and a reader who scrolled straight to History
+    // must not have to have read the Library group to learn where its file is. The archive
+    // doctrine's disclosure requirement is that a store whose shape the reader cannot see is one
+    // they cannot reason about; this is the same sentence the settings path gets at the foot.
+    if let Some(path) = crate::reader::archive::path() {
+        ui.add_space(theme::snap(opts.base_size_pt * 0.2));
+        ui.label(
+            RichText::new(format!("Saved in {}", path.display()))
+                .color(pal.dim)
+                .font(theme::chrome_font(opts)),
+        );
+    }
 }
 
 /// One setting: its label, the key that already does it, its control, and its sentence.
