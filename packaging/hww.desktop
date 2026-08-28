@@ -7,5 +7,6 @@ Exec=hww %u
 Icon=hww
 Terminal=false
 Categories=Network;WebBrowser;
+MimeType=x-scheme-handler/http;x-scheme-handler/https;
 StartupNotify=true
 StartupWMClass=hww

@@ -93,6 +93,31 @@ pub struct Palette {
 /// drawn by hand take it by name.
 pub const RADIUS: u8 = 5;
 
+/// The one mark this reader draws for keyboard focus: a `link` ring around the widget.
+///
+/// Two points wide, which is WCAG 2.4.13's perimeter, two points out from the widget's own
+/// rect, and rounded with [`RADIUS`] like every other control.
+///
+/// It is drawn by hand because egui's affordance for a focused widget is `widgets.active`,
+/// and `active` is painted by a `Button`'s frame. Half this program's controls have no
+/// frame — the strip's arrows and its address, `? keys`, the page's `[image]` offers, a
+/// notice's close — and the page-info `i` is painted glyph by glyph rather than being a
+/// widget at all. Every one of them was a silent tab stop: focus arrived, nothing on screen
+/// changed, and the reader had no way to know what the next `Enter` would press. One ring for
+/// links and chrome both, so the mark is learned once.
+///
+/// Framed buttons keep egui's own `active` border and are not given a second ring.
+pub fn focus_ring(ui: &egui::Ui, resp: &egui::Response, pal: &Palette) {
+    if resp.has_focus() {
+        ui.painter().rect_stroke(
+            resp.rect.expand(2.0),
+            RADIUS,
+            Stroke::new(2.0, pal.link),
+            egui::StrokeKind::Outside,
+        );
+    }
+}
+
 /// `link_underline`'s alpha: 65% of `link` over `bg` blends to 3.3:1 or better on every theme,
 /// which is the non-text floor; Sepia is the tight one, at 3.29. 45% was tried and blends to
 /// 2.2 on Light, which is faint for the one cue that says "this is a link" to an eye that does
@@ -712,6 +737,28 @@ mod tests {
                 // The icon is a shape, not text: the non-text floor.
                 let m = contrast(ink.icon, ink.fill);
                 assert!(m >= 3.0, "{theme:?}/{sev:?}: icon is {m:.2}");
+            }
+        }
+    }
+
+    /// The focus ring clears 3:1 on every ground a focusable widget can sit on.
+    ///
+    /// The ring is a graphical object conveying information, so WCAG 1.4.11's non-text floor
+    /// is the bar, not the theme's text floor. `every_palette_meets_its_floor` already walks
+    /// `link` over the three page and chrome grounds; the one this adds is `caution_bg`, which
+    /// no other test pairs with `link` and which is exactly where a notice bar's close lands.
+    #[test]
+    fn the_focus_ring_is_visible_wherever_it_lands() {
+        for theme in Theme::REAL {
+            let p = palette(theme, false);
+            for (name, ground) in [
+                ("bg", p.bg),
+                ("chrome_bg", p.chrome_bg),
+                ("code_bg", p.code_bg),
+                ("caution_bg", p.caution_bg),
+            ] {
+                let c = contrast(p.link, ground);
+                assert!(c >= 3.0, "{theme:?}: the focus ring is {c:.2} on {name}");
             }
         }
     }

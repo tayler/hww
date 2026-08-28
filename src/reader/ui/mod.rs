@@ -257,6 +257,21 @@ impl RenderCtx<'_> {
     }
 }
 
+/// Keep the widget Tab just landed on inside the window.
+///
+/// egui 0.36 scrolls to a focused widget for an AccessKit `ScrollIntoView` request and for
+/// nothing else, so a Tab that walks off the bottom of the reading column is hww's to follow:
+/// without this the ring leaves the window and the reader is left pressing a key that appears
+/// to do nothing. Only on the frame focus arrives — repeating it every frame would pin the
+/// page against the reader's own scrolling — and only for widgets *inside* the column, because
+/// `scroll_to_me` posts a target that the next scroll area drawn will honour, and a chrome
+/// widget posting one would scroll the page to a rect that is not on it.
+pub fn follow_focus(resp: &egui::Response) {
+    if resp.gained_focus() {
+        resp.scroll_to_me(None);
+    }
+}
+
 pub use app::{ReaderApp, run};
 
 /// Launch arguments, kept out of `app` so `bin/hww.rs` stays a thin main.

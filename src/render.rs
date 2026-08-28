@@ -501,6 +501,7 @@ mod tests {
                 href: Some("https://example.test/s".into()),
                 summary: vec![Block::Paragraph(vec![Inline::Text("The dek.".into())])],
                 published: Some("2 hours ago".into()),
+                address: None,
                 image: None,
             }])],
         };

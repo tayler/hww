@@ -342,6 +342,46 @@ fn catalog(port: u16) -> Vec<Scene> {
             "a front page: card lists as entries under their section headings",
             vec![page(FRONT_URL, FRONT)],
         ),
+        Scene {
+            volatile: true,
+            ..scene(
+                "library",
+                "the library: two kept pages, most recent first",
+                // Two real keeps and a real open, through `run_command`, which is one of the
+                // four hooks `AGENTS.md` names for this: both commands are reachable that way,
+                // so neither needs key steps nor depends on a synthetic Tab landing focus. It
+                // photographs `Ready::built`, `Provenance::built`, and `archive::document` on the
+                // path a reader takes rather than a page injected to look like one.
+                //
+                // Volatile for the reason the loading scenes are: an entry says the day it was
+                // kept, so the picture carries today's date by construction. Neither page is
+                // `ARTICLE_URL`, so the page-info scenes that photograph that article still show
+                // it as one the reader has not kept, whatever order these run in.
+                vec![
+                    page(FRONT_URL, FRONT),
+                    Step::Run(Command::KeepPage),
+                    page(THREAD_URL, THREAD),
+                    Step::Run(Command::KeepPage),
+                    Step::Run(Command::OpenLibrary),
+                ],
+            )
+        },
+        Scene {
+            volatile: true,
+            ..scene(
+                "history",
+                "the pages hww has written down, most recent first",
+                // Volatile, and for one more reason than the library scene: an entry carries the
+                // day it was drawn, and the list is whatever this run of the catalog has visited
+                // by the time it gets here, so it changes when a scene is added ahead of it.
+                // Photographed, never compared.
+                vec![
+                    page(FRONT_URL, FRONT),
+                    page(THREAD_URL, THREAD),
+                    Step::Run(Command::OpenHistory),
+                ],
+            )
+        },
         scene(
             "thread",
             "a discussion: authors, timestamps, nested replies",
@@ -1625,6 +1665,10 @@ fn main() -> ExitCode {
     // into the settings of whoever is running this.
     let scratch = cfg.out.join(".config");
     let _ = std::fs::create_dir_all(&scratch);
+    // The library, unlike the settings, is cleared between runs. The catalog builds its own
+    // through `Command::KeepPage`, so a file left behind by the previous run would leave the
+    // library scene showing a list that grows every time the catalog is run.
+    let _ = std::fs::remove_file(scratch.join("library.json"));
     // Safety: before any thread that reads the environment exists.
     unsafe { std::env::set_var("HWW_CONFIG_DIR", &scratch) };
 

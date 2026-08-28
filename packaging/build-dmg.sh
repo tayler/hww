@@ -67,6 +67,12 @@ chmod 0755 "$app/Contents/MacOS/hww"
 # them on every reader's Mac. Reverse-DNS of the repository's GitHub Pages domain, which is the
 # closest thing this project has to a name it owns.
 #
+# `CFBundleURLTypes` is the door: it is what puts hww in Finder's "Open With" menu and in
+# Safari's default-browser list. `LSHandlerRank` is `Alternate` and not `Owner`, because hww is a
+# second browser and a bundle claiming to own http would be asking to be the default. There is no
+# `CFBundleDocumentTypes`, for the reason the Linux entry omits `text/html`: hww cannot open a
+# local file yet, and claiming a type it would fail on is a lie the packaging can tell silently.
+#
 # `LSMinimumSystemVersion` is the reader-facing half of the floor `.cargo/config.toml` sets with
 # `MACOSX_DEPLOYMENT_TARGET`; the two are one number and move together. Without it macOS lets an
 # older system launch a binary built against a newer SDK and the failure is a crash on a missing
@@ -94,6 +100,20 @@ cat >"$app/Contents/Info.plist" <<EOF
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Web page</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>http</string>
+				<string>https</string>
+			</array>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+		</dict>
+	</array>
 </dict>
 </plist>
 EOF

@@ -110,21 +110,77 @@ pub enum Arrival {
     FromMemory {
         age: Duration,
     },
+    /// hww assembled this page itself: the library, and whatever joins it. **No request was
+    /// made.**
+    ///
+    /// The reason this variant exists rather than a fabricated `status: 200`. A built page's
+    /// `Provenance` carries its address and zeros, and a panel that printed `Server answered 0`
+    /// and `Downloaded 0 bytes` would be reporting a response nobody received; one that printed
+    /// `200` would be worse, because it would be the plausible-looking lie `docs/findings.md`
+    /// names three times. This is what guarantees those zeros are never drawn: [`rows`] emits the
+    /// address and one Route row and stops.
+    Built,
+}
+
+/// Whether the page on screen is in the reader's library.
+///
+/// Named rather than a bare `bool` because [`rows`] already takes one, and two adjacent bools at
+/// a call site is a swap that compiles. See [`crate::reader::archive`] for the doctrine this row
+/// discloses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    Yes,
+    No,
+    /// Keeping is switched off in the settings, so "no" would be true and unhelpful: it would
+    /// read as something the reader could change by pressing a key, and they cannot until the
+    /// switch goes back on.
+    Off,
 }
 
 /// Everything worth saying about how this page arrived, in reading order.
 ///
 /// `rtl` is the document's, not the provenance's: epaint has no bidi, so a Hebrew or Arabic
 /// page is a fact about what was extracted, and it has to survive the caution being closed.
-pub fn rows(prov: &Provenance, counts: &Counts, rtl: bool, arrival: Arrival) -> Vec<Row> {
+pub fn rows(
+    prov: &Provenance,
+    counts: &Counts,
+    rtl: bool,
+    arrival: Arrival,
+    kept: Kept,
+) -> Vec<Row> {
     use Group::*;
     let mut out = vec![Row::new(Address, "Address", prov.final_url.as_str())];
+
+    // A page hww built has no response and no third parties, so those headings are absent
+    // rather than filled with zeros. Everything below this point describes a request, and this
+    // page is the one kind that never made one.
+    if arrival == Arrival::Built {
+        out.push(
+            Row::new(Route, "Built by hww", "no request was made").with_note(
+                "This page is hww's own, assembled on this machine from what you have kept. \
+                 Nothing was fetched to draw it, so there is no response and no third party to \
+                 report.",
+            ),
+        );
+        return out;
+    }
 
     // Only when they differ, which is a rewrite or a redirect. On the great majority of pages
     // this row would just repeat the one above it.
     if prov.requested != prov.final_url {
         out.push(Row::new(Address, "Requested", prov.requested.as_str()));
     }
+    // The archive doctrine's disclosure, and the last Address row: the reader asking how this
+    // page arrived is the reader asking what hww has of it. It sits under Address rather than
+    // under a heading of its own because it is a fact about this address and not about the
+    // request, and a group of one row would draw a heading for a single word.
+    out.push(match kept {
+        Kept::Yes => Row::new(Address, "In your library", "yes")
+            .with_note("hww keeps the address and the title, and nothing else about this page."),
+        Kept::No => Row::new(Address, "In your library", "no"),
+        Kept::Off => Row::new(Address, "In your library", "no")
+            .with_note("hww is set not to keep pages; change Keep pages in Settings."),
+    });
     // The first Route row, and ahead of every Response row, which is the whole disclosure
     // argument: Route answers how the request got here, and this is the row that corrects it.
     // A reader who is about to read `Downloaded 82 kB` has to have been told first that those
@@ -345,7 +401,13 @@ mod tests {
     /// The rows a page always has, so the panel is never empty on a page that loaded.
     #[test]
     fn a_clean_page_still_reports_how_it_arrived() {
-        let rows = rows(&prov(), &Counts::default(), false, Arrival::Fetched);
+        let rows = rows(
+            &prov(),
+            &Counts::default(),
+            false,
+            Arrival::Fetched,
+            Kept::No,
+        );
         for label in [
             "Address",
             "Server answered",
@@ -370,13 +432,98 @@ mod tests {
         }
     }
 
+    /// The whole reason [`Arrival::Built`] exists rather than a fabricated `status: 200`.
+    ///
+    /// A built page's provenance is its address and zeros. Every Response row would be a claim
+    /// about a response nobody received, and the Third parties heading would be a claim about
+    /// hosts nobody contacted. The address and one Route row, and nothing else.
+    #[test]
+    fn a_built_page_reports_no_response_and_no_third_parties() {
+        let p = Provenance::built(Url::parse(crate::reader::archive::LIBRARY).unwrap());
+        let rows = rows(&p, &Counts::default(), false, Arrival::Built, Kept::No);
+        assert_eq!(
+            find(&rows, "Address").map(|r| r.value.as_str()),
+            Some("hww:library")
+        );
+        let built = find(&rows, "Built by hww").expect("the one Route row");
+        assert_eq!(built.group, Group::Route);
+        assert!(
+            built
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("Nothing was fetched")
+        );
+        for label in [
+            "Server answered",
+            "Text encoding",
+            "Downloaded",
+            "Article text",
+            "Cookies discarded",
+            "In your library",
+            "Restored",
+        ] {
+            assert!(
+                find(&rows, label).is_none(),
+                "a built page reported {label}"
+            );
+        }
+        assert!(
+            rows.iter()
+                .all(|r| matches!(r.group, Group::Address | Group::Route))
+        );
+        // And the zeros really are in the provenance, so nothing but this variant is stopping
+        // them from being drawn.
+        assert_eq!(p.status, 0);
+        assert_eq!(p.bytes, 0);
+    }
+
+    /// The archive doctrine's disclosure: whether the page on screen is kept, said where the
+    /// reader asks how it arrived.
+    #[test]
+    fn a_fetched_page_says_whether_it_is_kept() {
+        for (kept, value, has_note) in [
+            (Kept::Yes, "yes", true),
+            (Kept::No, "no", false),
+            (Kept::Off, "no", true),
+        ] {
+            let rows = rows(&prov(), &Counts::default(), false, Arrival::Fetched, kept);
+            let row = find(&rows, "In your library").expect("the disclosure row");
+            assert_eq!(row.group, Group::Address);
+            assert_eq!(row.value, value);
+            assert_eq!(row.note.is_some(), has_note, "{kept:?}");
+        }
+        // The switch being off is a different sentence from merely not having kept this one.
+        let off = rows(
+            &prov(),
+            &Counts::default(),
+            false,
+            Arrival::Fetched,
+            Kept::Off,
+        );
+        assert!(
+            find(&off, "In your library")
+                .unwrap()
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("Settings")
+        );
+    }
+
     /// `Requested` repeats `Address` on nearly every page, so it earns its row only when the
     /// request did not end where it started.
     #[test]
     fn requested_appears_only_when_it_differs_from_the_address() {
         assert!(
             find(
-                &rows(&prov(), &Counts::default(), false, Arrival::Fetched),
+                &rows(
+                    &prov(),
+                    &Counts::default(),
+                    false,
+                    Arrival::Fetched,
+                    Kept::No
+                ),
                 "Requested"
             )
             .is_none()
@@ -384,7 +531,7 @@ mod tests {
 
         let mut p = prov();
         p.final_url = Url::parse("https://example.com/b").unwrap();
-        let rows = rows(&p, &Counts::default(), false, Arrival::Fetched);
+        let rows = rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No);
         assert_eq!(
             find(&rows, "Requested").unwrap().value,
             "https://example.com/a"
@@ -401,7 +548,7 @@ mod tests {
             cookie_attempts: 0,
             referer_requests: 2,
         };
-        let rows = rows(&prov(), &counts, false, Arrival::Fetched);
+        let rows = rows(&prov(), &counts, false, Arrival::Fetched, Kept::No);
         let images = find(&rows, "Images loaded").unwrap();
         assert_eq!(images.value, "3, from 2 hosts");
         assert!(images.note.as_ref().unwrap().contains("cdn.example.net"));
@@ -428,7 +575,7 @@ mod tests {
         };
         assert_eq!(
             find(
-                &rows(&p, &counts, false, Arrival::Fetched),
+                &rows(&p, &counts, false, Arrival::Fetched, Kept::No),
                 "Cookies discarded"
             )
             .unwrap()
@@ -439,7 +586,7 @@ mod tests {
         p.cookie_attempts = 0;
         assert!(
             find(
-                &rows(&p, &Counts::default(), false, Arrival::Fetched),
+                &rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No),
                 "Cookies discarded"
             )
             .is_none()
@@ -458,7 +605,7 @@ mod tests {
         ] {
             let mut p = prov();
             p.truncation = t;
-            let rows = rows(&p, &Counts::default(), false, Arrival::Fetched);
+            let rows = rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No);
             assert!(find(&rows, "Transfer").is_some(), "{t:?} produced no row");
         }
     }
@@ -478,7 +625,7 @@ mod tests {
             cookie_attempts: 1,
             referer_requests: 1,
         };
-        for row in rows(&p, &counts, false, memory()) {
+        for row in rows(&p, &counts, false, memory(), Kept::No) {
             assert!(!row.value.contains('→'), "arrow in {:?}", row.value);
             assert!(!row.label.contains('→'));
             if let Some(n) = &row.note {
@@ -511,7 +658,7 @@ mod tests {
         ];
         // Both arrivals: the restored row is emitted mid-Route and must not break the run.
         for arrival in [Arrival::Fetched, memory()] {
-            let rows = rows(&p, &counts, false, arrival);
+            let rows = rows(&p, &counts, false, arrival, Kept::No);
             let mut last = 0usize;
             for r in &rows {
                 let at = order.iter().position(|g| *g == r.group).unwrap();
@@ -545,7 +692,7 @@ mod tests {
     /// eleven rows of fetch accounting at face value before being told no fetch happened.
     #[test]
     fn a_restored_page_says_so_before_it_reports_the_fetch() {
-        let rows = rows(&prov(), &Counts::default(), false, memory());
+        let rows = rows(&prov(), &Counts::default(), false, memory(), Kept::No);
         let at = rows
             .iter()
             .position(|r| r.label == "Restored")
@@ -563,7 +710,7 @@ mod tests {
     /// a restored page, so "nothing was requested" would be false.
     #[test]
     fn the_restored_note_is_about_the_document_and_not_the_page() {
-        let rows = rows(&prov(), &Counts::default(), false, memory());
+        let rows = rows(&prov(), &Counts::default(), false, memory(), Kept::No);
         let note = find(&rows, "Restored")
             .and_then(|r| r.note.as_deref())
             .expect("the row carries a note");
@@ -573,7 +720,13 @@ mod tests {
 
     #[test]
     fn a_fetched_page_has_no_restored_row() {
-        let rows = rows(&prov(), &Counts::default(), false, Arrival::Fetched);
+        let rows = rows(
+            &prov(),
+            &Counts::default(),
+            false,
+            Arrival::Fetched,
+            Kept::No,
+        );
         assert!(find(&rows, "Restored").is_none());
     }
 
@@ -631,7 +784,7 @@ mod tests {
                 },
             ],
         });
-        let rows = rows(&p, &Counts::default(), false, Arrival::Fetched);
+        let rows = rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No);
         let row = find(&rows, "Site profile").expect("a row");
         assert_eq!(
             row.value,
@@ -650,7 +803,7 @@ mod tests {
     fn a_thin_page_notes_the_extraction_floor_on_article_text() {
         let mut p = prov();
         p.chars = crate::ir::THIN_TEXT - 1;
-        let rows_thin = rows(&p, &Counts::default(), false, Arrival::Fetched);
+        let rows_thin = rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No);
         let thin = find(&rows_thin, "Article text").unwrap();
         assert!(
             thin.note
@@ -661,7 +814,7 @@ mod tests {
         p.chars = crate::ir::THIN_TEXT;
         assert!(
             find(
-                &rows(&p, &Counts::default(), false, Arrival::Fetched),
+                &rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No),
                 "Article text"
             )
             .unwrap()
@@ -675,12 +828,24 @@ mod tests {
     fn an_rtl_page_reports_its_layout() {
         assert!(
             find(
-                &rows(&prov(), &Counts::default(), false, Arrival::Fetched),
+                &rows(
+                    &prov(),
+                    &Counts::default(),
+                    false,
+                    Arrival::Fetched,
+                    Kept::No
+                ),
                 "Layout"
             )
             .is_none()
         );
-        let rows_rtl = rows(&prov(), &Counts::default(), true, Arrival::Fetched);
+        let rows_rtl = rows(
+            &prov(),
+            &Counts::default(),
+            true,
+            Arrival::Fetched,
+            Kept::No,
+        );
         let row = find(&rows_rtl, "Layout").expect("a row");
         assert_eq!(row.value, "right-to-left");
         assert!(row.note.as_deref().is_some_and(|n| n.contains("bidi")));

@@ -43,7 +43,15 @@ use eframe::egui::{self, RichText, Ui};
 pub fn icon(ui: &mut Ui, pal: &Palette, opts: &ReadOpts) -> egui::Response {
     let d = theme::snap(theme::chrome_font(opts).size * 1.35);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::click());
-    let ink = if resp.hovered() { pal.fg } else { pal.dim };
+    // Focus brightens it exactly as hover does — a keyboard is a pointer that cannot
+    // hover — and takes the ring on top, because a letter changing shade is not a mark a
+    // reader can find by looking for it.
+    let ink = if resp.hovered() || resp.has_focus() {
+        pal.fg
+    } else {
+        pal.dim
+    };
+    theme::focus_ring(ui, &resp, pal);
     if ui.is_rect_visible(rect) {
         // The letter is small; the square it is centred in is the click target, and stays the
         // size it was when a circle filled it.

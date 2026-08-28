@@ -51,6 +51,7 @@
 //! another non-window caller needs it.
 
 use crate::fetch::Truncation;
+use crate::reader::pageinfo::Arrival;
 use crate::session::{LoadError, Provenance};
 use std::time::Duration;
 use url::Url;
@@ -134,6 +135,149 @@ pub const URL_BAR_HINT: &str = "Search or type a URL";
 /// stopped being results. `menu::HELP` says the same three; `the_bare_reload_says_the_same_thing_twice`
 /// holds them together.
 pub const RELOADED_BARE: &str = "reloaded bare: no rewrite rule, no site profile, no search shape";
+
+/// The library's masthead, and so also its window title in the outline and the status strip.
+///
+/// "Your", because the whole doctrine of `reader::archive` is that this holds what the reader
+/// named and nothing hww decided to collect. A neutral "Library" would read as a catalogue the
+/// application maintains.
+pub const LIBRARY_TITLE: &str = "Your library";
+
+/// The one line an empty library shows.
+///
+/// A function and not a const, because it names a key and the key is `cfg`-selected: a Mac
+/// reader told to press Ctrl+D is told to press a key nothing binds. Not an error page, either:
+/// see `archive::document` for why an engine that found nothing and a reader who has not saved
+/// anything yet are different situations.
+pub fn library_is_empty() -> String {
+    format!(
+        "Nothing kept yet. {} keeps the page you are reading, and hww never keeps a page you did \
+         not ask it to.",
+        crate::reader::menu::KEEP_PAGE
+    )
+}
+
+/// The history's masthead, and so also its window title and its line in the status strip.
+///
+/// "Your", for the reason [`LIBRARY_TITLE`] is: hww wrote this list, but it is a record of the
+/// reader's own reading and calling it anything else would make it sound like the application's
+/// property.
+pub const HISTORY_TITLE: &str = "Pages you have visited";
+
+/// The one line an empty history shows, which is two different sentences.
+///
+/// An empty list means one of two things, and they are not the same news: nothing has been read
+/// yet, or hww has been told not to write any of it down. A reader who switched recording off
+/// and later opened this page would otherwise be shown a blank list that looks exactly like a
+/// bug. It names the setting rather than a key, because there is no key for the switch.
+pub fn history_is_empty(recording: bool) -> String {
+    if recording {
+        "No pages yet. hww writes down each page it draws for you, and this is where they \
+         appear; you can switch that off in Settings › History."
+            .to_owned()
+    } else {
+        "hww is set not to remember the pages you visit, so this list stays empty. Turn on \
+         Remember pages you visit in Settings › History to start it."
+            .to_owned()
+    }
+}
+
+/// What "forget history" reports. The count, for the reason [`library_forgotten`] gives: a button
+/// whose effect is invisible is a button nobody trusts.
+pub fn history_forgotten(n: usize) -> String {
+    match n {
+        0 => "your history was already empty.".to_owned(),
+        1 => "hww forgot the one page in your history.".to_owned(),
+        n => format!("hww forgot all {n} pages you had visited."),
+    }
+}
+
+/// What the reader is told when a page is kept.
+///
+/// It names the page rather than saying "kept", because `Ctrl+D` is one keystroke away from
+/// `Ctrl+F` and a reader who hit the wrong one deserves to see which page just went in.
+pub fn kept(title: &str) -> String {
+    format!("hww kept {title} in your library; b opens it")
+}
+
+/// The store's answer when the page is already there. Not a failure: the item is in the library,
+/// which is what was wanted.
+///
+/// `ReaderApp::keep_page` pre-empts it, because the menu row is a check mark and a second press
+/// removes rather than repeats. This is `Archive::keep`'s own answer, and the exhaustive arm that
+/// receives it says it in the reader's words rather than inventing a sentence under `ui/`.
+pub const ALREADY_KEPT: &str = "this page is already in your library.";
+
+/// What a key that cannot keep anything says: on the splash, on an error screen, and on hww's own
+/// pages, where the menu row is greyed out instead.
+///
+/// `Ctrl+D` is bound whatever is on screen, and a press that does nothing and says nothing reads
+/// as a broken binding — the same argument as [`IMAGES_ARE_OFF`], one key over.
+pub const NOTHING_TO_KEEP: &str = "there is nothing here for hww to keep.";
+
+/// What the reader is told when a page leaves the library.
+pub const FORGOTTEN: &str = "hww removed this page from your library.";
+
+/// The library is at its cap. It says the number, and it says that nothing was dropped, because
+/// the alternative every cache takes is to evict quietly and this one deliberately does not.
+pub fn library_is_full(cap: usize) -> String {
+    format!(
+        "your library holds {cap} pages, which is all hww keeps; nothing was removed to make room."
+    )
+}
+
+/// The archive could not be written. Rare, and worth saying out loud rather than swallowing:
+/// something hww was going to remember was not written down.
+///
+/// It names neither tenant. One file holds both, the failure is the same failure, and the two
+/// callers are a keypress and a page arriving — a sentence about the library after a navigation
+/// would be a wrong answer to a question nobody asked.
+pub fn archive_not_saved(reason: &str) -> String {
+    format!("hww could not save what it remembers: {reason}")
+}
+
+/// What a forget button says when the file it has just written was one hww could not read.
+///
+/// `library_forgotten(0)` would answer "your library was already empty", which is what hww saw
+/// and not what happened: the file was there, it could not be parsed, and pressing this replaced
+/// it. A count is the wrong sentence about a file whose contents were never known.
+pub const UNREADABLE_FILE_REPLACED: &str =
+    "hww could not read that file when it started; it has now been replaced by what hww holds.";
+
+/// What the settings panel says under the Library and History groups when there is no
+/// configuration directory at all — no `HWW_CONFIG_DIR`, no `HOME`, no `XDG_CONFIG_HOME`.
+///
+/// The place the file's path would otherwise be printed. A group that named no file at all
+/// would leave two switches promising to remember things and no surface saying where, or that
+/// nothing is being written; `archive::save` refuses in that state and says so on the keypress,
+/// and this is the standing half of the same disclosure.
+pub const NO_ARCHIVE_PATH: &str = "Not saved: hww has no configuration directory to write to.";
+
+/// A keep was asked for on a page whose address is longer than `archive::MAX_URL`.
+///
+/// Said rather than swallowed, for [`KEEPING_IS_OFF`]'s reason: the key is bound, the reader
+/// pressed it, and a press that did nothing and said nothing reads as a broken binding. It names
+/// the address as the thing that was refused, because nothing about the page is wrong and
+/// reaching it by a shorter link would work.
+pub const ADDRESS_TOO_LONG: &str =
+    "that page's address is too long for hww to write down; it was not kept.";
+
+/// A keep was asked for while keeping is switched off. The key is bound whatever the setting
+/// says, so a press that did nothing and said nothing would read as a broken binding — the same
+/// argument as [`IMAGES_ARE_OFF`], one setting over.
+pub const KEEPING_IS_OFF: &str =
+    "hww is set not to keep pages; change Keep pages in Settings › Library.";
+
+/// What "forget everything" reports. The count, because a button whose effect is invisible is a
+/// button nobody trusts, and an empty library after it looks identical to one that was empty
+/// before.
+pub fn library_forgotten(n: usize) -> String {
+    match n {
+        0 => "your library was already empty.".to_owned(),
+        1 => "hww forgot the one page in your library.".to_owned(),
+        n => format!("hww forgot all {n} pages in your library."),
+    }
+}
 
 /// How long a transient status stays up: "Copied URL", "loading 2 images from …", "no link
 /// focused". The Material range is four to ten seconds; six, because the one message in the set
@@ -267,8 +411,19 @@ pub fn rewrite(prov: &Provenance) -> Option<Notice> {
 /// otherwise mis-read, which is what [`Severity::Caution`] is for. They were a dim fragment at
 /// the right-hand end of a truncated strip row and a twelve-second flash respectively, so the
 /// first was often not drawn at all and the second could not be recalled once it faded.
-pub fn about_page(prov: &Provenance, text_len: usize) -> Vec<Notice> {
+pub fn about_page(prov: &Provenance, text_len: usize, arrival: Arrival) -> Vec<Notice> {
     let mut out = Vec::new();
+    // A page hww built has nothing to be cautioned about: no rule chose it, no body was cut, no
+    // server answered, and its length is whatever the reader has kept. Without this, a two-item
+    // library trips the thin-extraction caution and hww tells the reader their own saved list
+    // "may need JavaScript to show its content".
+    //
+    // Passed in rather than left to `app.rs` to skip the call, for the reason `loading` states
+    // outright: the caller is `app.rs`, the fast CI job never compiles egui, and a decision made
+    // there is a decision no test reads.
+    if arrival == Arrival::Built {
+        return out;
+    }
     if prov.rule_appears_dead {
         // Not an error: the fetch succeeded. But it succeeded somewhere else, and no rewrite
         // is ever retried, so this is the whole early-warning system.
@@ -585,6 +740,12 @@ pub fn elapsed_fraction(elapsed: Duration) -> f32 {
 ///
 /// A wording decision, so it lives with the other wording decisions rather than in `ui/`.
 pub fn host_and_path(url: &Url) -> String {
+    // hww's own views (`hww:library`) have no authority component, so there is no host to
+    // shorten and the path is a bare word. Shortening one anyway spells `hwwlibrary`, which is
+    // not an address anybody typed; the whole thing is already short, so say it as written.
+    if url.cannot_be_a_base() {
+        return url.as_str().to_owned();
+    }
     let host = url.host_str().unwrap_or(url.scheme());
     let path = url.path();
     if path == "/" {
@@ -819,7 +980,7 @@ mod tests {
         let mut p = dead_rule();
         p.status = 404;
         p.truncation = Truncation::AtCap(5_000_000);
-        let notices = about_page(&p, 10);
+        let notices = about_page(&p, 10, Arrival::Fetched);
         assert!(
             notices[0].body.starts_with("alt.example.net "),
             "{}",
@@ -839,7 +1000,7 @@ mod tests {
         for t in every_truncation() {
             let mut p = page(200);
             p.truncation = t;
-            for n in about_page(&p, 9_000) {
+            for n in about_page(&p, 9_000, Arrival::Fetched) {
                 names_hww_or_a_host(&n.body);
             }
         }
@@ -887,14 +1048,82 @@ mod tests {
     /// The column is free on the pages that are fine, which is nearly all of them.
     #[test]
     fn a_healthy_page_says_nothing() {
-        assert!(about_page(&page(200), 5_000).is_empty());
+        assert!(about_page(&page(200), 5_000, Arrival::Fetched).is_empty());
+    }
+
+    /// A built page has nothing to be cautioned about, and the thin-text caution is the one that
+    /// would otherwise fire: a library of two items is well under `THIN_TEXT`, and hww would tell
+    /// the reader their own saved list may need JavaScript.
+    #[test]
+    fn a_built_page_draws_no_bars_least_of_all_the_thin_one() {
+        let p = Provenance::built(url(crate::reader::archive::LIBRARY));
+        assert!(about_page(&p, 0, Arrival::Built).is_empty());
+        assert!(about_page(&p, THIN_TEXT - 1, Arrival::Built).is_empty());
+        // The same provenance read as a fetch would say three things, which is the measure of
+        // what the variant is suppressing.
+        assert!(!about_page(&p, 0, Arrival::Fetched).is_empty());
+        // And a built page produces no rewrite bar either, without any change there: it was
+        // never rewritten.
+        assert!(rewrite(&p).is_none());
+    }
+
+    /// An empty history says which of the two things it means: nothing read yet, or nothing
+    /// being written down. A blank list that could mean either is indistinguishable from a bug,
+    /// and this is the one page in hww whose emptiness is a setting away.
+    #[test]
+    fn an_empty_history_says_whether_it_is_off() {
+        assert!(!HISTORY_TITLE.is_empty());
+        let on = history_is_empty(true);
+        let off = history_is_empty(false);
+        assert_ne!(on, off);
+        assert!(off.contains("not to remember"), "{off}");
+        for s in [&on, &off] {
+            assert!(s.contains("Settings"), "the switch is named: {s}");
+        }
+    }
+
+    /// The library's own wording: a title for the masthead, and an empty state that names the
+    /// key that fills it, spelled for the platform the reader is on.
+    #[test]
+    fn the_library_says_what_it_is_and_how_to_fill_it() {
+        assert!(!LIBRARY_TITLE.is_empty());
+        let empty = library_is_empty();
+        assert!(empty.contains(crate::reader::menu::KEEP_PAGE), "{empty}");
+        assert!(
+            empty.contains("never keeps"),
+            "the empty library states the doctrine, not just the key: {empty}"
+        );
+        // Every string this module can put on screen about the library names hww or the reader,
+        // never a passive.
+        for s in [
+            kept("A page"),
+            ALREADY_KEPT.to_owned(),
+            NOTHING_TO_KEEP.to_owned(),
+            FORGOTTEN.to_owned(),
+            library_is_full(crate::reader::archive::MAX_ITEMS),
+            KEEPING_IS_OFF.to_owned(),
+            library_forgotten(0),
+            library_forgotten(1),
+            library_forgotten(4),
+            history_is_empty(true),
+            history_is_empty(false),
+            history_forgotten(0),
+            history_forgotten(1),
+            history_forgotten(4),
+        ] {
+            assert!(!s.is_empty());
+            assert!(
+                s.contains("hww") || s.contains("your"),
+                "a remark with no actor: {s}"
+            );
+        }
     }
 
     /// A readable 404 is not a failure. Many paywalls answer 403 with the article intact, and
     /// replacing that with an error screen would throw away a page the reader can read.
     #[test]
     fn a_readable_404_is_a_caution_not_a_failure() {
-        let notices = about_page(&page(404), 5_000);
+        let notices = about_page(&page(404), 5_000, Arrival::Fetched);
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].severity, Severity::Caution);
         assert!(
@@ -909,15 +1138,18 @@ mod tests {
     /// where the warning starts.
     #[test]
     fn the_thin_extraction_threshold_matches_the_extractor() {
-        assert_eq!(about_page(&page(200), THIN_TEXT).len(), 0);
-        assert_eq!(about_page(&page(200), THIN_TEXT - 1).len(), 1);
+        assert_eq!(about_page(&page(200), THIN_TEXT, Arrival::Fetched).len(), 0);
+        assert_eq!(
+            about_page(&page(200), THIN_TEXT - 1, Arrival::Fetched).len(),
+            1
+        );
     }
 
     /// Loudest first: the remark most likely to change how the page is read sits nearest the
     /// top, where it is read before the prose it is about.
     #[test]
     fn a_page_that_is_both_broken_and_empty_leads_with_the_status() {
-        let notices = about_page(&page(500), 10);
+        let notices = about_page(&page(500), 10, Arrival::Fetched);
         assert_eq!(notices.len(), 2);
         assert!(notices[0].body.contains("500"));
         assert!(notices[1].body.contains("JavaScript"));
@@ -930,7 +1162,7 @@ mod tests {
     /// at, and no way to ask.
     #[test]
     fn a_dead_rule_is_a_bar_naming_both_hosts() {
-        let notices = about_page(&dead_rule(), 9_000);
+        let notices = about_page(&dead_rule(), 9_000, Arrival::Fetched);
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].severity, Severity::Caution);
         assert!(
@@ -953,12 +1185,12 @@ mod tests {
     fn every_truncation_is_a_bar_and_a_whole_body_is_not() {
         let mut clean = page(200);
         clean.truncation = Truncation::Complete;
-        assert!(about_page(&clean, 9_000).is_empty());
+        assert!(about_page(&clean, 9_000, Arrival::Fetched).is_empty());
 
         for t in every_truncation() {
             let mut p = page(200);
             p.truncation = t;
-            let notices = about_page(&p, 9_000);
+            let notices = about_page(&p, 9_000, Arrival::Fetched);
             assert_eq!(notices.len(), 1, "{t:?} produced {} bars", notices.len());
             assert_eq!(notices[0].severity, Severity::Caution);
             assert!(!notices[0].body.is_empty());
@@ -975,8 +1207,16 @@ mod tests {
         let mut hedged = page(200);
         hedged.truncation = Truncation::MaybeAtCap(5_000_000);
 
-        assert!(!about_page(&certain, 9_000)[0].body.contains("may"));
-        assert!(about_page(&hedged, 9_000)[0].body.contains("may"));
+        assert!(
+            !about_page(&certain, 9_000, Arrival::Fetched)[0]
+                .body
+                .contains("may")
+        );
+        assert!(
+            about_page(&hedged, 9_000, Arrival::Fetched)[0]
+                .body
+                .contains("may")
+        );
     }
 
     /// Loudest first, across all four. A dead rule outranks everything because it is the only
@@ -986,7 +1226,7 @@ mod tests {
         let mut p = dead_rule();
         p.status = 500;
         p.truncation = Truncation::Incomplete(812_345);
-        let notices = about_page(&p, 10);
+        let notices = about_page(&p, 10, Arrival::Fetched);
         assert_eq!(notices.len(), 4);
         assert!(notices[0].body.contains("appears dead"));
         assert!(notices[1].body.contains("incomplete"));
@@ -995,6 +1235,15 @@ mod tests {
     }
 
     /// Moved out of `ui/app.rs`, where it had no test.
+    #[test]
+    fn a_view_with_no_host_is_named_as_written() {
+        assert_eq!(
+            host_and_path(&url(crate::reader::archive::LIBRARY)),
+            "hww:library",
+            "shortening an authority-less address spells hwwlibrary"
+        );
+    }
+
     #[test]
     fn host_and_path_drops_a_bare_slash() {
         assert_eq!(host_and_path(&url("https://example.com/")), "example.com");

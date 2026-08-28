@@ -41,6 +41,8 @@ use eframe::egui::{self, RichText, Ui};
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Enable {
     pub page: bool,
+    /// A page that came from a request. See [`Needs::FetchedPage`].
+    pub fetched_page: bool,
     pub focused_link: bool,
     pub thread: bool,
     pub back: bool,
@@ -52,6 +54,7 @@ impl Enable {
         match needs {
             Needs::Nothing => true,
             Needs::Page => self.page,
+            Needs::FetchedPage => self.fetched_page,
             Needs::FocusedLink => self.focused_link,
             Needs::Thread => self.thread,
             Needs::Back => self.back,
@@ -63,6 +66,8 @@ impl Enable {
 /// The live state a checked item reflects.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Checks {
+    /// The page on screen is in the reader's library.
+    pub kept: bool,
     pub link_addresses: bool,
     pub outline: bool,
     pub page_info: bool,
@@ -72,6 +77,7 @@ pub struct Checks {
 impl Checks {
     fn is_on(self, what: Checked) -> bool {
         match what {
+            Checked::Kept => self.kept,
             Checked::LinkAddresses => self.link_addresses,
             Checked::Outline => self.outline,
             Checked::PageInfo => self.page_info,

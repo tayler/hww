@@ -205,6 +205,7 @@ pub fn bar(ui: &mut Ui, pal: &Palette, opts: &ReadOpts, notice: &Notice, index: 
                     let close = ui
                         .add(egui::Button::new(RichText::new("×").color(ink.aside)).frame(false))
                         .on_hover_text("Dismiss");
+                    theme::focus_ring(ui, &close, pal);
                     if close.clicked() {
                         event.dismissed = true;
                     }
