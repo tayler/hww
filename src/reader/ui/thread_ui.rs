@@ -168,6 +168,7 @@ fn header(
                 ui.spacing_mut().item_spacing.x = theme::snap(ctx.opts.base_size_pt * 0.35);
                 if !node.children.is_empty() {
                     let resp = disclosure(ui, collapsed, ctx.opts.base_size_pt, pal.dim);
+                    super::follow_focus(&resp);
                     if resp.clicked() {
                         ctx.act(Action::ToggleComment(node.key.clone()));
                     }

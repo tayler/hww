@@ -2120,13 +2120,20 @@ impl eframe::App for ReaderApp {
             self.tab_frames.saturating_sub(1)
         };
 
-        // Order matters: the strip is laid out first so it keeps its line at the bottom no
-        // matter what the rest of the chrome does. It is the one thing that never hides.
-        self.status_strip(ui, &pal);
-        // Above the URL bar, so the window reads top to bottom as menus, address, page. A top
-        // panel takes its place from the order it is added in, so this line's position is the
-        // layout.
+        // Order matters twice over, and the two orders are the same list read for different
+        // reasons. **Layout**: a panel takes its space from the order it is added in, so this
+        // sequence is where each bar sits — menus, address, find, remarks, page, and the strip
+        // holding the bottom line against everything variable above it. **Focus**: egui's Tab
+        // cycle is registration order within the frame, with no way to sort it afterwards, so
+        // whatever is drawn first is what the first Tab lands on.
+        //
+        // The menu bar therefore comes first: `File` is where a reader expects Tab to start,
+        // and it used to take five presses to reach because the strip's five pointer controls
+        // were drawn ahead of it. The strip still precedes every bar whose height the page can
+        // change, which is what "never hides" was about; a menu bar is one row and hideable and
+        // cannot squeeze it.
         self.menu_bar(ui, &pal);
+        self.status_strip(ui, &pal);
         self.url_bar(ui, &pal);
         self.find_bar(ui, &pal);
         // Under the bars and above the page, docked: the one place a remark about the page
@@ -2423,35 +2430,38 @@ impl ReaderApp {
                     // triangles: `◀`/`▶` are in none of the text faces `ui::fonts` embeds and
                     // would be drawn from the emoji face, in a different design from every
                     // label beside them; the arrows are in all of them.
-                    if ui
+                    // Every control on this strip is frameless, so every one of them takes
+                    // its focus mark from `theme::focus_ring` rather than from egui's
+                    // `active` visuals, which a frame is what paints.
+                    let back = ui
                         .add_enabled(
                             self.history.can_go_back(),
                             egui::Button::new("←").frame(false),
                         )
-                        .on_hover_text(menu::TIP_BACK)
-                        .clicked()
-                    {
+                        .on_hover_text(menu::TIP_BACK);
+                    theme::focus_ring(ui, &back, pal);
+                    if back.clicked() {
                         action = Some(StripAction::Back);
                     }
-                    if ui
+                    let forward = ui
                         .add_enabled(
                             self.history.can_go_forward(),
                             egui::Button::new("→").frame(false),
                         )
-                        .on_hover_text(menu::TIP_FORWARD)
-                        .clicked()
-                    {
+                        .on_hover_text(menu::TIP_FORWARD);
+                    theme::focus_ring(ui, &forward, pal);
+                    if forward.clicked() {
                         action = Some(StripAction::Forward);
                     }
                     ui.separator();
 
                     // The URL itself summons the URL bar: the pointer's route to typing one.
                     let shown = self.status_url();
-                    if ui
+                    let address = ui
                         .add(egui::Button::new(RichText::new(shown).color(pal.fg)).frame(false))
-                        .on_hover_text(menu::TIP_URL_BAR)
-                        .clicked()
-                    {
+                        .on_hover_text(menu::TIP_URL_BAR);
+                    theme::focus_ring(ui, &address, pal);
+                    if address.clicked() {
                         action = Some(StripAction::OpenUrlBar);
                     }
 
@@ -2470,14 +2480,14 @@ impl ReaderApp {
                         }
                         ui.separator();
                         // The one hint the strip keeps: where the rest of the keys are.
-                        if ui
+                        let keys = ui
                             .add(
                                 egui::Button::new(RichText::new("? keys").color(pal.dim))
                                     .frame(false),
                             )
-                            .on_hover_text("Keyboard shortcuts (?)")
-                            .clicked()
-                        {
+                            .on_hover_text("Keyboard shortcuts (?)");
+                        theme::focus_ring(ui, &keys, pal);
+                        if keys.clicked() {
                             action = Some(StripAction::ToggleHelp);
                         }
                     });
@@ -2810,13 +2820,12 @@ impl ReaderApp {
                                 ui.horizontal(|ui| {
                                     ui.add_space(f32::from(e.level - 1) * 12.0);
                                     let color = if is_current { pal.strong } else { pal.fg };
-                                    if ui
-                                        .add(
-                                            egui::Button::new(RichText::new(&e.text).color(color))
-                                                .frame(false),
-                                        )
-                                        .clicked()
-                                    {
+                                    let row = ui.add(
+                                        egui::Button::new(RichText::new(&e.text).color(color))
+                                            .frame(false),
+                                    );
+                                    theme::focus_ring(ui, &row, pal);
+                                    if row.clicked() {
                                         jump = Some(e.block);
                                     }
                                 });

@@ -497,6 +497,7 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
                             // above still says the picture was there and why it is not shown.
                             if *retryable {
                                 let resp = ui.small_button("retry");
+                                super::follow_focus(&resp);
                                 act = resp.clicked();
                                 focused = resp.has_focus();
                             }
@@ -518,6 +519,8 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
                             )
                             .frame(false),
                         );
+                        super::follow_focus(&resp);
+                        theme::focus_ring(ui, &resp, &pal);
                         act = resp.clicked();
                         focused = resp.has_focus();
                     }
@@ -564,6 +567,7 @@ fn show_ready(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     );
     if partial.is_some() {
         let resp = ui.small_button("retry");
+        super::follow_focus(&resp);
         if resp.has_focus() {
             ctx.focus_image = Some(img.src.clone());
         }
@@ -618,6 +622,8 @@ pub fn load_control(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     ctx.note_unloaded_image(ui.next_widget_position().y, &img.src);
     let resp =
         ui.add(egui::Button::new(RichText::new("[image]").color(pal.dim).small()).frame(false));
+    super::follow_focus(&resp);
+    theme::focus_ring(ui, &resp, &pal);
     if resp.has_focus() {
         ctx.focus_image = Some(img.src.clone());
     }
@@ -661,6 +667,8 @@ pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>)
             let resp = ui.add(
                 egui::Button::new(RichText::new(format!("[{alt}]")).color(pal.dim)).frame(false),
             );
+            super::follow_focus(&resp);
+            theme::focus_ring(ui, &resp, &pal);
             if resp.has_focus() {
                 ctx.focus_image = Some(img.src.clone());
             }

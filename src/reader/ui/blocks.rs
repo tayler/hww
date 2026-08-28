@@ -335,6 +335,7 @@ fn embed_ui(ui: &mut Ui, kind: ir::EmbedKind, url: &str, ctx: &mut RenderCtx<'_>
                 ui.label(RichText::new(label).color(pal.fg));
                 ui.label(RichText::new("(not loaded)").color(pal.dim).small());
                 let resp = ui.small_button("copy URL");
+                super::follow_focus(&resp);
                 if resp.has_focus() {
                     ctx.focus_other = true;
                 }

@@ -19,8 +19,16 @@
 //!   and Ctrl+C. Splitting a paragraph into five labels costs nothing here.
 //!
 //! What it buys is that every link is a real `Response`: hover cursor, hover-href in the
-//! status strip, `clicked()` and `secondary_clicked()` for free, a stable `Id` to focus for
-//! Tab-cycling, and correct hit regions on a link that wraps across rows.
+//! status strip, `clicked()` and `secondary_clicked()` for free, and correct hit regions on a
+//! link that wraps across rows.
+//!
+//! The price is paid in [`link_ui`], and it is the row rects. One rect per row is also one
+//! *widget id* per row, and `Sense::click()` in egui 0.36 is `CLICK | FOCUSABLE`, so a link
+//! that wrapped used to be one tab stop per row: only the first carried the href, and the
+//! others were blank stops that painted no ring and named nothing to a screen reader. The rows
+//! now sense clicks without being focusable and a widget of hww's own, over all of them,
+//! carries the focus. Keyboard reach is a property of the link, not of how the column happened
+//! to break it.
 //!
 //! The one genuine advantage of a single galley is guaranteed identical baselines, and the
 //! mitigation is one line: every section of every segment carries the same
@@ -316,15 +324,9 @@ fn link_ui(
     // runs the full width of the widest row, out past the link's own words and under whatever
     // text follows them on the last row. Everything after this call is what `Label::ui` does,
     // less the elision tooltip (nothing here truncates) and the style-driven text colour (every
-    // section sets its own, so the fallback is never reached).
-    let (galley_pos, galley, resp) = Label::new(job)
-        .wrap()
-        .sense(Sense::click())
-        .layout_in_ui(ui);
-    // A link, not a label: this is the whole of what a screen reader is told about it.
-    resp.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Link, ui.is_enabled(), galley.text())
-    });
+    // section sets its own, so the fallback is never reached). `Sense::CLICK` rather than
+    // `Sense::click()`, which is `CLICK | FOCUSABLE`: keyboard focus is the next widget's job.
+    let (galley_pos, galley, resp) = Label::new(job).wrap().sense(Sense::CLICK).layout_in_ui(ui);
     if ui.is_rect_visible(resp.rect) {
         // `Stroke::NONE`, because egui's own focus underline is not the mark this reader uses:
         // the focus ring below is.
@@ -346,10 +348,32 @@ fn link_ui(
         }
     }
 
-    // `Sense::click()` alone does not put a widget in egui's tab order; focusability is a
-    // separate property. Only links ask for it; if plain text did, Tab would walk every label
-    // on the page.
-    ui.memory_mut(|m| m.interested_in_focus(resp.id, ui.layer_id()));
+    // One tab stop for the link, over all of it, and not one of the rects above.
+    //
+    // The wrapped branch of `layout_in_ui` allocates a rect, and therefore a widget id, per
+    // *row*, and `Sense::click()` is `CLICK | FOCUSABLE`. So every row of a headline that wraps
+    // was its own tab stop, and `resp.id` is the first row's, which left the rest carrying no
+    // href, painting no ring, and naming nothing to a screen reader. Registering `resp.id`
+    // again after them closed the pair into a loop: Tab left the first row, egui gave focus to
+    // the second, and the re-registration handed it straight back. A page whose headlines wrap,
+    // which is what a library, a history, and every front page are, trapped Tab on its first
+    // link.
+    //
+    // So the rows sense clicks without being focusable, and one focusable, non-interactive
+    // widget over the union of them carries the focus, the ring, and the label a screen reader
+    // reads. Non-interactive because `hit_test` returns a click or a drag only to a widget that
+    // senses one, so this cannot take the click off the rows underneath it.
+    let focus = ui.interact(
+        resp.rect,
+        resp.id.with("focus"),
+        Sense::focusable_noninteractive(),
+    );
+    // A link, not a label: this is the whole of what a screen reader is told about it, and it
+    // belongs on the widget that takes the focus.
+    focus.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Link, ui.is_enabled(), galley.text())
+    });
+    super::follow_focus(&focus);
 
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -369,16 +393,12 @@ fn link_ui(
             );
         }
     }
-    if resp.has_focus() {
+    // The ring is `theme::focus_ring`, which the chrome's frameless controls draw as well:
+    // one mark, learned once, wherever Tab can land. `focus` and not `resp`, and they share a
+    // rect, so what is ringed is still the union of the link's rows.
+    theme::focus_ring(ui, &focus, &ctx.pal);
+    if focus.has_focus() {
         ctx.focus_href = Some(href.to_owned());
-        // Two points wide (WCAG 2.4.13's perimeter), two out from the words, and rounded
-        // with the one radius every control takes.
-        ui.painter().rect_stroke(
-            resp.rect.expand(2.0),
-            theme::RADIUS,
-            Stroke::new(2.0, ctx.pal.link),
-            egui::StrokeKind::Outside,
-        );
     }
     if resp.clicked() {
         ctx.act(Action::Follow(href.to_owned()));
@@ -431,4 +451,145 @@ pub fn image_host(img: &ir::Image, base: &url::Url) -> String {
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned))
         .unwrap_or_else(|| "an unknown host".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reader::opts::{ReadOpts, Theme};
+    use crate::reader::ui::{RenderCtx, fonts, images::ImageStore};
+    use std::collections::HashSet;
+
+    /// One link, set as a headline in a narrow column so it wraps.
+    fn wrapping_links(n: usize) -> Vec<Run> {
+        (0..n)
+            .flat_map(|i| {
+                [
+                    Run::Link {
+                        href: format!("https://example.com/{i}"),
+                        runs: vec![Run::Text {
+                            text: format!(
+                                "Headline {i}, long enough that it has to wrap across more \
+                                 than one row of the reading column"
+                            ),
+                            style: Style::default(),
+                        }],
+                    },
+                    Run::Text {
+                        text: " some prose between the links ".to_owned(),
+                        style: Style::default(),
+                    },
+                ]
+            })
+            .collect()
+    }
+
+    /// Where Tab is after each press, named by the link it landed on.
+    ///
+    /// This test needs an `egui::Context` and no display: it runs the real [`runs_ui`] through
+    /// `Context::run_ui` and reads back what the frame reported. It belongs under `ui/` because
+    /// the thing it pins is egui's, and its failure is invisible to everything else — the tab
+    /// order is not a value any function returns, `hww-shot` photographs one frame and cannot
+    /// say a key moved anything, and the bug it was written for looked, in a screenshot, like a
+    /// perfectly ordinary focus ring.
+    fn tab_stops(runs: &[Run], presses: usize) -> Vec<Option<String>> {
+        let ctx = egui::Context::default();
+        fonts::install(&ctx);
+        let opts = ReadOpts::default();
+        let collapsed = HashSet::new();
+        let base = url::Url::parse("https://example.com/").unwrap();
+        let pal = crate::reader::ui::theme::palette(Theme::Light, false);
+        let mut landed = Vec::new();
+        // Two passes per press, and the answer is taken from the second. egui moves focus
+        // among the widgets of the frame the key arrived in, but a Tab from the *last*
+        // focusable widget finds nothing to give focus to and carries the request into the
+        // next frame, where it wraps to the first. That second frame is why `ReaderApp` holds
+        // its whole-page layout for two.
+        for step in 0..presses * 2 {
+            let tab = step % 2 == 0;
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            if tab {
+                for pressed in [true, false] {
+                    input.events.push(egui::Event::Key {
+                        key: egui::Key::Tab,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+            }
+            let mut images = ImageStore::default();
+            let mut rctx = RenderCtx::new(pal, &opts, base.clone(), &mut images, &collapsed);
+            let mut out = ctx.run_ui(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let set = Setting::body(&opts, &pal);
+                        runs_ui(ui, runs, &set, &mut rctx);
+                    });
+                });
+            });
+            // The test never uploads them, and epaint panics on a delta dropped unhandled.
+            out.textures_delta.clear();
+            if !tab {
+                landed.push(rctx.focus_href.clone());
+            }
+        }
+        landed
+    }
+
+    /// A link that wraps is one tab stop, not one per row.
+    ///
+    /// `Label::layout_in_ui` allocates a rect, and therefore a widget id, for every row a
+    /// wrapped label takes, and `Sense::click()` is `CLICK | FOCUSABLE`. Every row of a
+    /// headline used to be its own tab stop, and re-registering the first row after the last
+    /// closed the pair into a loop: Tab moved from row one to row two and straight back, and a
+    /// page of wrapped headlines — a library, a history, any front page — trapped the reader on
+    /// its first link.
+    #[test]
+    fn tab_visits_each_link_once_and_in_order() {
+        let runs = wrapping_links(4);
+        let visited = tab_stops(&runs, 4);
+        let expected: Vec<Option<String>> = (0..4)
+            .map(|i| Some(format!("https://example.com/{i}")))
+            .collect();
+        assert_eq!(visited, expected);
+    }
+
+    /// The prose between the links is not a tab stop. A `Label` that senses only hover is not
+    /// focusable, which is what keeps Tab to the things it can act on.
+    #[test]
+    fn tab_skips_plain_text() {
+        let runs = vec![
+            Run::Text {
+                text: "a paragraph of prose before the link ".to_owned(),
+                style: Style::default(),
+            },
+            Run::Link {
+                href: "https://example.com/only".to_owned(),
+                runs: vec![Run::Text {
+                    text: "the only link".to_owned(),
+                    style: Style::default(),
+                }],
+            },
+            Run::Text {
+                text: " and a paragraph of prose after it".to_owned(),
+                style: Style::default(),
+            },
+        ];
+        assert_eq!(
+            tab_stops(&runs, 2),
+            vec![
+                Some("https://example.com/only".to_owned()),
+                Some("https://example.com/only".to_owned()),
+            ],
+            "one focusable widget on the page: Tab leaves it and wraps back to it"
+        );
+    }
 }
