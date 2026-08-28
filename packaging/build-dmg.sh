@@ -30,7 +30,7 @@ version=${HWW_DMG_VERSION:-"${cargo_version}-git${revision}.${short_sha}"}
 short_version=$cargo_version
 build_version=$revision
 
-for tool in iconutil codesign hdiutil lipo; do
+for tool in iconutil codesign hdiutil lipo python3; do
     if ! command -v "$tool" >/dev/null; then
         printf '%s is not on PATH; a macOS bundle cannot be built without it\n' "$tool" >&2
         exit 1
@@ -53,7 +53,10 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 chmod 0755 "$stage"
 
-app=$stage/hww.app
+# Named once. The window layout below records icon positions against this name, and a name it
+# does not find is a bundle Finder places wherever it likes.
+bundle=hww.app
+app=$stage/$bundle
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
 cp "$binary" "$app/Contents/MacOS/hww"
@@ -147,14 +150,22 @@ codesign --force --sign - --timestamp=none "$app"
 
 ln -s /Applications "$stage/Applications"
 
+# Last thing into the folder, because it names what is already in it. Without this the volume
+# opens at whatever size and view Finder last used for an unknown folder, with the sidebar and
+# toolbar showing. See packaging/build-DS_Store.py for the records and for why Finder is not
+# asked to lay the window out itself.
+python3 packaging/build-DS_Store.py "$stage" "$bundle"
+chmod 0644 "$stage/.DS_Store"
+
 mkdir -p "$out_dir"
 dmg="$out_dir/hww-${version}-aarch64-macos.dmg"
 dmg_abs="$(cd "$out_dir" && pwd)/hww-${version}-aarch64-macos.dmg"
 rm -f "$dmg_abs"
 
-# `-srcfolder` needs no attach step and no window layout, so there is no background image or
-# icon placement to maintain. Unlike `zip`, it copies `Contents/_CodeSignature/CodeResources`
-# intact, so the signature survives the trip.
+# `-srcfolder` still needs no attach step: the window layout is a file staged into the folder
+# above, not Finder state that has to be applied to a mounted volume, so there is no attach,
+# arrange, detach, convert dance here and no GUI session in the requirements. Unlike `zip`, it
+# copies `Contents/_CodeSignature/CodeResources` intact, so the signature survives the trip.
 #
 # The volume name is bare `hww` rather than `hww $version`: HFS+ caps a volume name at 27
 # characters and a development version already spends 24 of them. The version is in the filename.
