@@ -289,11 +289,19 @@ pub struct ReaderApp {
     archive: Archive,
     /// Whether the last automatic write of the archive failed.
     ///
-    /// Only [`ReaderApp::record_visit`] reads it, and the noise is why: a keep is a keypress and
-    /// says so every time it cannot be written, but a visit is written on every navigation, and
-    /// a config directory that cannot be written would otherwise put the same sentence over
+    /// Only [`ReaderApp::save_visits`] reads it, and the noise is why: a keep is a keypress and
+    /// says so every time it cannot be written, but a visit is written behind every navigation,
+    /// and a config directory that cannot be written would otherwise put the same sentence over
     /// every page the reader opens until they learn to ignore toasts.
     archive_write_failed: bool,
+    /// When the oldest visit that is not yet in the file was recorded, or `None` when the file
+    /// is up to date.
+    ///
+    /// The instant of the *first* unwritten visit rather than the latest, which is what bounds
+    /// the delay in both directions: a reader clicking steadily still gets a write every
+    /// `SAVE_DEBOUNCE`, and a single navigation gets one that lands after the page is up rather
+    /// than on the frame it appears. See [`ReaderApp::record_visit`].
+    visits_dirty: Option<Instant>,
     /// Whether the page on screen is in the library.
     ///
     /// Cached rather than asked, and the cost is why: `Archive::holds` parses every stored
@@ -577,6 +585,7 @@ impl ReaderApp {
             history: History::new(),
             archive,
             archive_write_failed: false,
+            visits_dirty: None,
             shown_kept: false,
             pages: PageCache::new(),
             page: Page::Idle,
@@ -830,6 +839,7 @@ impl ReaderApp {
             // it gets the reader's words rather than a sentence invented here.
             Kept::Already => self.flash(notice::ALREADY_KEPT.to_owned()),
             Kept::Full => self.flash(notice::library_is_full(archive::MAX_ITEMS)),
+            Kept::TooLong => self.flash(notice::ADDRESS_TOO_LONG.to_owned()),
             Kept::Off => self.flash(notice::KEEPING_IS_OFF.to_owned()),
         }
     }
@@ -843,6 +853,10 @@ impl ReaderApp {
         // Before the write and whatever it answers: the store changed, and the cached answer is
         // about the store rather than about the file.
         self.refresh_shown_kept();
+        // One file, so this write carries the pending visits too, whether or not it lands: a
+        // failure here is the same failure they would have met, and leaving the mark set would
+        // schedule a second attempt one debounce later for no new reason.
+        self.visits_dirty = None;
         match archive::save(&self.archive) {
             Ok(()) => true,
             Err(e) => {
@@ -852,29 +866,46 @@ impl ReaderApp {
         }
     }
 
-    /// Write down a page hww has just drawn.
+    /// Write down a page hww has just drawn — in the store now, in the file shortly.
     ///
     /// The switch is answered by `Archive::visit` rather than here, in the door's own name; what
-    /// is decided here is that the file is written through immediately rather than debounced the
-    /// way `settings` is. There is no burst to absorb — a navigation is a fetch apart from the
-    /// next one — and a reader who shuts the laptop on a page they will want to find again
-    /// should find it.
+    /// is decided here is *when* the file is written, and the answer is `settings`' answer.
+    ///
+    /// This used to write through on the spot, on the argument that a navigation is a fetch
+    /// apart from the next one so there was no burst to absorb. That is true of how often the
+    /// write happens and says nothing about what it costs: `settings::write_atomically` fsyncs
+    /// the file and then the directory, the whole archive is re-serialized every time, and at
+    /// `archive::MAX_VISITS` that is around a megabyte. Called from [`ReaderApp::install`], it
+    /// put those two fsyncs on the UI thread on the exact frame the new page appeared — and
+    /// again on every Back and Forward, which restore from the page cache in no time at all and
+    /// then waited on a disk. Deferring costs at most one page of history to a kill that gives
+    /// no chance to run [`ReaderApp::on_exit`], which is the trade `settings` already makes for
+    /// a file the reader could retype and this one makes for the tenant nobody asked for. A keep
+    /// is still written the instant it happens: that one is a keypress.
     ///
     /// Silent on success, unlike a keep. Every page produces one of these, and a status line
     /// about each would be the application narrating its own bookkeeping over the page the reader
     /// came to read.
-    ///
-    /// A failure is said once and then not again until a write lands, which is why this does not
-    /// go through [`ReaderApp::save_archive`]: that one is for a keypress and complains every
-    /// time, correctly, because the reader just asked for something and did not get it. Nothing
-    /// here asked for anything, so an unwritable config directory is one sentence rather than one
-    /// over every page.
     fn record_visit(&mut self, page: &Ready) {
         let url = page.loaded.prov.final_url.clone();
         let title = page.loaded.doc.title.clone();
         if self.archive.visit(&self.settings, &url, title.as_deref()) != Visited::Recorded {
             return;
         }
+        // Only when nothing is pending, so the mark keeps the age of the oldest unwritten visit
+        // and a steady reader cannot push the write out for ever.
+        self.visits_dirty.get_or_insert_with(Instant::now);
+    }
+
+    /// Write the archive on the history's behalf, and complain at most once about a run of
+    /// failures.
+    ///
+    /// This is why a visit does not go through [`ReaderApp::save_archive`]: that one is for a
+    /// keypress and complains every time, correctly, because the reader just asked for something
+    /// and did not get it. Nothing here asked for anything, so an unwritable config directory is
+    /// one sentence rather than one over every page.
+    fn save_visits(&mut self) {
+        self.visits_dirty = None;
         match archive::save(&self.archive) {
             Ok(()) => self.archive_write_failed = false,
             Err(e) => {
@@ -905,9 +936,11 @@ impl ReaderApp {
 
     /// Recompute [`ReaderApp::shown_kept`].
     ///
-    /// Called from the two places that can change the answer and no others: [`ReaderApp::install`],
-    /// where the page changes, and [`ReaderApp::save_archive`], which every mutation of the store
-    /// passes through on its way to the file.
+    /// Called from the three places that can change the answer and no others: the two that
+    /// change the page, [`ReaderApp::install`] and [`ReaderApp::fail`], and
+    /// [`ReaderApp::save_archive`], which every mutation of the store passes through on its way
+    /// to the file. Each of the three is a door with one caller-facing name, so a fourth
+    /// transition cannot be added without passing through one of them.
     fn refresh_shown_kept(&mut self) {
         self.shown_kept = self
             .shown()
@@ -1392,13 +1425,7 @@ impl ReaderApp {
                     let url = self.loading_url().unwrap_or_else(|| {
                         Url::parse("about:blank").expect("a literal URL parses")
                     });
-                    // A failure replaces the page it was fetched over, so this is a commit too.
-                    self.commit();
-                    self.page = Page::Failed {
-                        url,
-                        error,
-                        opts: self.last_opts,
-                    };
+                    self.fail(url, error);
                 }
                 Msg::Image {
                     page,
@@ -1461,18 +1488,15 @@ impl ReaderApp {
                     // An image panic is not this: its placeholder states its own case and the
                     // page is fine.
                     if req == page {
-                        self.commit();
-                        self.page = Page::Failed {
-                            url: self.loading_url().unwrap_or_else(|| {
-                                Url::parse("about:blank").expect("a literal URL parses")
-                            }),
-                            error: LoadError::Fetch(crate::fetch::FetchError::Io(
-                                std::io::Error::other(
-                                    "a worker failed while handling this request",
-                                ),
-                            )),
-                            opts: self.last_opts,
-                        };
+                        let url = self.loading_url().unwrap_or_else(|| {
+                            Url::parse("about:blank").expect("a literal URL parses")
+                        });
+                        self.fail(
+                            url,
+                            LoadError::Fetch(crate::fetch::FetchError::Io(std::io::Error::other(
+                                "a worker failed while handling this request",
+                            ))),
+                        );
                     }
                 }
             }
@@ -1516,7 +1540,7 @@ impl ReaderApp {
         // The strip line lasts until the navigation ends. The page is up; the rewrite bar
         // owns the remark from here.
         self.rewrite_notice = None;
-        // The history is written here, and the argument is `commit`'s own one line up: this is
+        // The history is recorded here, and the argument is `commit`'s own one line up: this is
         // the function every page that takes the column passes through, so a transition added
         // later cannot record half of them. It covers a restore from the page cache too, which
         // is right — Back onto a page is a page hww drew — and it deliberately does not cover an
@@ -1558,6 +1582,25 @@ impl ReaderApp {
         self.refresh_shown_kept();
     }
 
+    /// Put an error screen in the column. **The one door**, for the reason `install` is one:
+    /// three callers reached it — a failed load, a worker that panicked under a document, and
+    /// `present` — and each had to remember the same three steps.
+    ///
+    /// The third of those steps is the one that was being forgotten. A failure replaces the page
+    /// it was fetched over, so it is a commit like any other; it also *unshows* a page, and
+    /// [`ReaderApp::shown_kept`] is a cache about the page on screen. Without the refresh, a
+    /// link that times out on a page the reader had kept leaves the File menu drawing that
+    /// page's tick over an error screen.
+    fn fail(&mut self, url: Url, error: LoadError) {
+        self.commit();
+        self.page = Page::Failed {
+            url,
+            error,
+            opts: self.last_opts,
+        };
+        self.refresh_shown_kept();
+    }
+
     /// Put a page on screen that no fetch produced.
     ///
     /// The screenshot tool's one injection point, and the reason it can photograph a refused
@@ -1588,14 +1631,7 @@ impl ReaderApp {
         self.history.push(url.clone());
         match result {
             Ok(loaded) => self.settle(loaded),
-            Err(error) => {
-                self.commit();
-                self.page = Page::Failed {
-                    url,
-                    error,
-                    opts: self.last_opts,
-                }
-            }
+            Err(error) => self.fail(url, error),
         }
     }
 
@@ -2179,31 +2215,50 @@ impl eframe::App for ReaderApp {
         if self.settings_dirty {
             self.save_settings();
         }
+        // The same argument one line up, about the other file: the debounce exists so a burst of
+        // navigations is one write, and it must not be the reason the last page read is missing
+        // from the history.
+        if self.visits_dirty.is_some() {
+            self.save_visits();
+        }
     }
 }
 
 impl ReaderApp {
-    /// How long `[`/`]` can be held down before a write lands.
+    /// How long `[`/`]` can be held down before a write lands, and how long a page waits to
+    /// reach the history.
     const SAVE_DEBOUNCE: Duration = Duration::from_millis(1500);
 
-    /// Persist settings, but not on every keystroke of `[`/`]`.
+    /// Persist settings, but not on every keystroke of `[`/`]`, and the history, but not on the
+    /// frame the page it records appears.
     fn persist(&mut self, ctx: &egui::Context) {
         let zoom = ctx.zoom_factor();
         if (zoom - self.settings.zoom_factor).abs() > f32::EPSILON {
             self.settings.zoom_factor = zoom;
             self.settings_dirty = true;
         }
-        if !self.settings_dirty {
-            return;
+        if self.settings_dirty {
+            let waited = self.last_saved.elapsed();
+            if waited > Self::SAVE_DEBOUNCE {
+                self.save_settings();
+            } else {
+                // egui only runs a frame when something asks it to. Without this the debounce
+                // never expires on its own: change the measure, touch nothing else, and the write
+                // waits for the next unrelated input instead of for 1.5s.
+                ctx.request_repaint_after(Self::SAVE_DEBOUNCE - waited);
+            }
         }
-        let waited = self.last_saved.elapsed();
-        if waited > Self::SAVE_DEBOUNCE {
-            self.save_settings();
-        } else {
-            // egui only runs a frame when something asks it to. Without this the debounce
-            // never expires on its own: change the measure, touch nothing else, and the write
-            // waits for the next unrelated input instead of for 1.5s.
-            ctx.request_repaint_after(Self::SAVE_DEBOUNCE - waited);
+        // Measured from the change rather than from the last write, unlike the settings above.
+        // A held `[` is a burst that has to be let through every so often; a navigation is one
+        // page, and what the delay is buying is that the write does not land on the frame that
+        // page appears. See `ReaderApp::record_visit`.
+        if let Some(since) = self.visits_dirty {
+            let waited = since.elapsed();
+            if waited >= Self::SAVE_DEBOUNCE {
+                self.save_visits();
+            } else {
+                ctx.request_repaint_after(Self::SAVE_DEBOUNCE - waited);
+            }
         }
     }
 
@@ -2376,9 +2431,19 @@ impl ReaderApp {
                 // forgetting while looking at the library redraws it rather than leaving rows
                 // on screen for items that no longer exist.
                 prefs_ui::Event::ForgetLibrary => {
+                    // Asked before the forget, because forgetting is what lifts it: either
+                    // button is the reader saying they want this file replaced by what hww
+                    // holds, which is the way out of an unreadable file that does not involve
+                    // finding it by hand. A count would be the wrong sentence there — hww never
+                    // read the file, so "already empty" is what it saw and not what happened.
+                    let replaced = self.archive.refuses_to_be_written();
                     let n = self.archive.forget_all();
                     if self.save_archive() {
-                        self.flash(notice::library_forgotten(n));
+                        self.flash(if replaced {
+                            notice::UNREADABLE_FILE_REPLACED.to_owned()
+                        } else {
+                            notice::library_forgotten(n)
+                        });
                     }
                     self.rebuild_builtin_view();
                 }
@@ -2386,9 +2451,14 @@ impl ReaderApp {
                 // shared helper because the two buttons say different things to the reader and
                 // must go on being able to.
                 prefs_ui::Event::ForgetHistory => {
+                    let replaced = self.archive.refuses_to_be_written();
                     let n = self.archive.forget_visits();
                     if self.save_archive() {
-                        self.flash(notice::history_forgotten(n));
+                        self.flash(if replaced {
+                            notice::UNREADABLE_FILE_REPLACED.to_owned()
+                        } else {
+                            notice::history_forgotten(n)
+                        });
                     }
                     self.rebuild_builtin_view();
                 }

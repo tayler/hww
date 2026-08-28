@@ -209,15 +209,25 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
         }
         // Under the headline and above the dek, in the same dim as the date across from it.
         // `small_font` and not `chrome_font`: the address belongs to the page the row points at,
-        // and this module's rule is that the page's words are set in the page's family. It is a
-        // label rather than a link — the headline is the link, and a row with two of them would
-        // give Tab two stops to the same place.
+        // and this module's rule is that the page's words are set in the page's family. It is
+        // not a link — the headline is the link, and a row with two of them would give Tab two
+        // stops to the same place.
+        //
+        // Through `runs` rather than `ui.label`, which is the only way it reaches
+        // `RenderCtx::begin_list` and so the only way find-in-page can see it. The history and
+        // the library show an address at all because their titles repeat — half a dozen `Home`s
+        // are one list of identical rows without it — so `/` and a hostname is the first thing a
+        // reader tries on a long one, and a search that matched the visible text of every row
+        // except the one distinguishing part of it would be a wrong answer rather than a missing
+        // feature.
         if let Some(addr) = &e.address {
-            ui.label(
-                RichText::new(addr)
-                    .font(theme::small_font(ctx.opts))
-                    .color(ctx.pal.dim),
-            );
+            let set = Setting {
+                font: theme::small_font(ctx.opts),
+                color: ctx.pal.dim,
+                role: ctx.opts.family,
+                underline: false,
+            };
+            runs(ui, &[ir::Inline::Text(addr.clone())], &set, ctx);
         }
         blocks_ui(ui, &e.summary, ctx, None);
     }

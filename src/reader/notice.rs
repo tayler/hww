@@ -236,6 +236,32 @@ pub fn archive_not_saved(reason: &str) -> String {
     format!("hww could not save what it remembers: {reason}")
 }
 
+/// What a forget button says when the file it has just written was one hww could not read.
+///
+/// `library_forgotten(0)` would answer "your library was already empty", which is what hww saw
+/// and not what happened: the file was there, it could not be parsed, and pressing this replaced
+/// it. A count is the wrong sentence about a file whose contents were never known.
+pub const UNREADABLE_FILE_REPLACED: &str =
+    "hww could not read that file when it started; it has now been replaced by what hww holds.";
+
+/// What the settings panel says under the Library and History groups when there is no
+/// configuration directory at all — no `HWW_CONFIG_DIR`, no `HOME`, no `XDG_CONFIG_HOME`.
+///
+/// The place the file's path would otherwise be printed. A group that named no file at all
+/// would leave two switches promising to remember things and no surface saying where, or that
+/// nothing is being written; `archive::save` refuses in that state and says so on the keypress,
+/// and this is the standing half of the same disclosure.
+pub const NO_ARCHIVE_PATH: &str = "Not saved: hww has no configuration directory to write to.";
+
+/// A keep was asked for on a page whose address is longer than `archive::MAX_URL`.
+///
+/// Said rather than swallowed, for [`KEEPING_IS_OFF`]'s reason: the key is bound, the reader
+/// pressed it, and a press that did nothing and said nothing reads as a broken binding. It names
+/// the address as the thing that was refused, because nothing about the page is wrong and
+/// reaching it by a shorter link would work.
+pub const ADDRESS_TOO_LONG: &str =
+    "that page's address is too long for hww to write down; it was not kept.";
+
 /// A keep was asked for while keeping is switched off. The key is bound whatever the setting
 /// says, so a press that did nothing and said nothing would read as a broken binding — the same
 /// argument as [`IMAGES_ARE_OFF`], one setting over.

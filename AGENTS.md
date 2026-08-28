@@ -162,7 +162,12 @@ retains what it already gathered is the quiet lie the notice system exists to re
 switch forgets its own tenant and no other. Anything persisted is disclosed — the panel prints the
 file's path, page info says whether the page on screen is kept. Unknown fields, unknown enum variants, and unknown item kinds are carried through
 a load and a save untouched, because this is data the reader cannot retype; a corrupt file yields
-an empty store *and a complaint*, never a refusal to start.
+an empty store *and a complaint*, never a refusal to start, and that empty store is sealed
+against being written back over the file it failed to read — history writes on every navigation,
+so the complaint and the deletion would otherwise arrive in the same second. Either forget button
+lifts the seal, because that is the reader asking for the file to be replaced. `archive::save`
+never answers `Ok` for a write it did not make: with no config directory it errors, so no toast
+and no menu tick can claim a page was kept.
 
 Privacy is compile-time absence. `reqwest` keeps `default-features = false`; do not add a
 dependency or feature that restores a cookie jar. Preserve manual redirect inspection,

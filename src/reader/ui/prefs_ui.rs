@@ -254,14 +254,20 @@ fn group_footer(
     // must not have to have read the Library group to learn where its file is. The archive
     // doctrine's disclosure requirement is that a store whose shape the reader cannot see is one
     // they cannot reason about; this is the same sentence the settings path gets at the foot.
-    if let Some(path) = crate::reader::archive::path() {
-        ui.add_space(theme::snap(opts.base_size_pt * 0.2));
-        ui.label(
-            RichText::new(format!("Saved in {}", path.display()))
-                .color(pal.dim)
-                .font(theme::chrome_font(opts)),
-        );
-    }
+    // And a sentence either way: with no config directory there is no path to print and
+    // nothing is being written, which is a thing the reader is owed rather than a line to leave
+    // blank. `archive::save` refuses in that state instead of reporting a success it did not
+    // have; this is what says so before a keypress finds out.
+    let line = match crate::reader::archive::path() {
+        Some(path) => format!("Saved in {}", path.display()),
+        None => crate::reader::notice::NO_ARCHIVE_PATH.to_owned(),
+    };
+    ui.add_space(theme::snap(opts.base_size_pt * 0.2));
+    ui.label(
+        RichText::new(line)
+            .color(pal.dim)
+            .font(theme::chrome_font(opts)),
+    );
 }
 
 /// One setting: its label, the key that already does it, its control, and its sentence.

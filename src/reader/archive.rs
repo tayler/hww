@@ -56,7 +56,11 @@
 //! show is carried through untouched instead of being displayed as something it is not. One
 //! malformed item costs that item and not the file, and a file that will not parse at all yields
 //! an empty archive *and a complaint*, never a refusal to start — [`load`] matches
-//! `settings::load`'s contract exactly.
+//! `settings::load`'s contract exactly. It parts company with `settings` in one place, and
+//! history's default is what put it there: the empty archive is **sealed**, so the first page
+//! drawn cannot write it over a file whose contents hww merely failed to read. See
+//! [`Archive::file_unreadable`]. `settings.json` can be retyped in a minute and this file
+//! cannot, which is the whole reason it gets the extra care.
 //!
 //! **Caps.** The library refuses at [`MAX_ITEMS`]; the history evicts at [`MAX_VISITS`]. The two
 //! answers are not an inconsistency, they are the doctrine restated as arithmetic: every item in
@@ -99,6 +103,11 @@
 //! [`MAX_TITLE`] characters on the way *in*, so a megabyte `<title>` cannot become a megabyte of
 //! this file, and nothing may print it to a terminal without `render::sanitize_for_terminal`,
 //! which this crate already requires of every terminal print.
+//!
+//! **So is the address**, which a page chose as surely as it chose the title: a link carrying a
+//! kilobyte of query string is one click from being written down, and once written it is
+//! re-serialized on every later save. [`MAX_URL`] is the answer, and it refuses where the title
+//! cap truncates, because half an address is a link to somewhere else.
 
 use crate::ir::{self, Block, Inline};
 use crate::reader::settings::{self, Settings};
@@ -157,6 +166,18 @@ pub const MAX_VISITS: usize = 5_000;
 /// anybody writes; short enough that a page whose `<title>` is a novel costs a line rather than a
 /// file. See the module doc for why a page's title is treated as untrusted here in particular.
 pub const MAX_TITLE: usize = 160;
+
+/// The longest stored address, in bytes.
+///
+/// Refused rather than shortened, which is the one place this parts company with [`MAX_TITLE`]:
+/// a title cut in half still names the page, and an address cut in half opens something else or
+/// nothing at all. Bytes and not characters for the same reason — nothing is cut, so there is no
+/// boundary to land inside, and what the number is protecting is the size of the file.
+///
+/// An address is as much the page's text as its `<title>` is: a link carrying a megabyte of query
+/// string is one click away, and unlike the title it is written back on every later save. Eight
+/// kilobytes is past any address a site actually serves and short of anything that would matter.
+pub const MAX_URL: usize = 8_192;
 
 /// What sort of thing an item is.
 ///
@@ -306,6 +327,9 @@ pub enum Kept {
     Already,
     /// The library is at [`MAX_ITEMS`]. Nothing was written and nothing was dropped.
     Full,
+    /// The address is longer than [`MAX_URL`]. Nothing was written, and it is refused rather
+    /// than shortened because a shortened address is a link to somewhere else.
+    TooLong,
 }
 
 /// What [`Archive::visit`] did, so the caller knows whether the file changed.
@@ -334,6 +358,21 @@ pub enum Visited {
 pub struct Archive {
     version: u32,
     items: Vec<Item>,
+    /// Whether this archive is standing in for a file that could not be parsed at all.
+    ///
+    /// Set by [`parse`], never serialized, and read by exactly one place: [`save`], which
+    /// refuses. An empty archive over an unreadable file used to be harmless, because the file
+    /// only changed when the reader pressed `Ctrl+D` and a reader who read the complaint could
+    /// quit and repair it. History changed that — the first page drawn writes the file — so
+    /// without this the complaint and the deletion arrive in the same second, and what is
+    /// deleted is the one thing in hww the reader cannot retype.
+    ///
+    /// Cleared by [`Archive::forget_all`] and [`Archive::forget_visits`], which are the reader
+    /// saying in as many words that they want this file replaced by what hww holds now. That is
+    /// the way out that does not involve finding the file by hand, and both buttons already say
+    /// the thing cannot be undone.
+    #[serde(skip)]
+    file_unreadable: bool,
 }
 
 impl Archive {
@@ -341,6 +380,7 @@ impl Archive {
         Self {
             version: VERSION,
             items: Vec::new(),
+            file_unreadable: false,
         }
     }
 
@@ -390,8 +430,12 @@ impl Archive {
     /// a menu item, a context menu, a future "keep every tab" — cannot route around it.
     ///
     /// Immediately, and with no debounce; the caller writes the file. `settings` debounces at
-    /// 1.5 s because it absorbs a slider being dragged. A keep is a single deliberate act, and
-    /// the reader who presses `Ctrl+D` and shuts the laptop should find it there.
+    /// 1.5 s because it absorbs a slider being dragged, and a visit debounces at the same figure
+    /// because the write it schedules would otherwise land on the frame the page appears. A keep
+    /// is neither: it is a single deliberate act, and the reader who presses `Ctrl+D` and shuts
+    /// the laptop should find it there. That is the same asymmetry [`MAX_ITEMS`] and
+    /// [`MAX_VISITS`] draw, one property over — what was chosen is treated more carefully than
+    /// what was merely watched.
     pub fn keep(&mut self, settings: &Settings, url: &Url, title: Option<&str>) -> Kept {
         if !settings.keep_library {
             return Kept::Off;
@@ -401,6 +445,9 @@ impl Archive {
 
     /// [`Archive::keep`] with the clock supplied, so a test can name the day.
     fn keep_at(&mut self, url: &Url, title: Option<&str>, added: u64) -> Kept {
+        if url.as_str().len() > MAX_URL {
+            return Kept::TooLong;
+        }
         if self.holds(url) {
             return Kept::Already;
         }
@@ -441,14 +488,17 @@ impl Archive {
     ///
     /// The title is the document's, and it wins over whatever was stored: a page that has been
     /// retitled since it was last read should be listed under the title it has now.
-    /// **Two addresses are refused whatever the switch says**, and they are refused here rather
-    /// than at the caller for the reason above. A URL carrying a username or a password would
+    /// **Three addresses are refused whatever the switch says**, and they are refused here
+    /// rather than at the caller for the reason above. A URL carrying a username or a password would
     /// put a credential in a plain-text file, for ever, because the reader opened a link — the
     /// library can hold one, since a keypress put it there and `Ctrl+D` takes it out again, but
     /// nothing the reader did not ask for may write one down. And an address that is not `http`
     /// or `https` is not a page fetched from the web: `hww:history` must not list itself, and
     /// `ReaderApp::install` already declines to record a built view, but a door guarded at one
-    /// caller is a door guarded nowhere.
+    /// caller is a door guarded nowhere. And an address past [`MAX_URL`] is refused the way
+    /// [`Archive::keep`] refuses one, silently here because nothing asked for it: this is the
+    /// door a page's own links come through, and one of them carrying a kilobyte of query string
+    /// is a line this file would then rewrite on every later save.
     pub fn visit(&mut self, settings: &Settings, url: &Url, title: Option<&str>) -> Visited {
         if !settings.keep_history {
             return Visited::Off;
@@ -456,6 +506,7 @@ impl Archive {
         if !matches!(url.scheme(), "http" | "https")
             || !url.username().is_empty()
             || url.password().is_some()
+            || url.as_str().len() > MAX_URL
         {
             return Visited::Refused;
         }
@@ -507,6 +558,7 @@ impl Archive {
     pub fn forget_visits(&mut self) -> usize {
         let before = self.visits();
         self.items.retain(|i| i.kind != Kind::Visited);
+        self.file_unreadable = false;
         before
     }
 
@@ -520,7 +572,17 @@ impl Archive {
     pub fn forget_all(&mut self) -> usize {
         let before = self.len();
         self.items.retain(|i| i.kind != Kind::Kept);
+        self.file_unreadable = false;
         before
+    }
+
+    /// Whether [`save`] will refuse to write this archive over the file it came from.
+    ///
+    /// True only after a file that could not be parsed at all; see [`Archive::file_unreadable`]
+    /// for why an empty archive is not allowed to become the file. A dropped *item* is not this:
+    /// the rest of that file parsed, and the tolerance rule says one bad item costs that item.
+    pub fn refuses_to_be_written(&self) -> bool {
+        self.file_unreadable
     }
 }
 
@@ -726,10 +788,20 @@ fn parse(text: &str, where_from: &str) -> (Archive, Option<String>) {
     let wire: Wire = match serde_json::from_str(text) {
         Ok(w) => w,
         Err(e) => {
+            // Empty *and* sealed. The empty half is `settings::load`'s contract and unchanged;
+            // the sealed half is what history's default made necessary, because the next page
+            // drawn would otherwise write this empty archive over whatever the file really
+            // holds. See `Archive::file_unreadable`, and note that the complaint has to say so:
+            // a store that has stopped recording without saying it is the quiet lie again.
+            let archive = Archive {
+                file_unreadable: true,
+                ..Archive::new()
+            };
             return (
-                Archive::new(),
+                archive,
                 Some(format!(
-                    "{where_from} is not a valid library ({e}); starting with an empty one"
+                    "{where_from} is not a valid library ({e}); hww opened without it and will \
+                     not write over it — repair or move that file, or empty it from Settings"
                 )),
             );
         }
@@ -755,14 +827,41 @@ fn parse(text: &str, where_from: &str) -> (Archive, Option<String>) {
              your library opened"
         )
     });
-    (Archive { version, items }, note)
+    (
+        Archive {
+            version,
+            items,
+            file_unreadable: false,
+        },
+        note,
+    )
 }
 
 /// Write the library, atomically, through the same helper `settings::save` uses.
+///
+/// Two refusals, and both are errors rather than a quiet `Ok`. **There is nowhere to write**:
+/// with no `HWW_CONFIG_DIR`, no `HOME` and no `XDG_CONFIG_HOME` there is no config directory at
+/// all, and answering `Ok(())` there let `keep_page` tell the reader their page was kept and the
+/// menu draw a tick for a file that does not exist — the one claim the doctrine says may never
+/// be made without the write behind it. **The file could not be read**: see
+/// [`Archive::refuses_to_be_written`].
 pub fn save(archive: &Archive) -> std::io::Result<()> {
     let Some(path) = path() else {
-        return Ok(());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "there is no configuration directory to write to",
+        ));
     };
+    if archive.refuses_to_be_written() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{} could not be read when hww started, so it will not be written over; \
+                 repair or move that file, or empty it from Settings",
+                path.display()
+            ),
+        ));
+    }
     let json = serde_json::to_string_pretty(archive)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     settings::write_atomically(&path, json.as_bytes())
@@ -803,7 +902,69 @@ mod tests {
     fn a_corrupt_library_is_never_fatal_and_says_so() {
         let (a, note) = parse("{ not json", "library.json");
         assert!(a.is_empty());
-        assert!(note.expect("a complaint").contains("empty one"));
+        let note = note.expect("a complaint");
+        assert!(note.contains("library.json"), "it names the file: {note}");
+        assert!(
+            note.contains("not write over it"),
+            "and says the file is left alone: {note}"
+        );
+    }
+
+    /// The half of that contract history's default made necessary. An empty archive over a file
+    /// hww could not read must not become the file: with history on, the first page drawn writes
+    /// it, so a stray comma would otherwise cost the whole library seconds after start.
+    #[test]
+    fn an_unreadable_file_is_not_written_over() {
+        let (a, _) = parse("{ not json", "library.json");
+        assert!(a.refuses_to_be_written());
+        // A file that parsed does not carry the seal, whatever else it says.
+        let (good, _) = parse(r#"{"version":1,"items":[]}"#, "library.json");
+        assert!(!good.refuses_to_be_written());
+        // Nor does a file that parsed with one item dropped: the tolerance rule is that one bad
+        // item costs that item, and sealing there would let a single stray field freeze the file.
+        let (tolerated, note) = parse(
+            r#"{"version":1,"items":[{"url":7},{"url":"https://e.com/","kind":"kept"}]}"#,
+            "library.json",
+        );
+        assert!(note.is_some(), "the dropped item is still reported");
+        assert!(!tolerated.refuses_to_be_written());
+    }
+
+    /// The way out that does not involve finding the file by hand. Either forget button is the
+    /// reader saying they want this file replaced by what hww holds now, and both already say
+    /// the thing cannot be undone.
+    #[test]
+    fn forgetting_a_tenant_unseals_an_unreadable_file() {
+        let (mut a, _) = parse("{ not json", "library.json");
+        assert_eq!(a.forget_all(), 0);
+        assert!(!a.refuses_to_be_written());
+
+        let (mut b, _) = parse("{ not json", "library.json");
+        assert_eq!(b.forget_visits(), 0);
+        assert!(!b.refuses_to_be_written());
+
+        // Forgetting *one* page is not that sentence: it is about a page, not about the file.
+        let (mut c, _) = parse("{ not json", "library.json");
+        assert!(!c.forget(&u("https://example.com/a")));
+        assert!(c.refuses_to_be_written());
+    }
+
+    /// An address is a page's text as much as its title is, and unlike the title it is rewritten
+    /// on every later save. The title is cut and the address is refused: half an address is a
+    /// link to somewhere else.
+    #[test]
+    fn an_address_past_the_cap_is_refused_by_both_doors() {
+        let long = u(&format!("https://example.com/{}", "a".repeat(MAX_URL)));
+        let mut a = Archive::new();
+        assert_eq!(a.keep(&on(), &long, Some("A page")), Kept::TooLong);
+        assert_eq!(a.len(), 0);
+        assert_eq!(a.visit(&on(), &long, Some("A page")), Visited::Refused);
+        assert_eq!(a.visits(), 0);
+
+        // And an address that fits is untouched, byte for byte: nothing here shortens anything.
+        let ordinary = u("https://example.com/a?q=1#x");
+        assert_eq!(a.keep(&on(), &ordinary, None), Kept::Added);
+        assert_eq!(a.kept().next().expect("the item").url, ordinary.as_str());
     }
 
     /// The half `settings` does not need: one unreadable item costs that item.
