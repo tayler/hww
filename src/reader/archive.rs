@@ -28,7 +28,8 @@
 //! look for it, switchable off in one click, and forgettable in one more.
 //! [`Settings::keep_history`] sits in a settings group of its own with this file's path printed
 //! under it, beside the button that empties it; the pages it holds are a page the reader can
-//! open (`h`) rather than a file they have to find. A default that could not be seen or undone
+//! open, with the key every browser opens its history with, rather than a file they have to
+//! find. A default that could not be seen or undone
 //! would be the quiet lie this project's whole notice system exists to refuse.
 //!
 //! Seven consequences, each settled here rather than left to the call site:
@@ -1340,7 +1341,8 @@ mod tests {
         assert!(entries.iter().all(|e| e.image.is_none()));
     }
 
-    /// An empty library is a new reader, not a failure, so `b` opens a page that says what to
+    /// An empty library is a new reader, not a failure, so the library key opens a page that
+    /// says what to
     /// do rather than a blank screen or an error.
     #[test]
     fn an_empty_library_is_a_page_that_says_so() {

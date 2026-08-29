@@ -126,7 +126,7 @@ pub const IMAGES_ARE_DECLINED_OR_FAILED: &str =
 /// other bar should not be asking them to learn a new phrasing for it.
 pub const URL_BAR_HINT: &str = "Search or type a URL";
 
-/// What a bare reload turns off, named after `Shift+R` has done it.
+/// What a bare reload turns off, named after the key has done it.
 ///
 /// Everything that reads a response as other than prose, in the order `session::load` consults
 /// them, because a reader diagnosing a page needs to know which of them was in play. Search
@@ -176,7 +176,8 @@ pub const READING_LIST_TITLE: &str = "Read next";
 /// meet a blank page that looks like a bug.
 ///
 /// The first arm has a job the library's and the history's do not, and it is why this is the
-/// longest of the three. `Ctrl+D` and `h` act on the page in front of the reader, so their empty
+/// longest of the three. Keeping a page and opening the history act on the page in front of the
+/// reader, so their empty
 /// states can assume the reader already knows what to press. This list is filled from a *link*,
 /// which is a thing the reader has to be told how to aim at — so the sentence names both routes,
 /// the key and the right-click, and a list that can only be filled by a gesture nobody mentioned

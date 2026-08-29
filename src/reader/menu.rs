@@ -58,10 +58,22 @@ pub const SUBMENU_MARKER: &str = "\u{203A}";
 ///
 /// The two blocks are written out in full rather than composed from a `MOD` const. `concat!`
 /// takes literals and not consts, so a composed spelling would mean building these strings at
-/// run time; and a spec is not always the modifier swapped, as `BACK` shows.
+/// run time; and a spec is not always the modifier swapped, as `BACK` and `HISTORY` show.
+///
+/// # Why these are the keys they are
+///
+/// Every one of them is the key some other browser already uses, because a second browser has
+/// no standing to invent a command grammar the reader has to learn twice — the same argument
+/// the menu bar itself rests on, one layer down. Where two browsers disagree the platform wins,
+/// which is what `BACK` has always encoded and what `HISTORY` now does too: `Cmd+H` is the
+/// system Hide binding on macOS and never reaches the app at all, so History is `Cmd+Y` there,
+/// as it is in Safari and Chrome.
 #[cfg(not(target_os = "macos"))]
 mod keyspec {
     pub const OPEN_LOCATION: &str = "Ctrl+L";
+    pub const FIND: &str = "Ctrl+F";
+    pub const RELOAD: &str = "Ctrl+R";
+    pub const RELOAD_BARE: &str = "Ctrl+Shift+R";
     pub const ZOOM_IN: &str = "Ctrl++";
     pub const ZOOM_OUT: &str = "Ctrl+-";
     pub const ZOOM_RESET: &str = "Ctrl+0";
@@ -69,10 +81,21 @@ mod keyspec {
     pub const FORWARD: &str = "Alt+Right";
     pub const KEEP_PAGE: &str = "Ctrl+D";
     pub const READ_LATER: &str = "Shift+L";
+    pub const LIBRARY: &str = "Ctrl+Shift+B";
+    pub const HISTORY: &str = "Ctrl+H";
+    pub const OUTLINE: &str = "Ctrl+Shift+O";
+    pub const PAGE_INFO: &str = "Ctrl+I";
+    pub const SETTINGS: &str = "Ctrl+,";
+    pub const QUIT: &str = "Ctrl+Q";
 
-    pub const HELP_OPEN_LOCATION: &str = "Ctrl+L or o";
-    pub const HELP_BACK: &str = "Alt+Left / Backspace";
-    pub const HELP_FIND: &str = "/ or Ctrl+F · Enter / Shift+Enter";
+    /// The four help rows that put more than one spec on a line. They are whitespace-separated
+    /// token by token and have to stay that way: `the_menu_and_the_help_card_agree` finds
+    /// `RELOAD` in `HELP_RELOAD` as a *token*, never as a substring, since `Ctrl+R` is not one
+    /// of `Ctrl+Shift+R` and `Ctrl+H` is not one of `Ctrl+Shift+B`.
+    pub const HELP_RELOAD: &str = "Ctrl+R / Ctrl+Shift+R";
+    pub const HELP_FIND: &str = "Ctrl+F · Enter / Shift+Enter";
+    pub const HELP_LISTS: &str = "Ctrl+Shift+B / l / Ctrl+H";
+    pub const HELP_DISMISS: &str = "? / Esc / Ctrl+Q";
     pub const HELP_ZOOM: &str = "Ctrl++ / Ctrl+- / Ctrl+0";
     pub const HELP_FOOTNOTE: &str = "Zoom is egui's: Ctrl +/-/0, Ctrl+wheel, pinch.";
 
@@ -91,6 +114,9 @@ mod keyspec {
 #[cfg(target_os = "macos")]
 mod keyspec {
     pub const OPEN_LOCATION: &str = "Cmd+L";
+    pub const FIND: &str = "Cmd+F";
+    pub const RELOAD: &str = "Cmd+R";
+    pub const RELOAD_BARE: &str = "Cmd+Shift+R";
     pub const ZOOM_IN: &str = "Cmd++";
     pub const ZOOM_OUT: &str = "Cmd+-";
     pub const ZOOM_RESET: &str = "Cmd+0";
@@ -102,10 +128,23 @@ mod keyspec {
     /// modifier — a key that happens to be the same on both is still spelled once, in the one
     /// place a later change to it would be found.
     pub const READ_LATER: &str = "Shift+L";
+    pub const LIBRARY: &str = "Cmd+Shift+B";
+    /// The second spec that is not a modifier swap, and for a harder reason than `BACK`'s.
+    /// `Cmd+H` hides the application on macOS: the system takes it before any window sees it,
+    /// so a Mac told to press it would watch hww vanish instead of listing what it had drawn.
+    /// Safari and Chrome both put History on `Cmd+Y` there, and so does this.
+    pub const HISTORY: &str = "Cmd+Y";
+    pub const OUTLINE: &str = "Cmd+Shift+O";
+    pub const PAGE_INFO: &str = "Cmd+I";
+    pub const SETTINGS: &str = "Cmd+,";
+    pub const QUIT: &str = "Cmd+Q";
 
-    pub const HELP_OPEN_LOCATION: &str = "Cmd+L or o";
-    pub const HELP_BACK: &str = "Cmd+[ / Backspace";
-    pub const HELP_FIND: &str = "/ or Cmd+F · Enter / Shift+Enter";
+    /// The four help rows that put more than one spec on a line. See the other block: these are
+    /// read token by token by the agreement test, never as substrings.
+    pub const HELP_RELOAD: &str = "Cmd+R / Cmd+Shift+R";
+    pub const HELP_FIND: &str = "Cmd+F · Enter / Shift+Enter";
+    pub const HELP_LISTS: &str = "Cmd+Shift+B / l / Cmd+Y";
+    pub const HELP_DISMISS: &str = "? / Esc / Cmd+Q";
     pub const HELP_ZOOM: &str = "Cmd++ / Cmd+- / Cmd+0";
     pub const HELP_FOOTNOTE: &str = "Zoom is egui's: Cmd +/-/0, Cmd+wheel, pinch.";
 
@@ -294,13 +333,13 @@ pub fn bar() -> Vec<Menu> {
                 },
                 Item::Run {
                     label: "Reload",
-                    keys: "r",
+                    keys: RELOAD,
                     command: C::Reload,
                     needs: N::Page,
                 },
                 Item::Run {
                     label: "Reload without rewrite",
-                    keys: "R",
+                    keys: RELOAD_BARE,
                     command: C::ReloadBare,
                     needs: N::Page,
                 },
@@ -331,7 +370,7 @@ pub fn bar() -> Vec<Menu> {
                 // The one view worth reaching from the idle screen, so it needs nothing.
                 Item::Run {
                     label: "Library",
-                    keys: "b",
+                    keys: LIBRARY,
                     command: C::OpenLibrary,
                     needs: N::Nothing,
                 },
@@ -347,7 +386,7 @@ pub fn bar() -> Vec<Menu> {
                 Item::Separator,
                 Item::Run {
                     label: "Quit",
-                    keys: "q",
+                    keys: QUIT,
                     command: C::Quit,
                     needs: N::Nothing,
                 },
@@ -370,7 +409,7 @@ pub fn bar() -> Vec<Menu> {
                 },
                 Item::Run {
                     label: "Find in page...",
-                    keys: "/",
+                    keys: FIND,
                     command: C::Find,
                     needs: N::Page,
                 },
@@ -379,7 +418,7 @@ pub fn bar() -> Vec<Menu> {
                 // puts it under the application menu, which eframe does not give us.
                 Item::Run {
                     label: "Settings...",
-                    keys: ",",
+                    keys: SETTINGS,
                     command: C::OpenSettings,
                     needs: N::Nothing,
                 },
@@ -442,14 +481,14 @@ pub fn bar() -> Vec<Menu> {
                 Item::Separator,
                 Item::Check {
                     label: "Outline",
-                    keys: "t",
+                    keys: OUTLINE,
                     command: C::ToggleOutline,
                     checked: Checked::Outline,
                     needs: N::Page,
                 },
                 Item::Check {
                     label: "Page info",
-                    keys: "p",
+                    keys: PAGE_INFO,
                     command: C::TogglePageInfo,
                     checked: Checked::PageInfo,
                     needs: N::Nothing,
@@ -491,7 +530,7 @@ pub fn bar() -> Vec<Menu> {
                 // pages it lists outlive the session, so it opens on the splash too.
                 Item::Run {
                     label: "Pages you have visited",
-                    keys: "h",
+                    keys: HISTORY,
                     command: C::OpenHistory,
                     needs: N::Nothing,
                 },
@@ -527,39 +566,40 @@ pub const HELP: &[(&str, &str)] = &[
     ("Space / PgDn", "page down · Shift+Space pages up"),
     ("g / G", "top / bottom"),
     (
-        HELP_OPEN_LOCATION,
+        OPEN_LOCATION,
         "URL bar · Enter opens an address, or searches for words",
     ),
     ("Tab / Shift+Tab", "cycle links · Enter follows"),
-    (HELP_BACK, "back"),
+    (BACK, "back"),
     (FORWARD, "forward · the mouse side buttons do both"),
     (
-        "r / R",
+        HELP_RELOAD,
         "reload · reload bare: no rewrite rule, no site profile, no search shape, no feed reader",
     ),
     ("i / I", "load focused image · load all, naming their hosts"),
-    ("t", "outline"),
-    ("p", "page info: how this page arrived"),
+    (OUTLINE, "outline"),
+    (PAGE_INFO, "page info: how this page arrived"),
     (HELP_FIND, "find in page · next / previous match"),
     ("z / Z", "collapse focused reply · collapse all"),
     ("y / Y", "copy page URL · copy focused link"),
     (KEEP_PAGE, "keep this page in your library"),
     (READ_LATER, "add the focused link to your reading list"),
-    // The three openers on one row, as `r / R` and `y / Y` already are. They are one family —
+    // The three openers on one row, as reload and `y / Y` already are. They are one family —
     // each opens a view hww builds from `library.json` — and the card is sized by the window
     // rather than scrolled, so a row per tenant would push the footnote off the bottom edge the
     // moment a fourth arrives. `the_menu_and_the_help_card_agree` matches per token, so the
-    // three menu rows still each find their key here.
+    // three menu rows still each find their key here; the reading list is the one of the three
+    // no browser has a key for, which is why `l` sits between two chords.
     (
-        "b / l / h",
+        HELP_LISTS,
         "open your library · reading list · visited pages",
     ),
     ("[ / ]", "narrow / widen the reading measure"),
     (HELP_ZOOM, "zoom in · out · actual size"),
     ("d", "cycle theme"),
-    (",", "settings"),
+    (SETTINGS, "settings"),
     ("F10", "the menu bar"),
-    ("? / Esc / q", "this help · dismiss chrome · quit"),
+    (HELP_DISMISS, "this help · dismiss chrome · quit"),
 ];
 
 /// What `Help` ▸ `About hww` says. One sentence about what this is, the two facts that are the
@@ -716,10 +756,11 @@ mod tests {
             if keys.is_empty() {
                 continue;
             }
-            // `OPEN_LOCATION` is written `HELP_OPEN_LOCATION` on the card, and `/` is one of
-            // several ways to reach find, so a substring match against the whole spec column is
-            // the right test: it catches a menu that advertises a key the card has never heard
-            // of.
+            // Two branches, and the second is the one that carries most of the table now that
+            // the keys are chords: `RELOAD` is `Ctrl+R`, which is *not* a substring of the
+            // `Ctrl+Shift+R` beside it on the card, and `HISTORY` is not one of `LIBRARY`
+            // either. A whole-spec substring still catches the rows the card spells alone, and
+            // the token match catches every row that puts two specs on one line.
             let bare = keys.trim();
             assert!(
                 help.contains(bare)
@@ -733,7 +774,7 @@ mod tests {
 
     /// The help card and the toast name the same list.
     ///
-    /// `Shift+R` says what it turned off twice: once on the card before you press it, once in
+    /// A bare reload says what it turned off twice: once on the card before you press it, once in
     /// the toast after. A reload that quietly stopped honouring one more of them would leave
     /// both surfaces lying, and this is the cheaper half of noticing that.
     #[test]

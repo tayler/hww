@@ -77,7 +77,7 @@ impl History {
     /// browser uses, and the reason forward is not a second stack.
     pub fn push(&mut self, url: Url) {
         // Re-navigating to where you already are is a reload, not a history entry; without
-        // this, `r` on a page makes Back a no-op that looks broken. The entry keeps its id and
+        // this, reloading a page makes Back a no-op that looks broken. The entry keeps its id and
         // its offset, which is what makes a reload land where the reader was.
         if self.current() == Some(&url) {
             return;
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(h.offset_of(b), 0.0);
     }
 
-    /// The reload case `push`'s early return covers: `r` keeps your place.
+    /// The reload case `push`'s early return covers: a reload keeps your place.
     #[test]
     fn re_pushing_the_current_url_keeps_its_offset() {
         let mut h = History::new();

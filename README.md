@@ -20,14 +20,14 @@ hww fetches a web page, parses the HTML, then displays it using hww's own render
 - **Choose when images load.** Load them automatically, ask first (the default), turn off article images, or block every image request (including favicons).
 - **Limited sharing when loading images.** An image's server can see which website the image appears on, but not the full page address. You can switch this off.
 - **Ubuntu, Windows, and macOS,** binaries (See #Install below). More Linux distros planned.
-- **Keyboard navigation** Every action has a keyboard shortcut.
-- **A library, a reading list, and a history you can switch off.** `Ctrl+D` (`Cmd+D` on macOS) keeps the page you are reading and `b` opens the list; `h` opens the pages hww has drawn for you, which it writes down as it goes. Each has its own switch in Settings and its own button to empty it, and none of them takes another with it. The history records the address and the title, once per page rather than once per visit, and nothing about what you did on the page. Page info tells you whether the page on screen is kept.
+- **Keyboard navigation** Every action has a keyboard shortcut (uses common browser defaults where possible): `Ctrl+L`, `Ctrl+F`, `Ctrl+R`, `Ctrl+H`, `Cand it is the onetrl+D`, `Alt+Left`. Press `?` for the card.
+- **A library, a reading list, and a history you can switch off.** `Ctrl+D` (`Cmd+D` on macOS) keeps the page you are reading and `Ctrl+Shift+B` opens the list; `Ctrl+H` (`Cmd+Y` on macOS) opens the pages hww has drawn for you, which it writes down as it goes. Each has its own switch in Settings and its own button to empty it, and none of them takes another with it. The history records the address and the title, once per page rather than once per visit, and nothing about what you did on the page. Page info tells you whether the page on screen is kept.
 - **Line up what to read next.** Tab to a link and press `Shift+L`, or right-click it and choose **Read later**, and it waits on a list `l` opens. hww does not fetch any of them until you open one, so a reading list of thirty links makes no requests and costs no network — it is a list of addresses and the words the links were wearing, nothing else. Each row carries a **remove** button, and **forget all** under the title empties the list; `Shift+L` on a link already listed takes it off too.
 - **Six themes.** Follow-the-desktop (the default), light, sepia, dark, and a high-contrast AAA pair.
 - **Four typefaces.** IBM Plex Sans, Serif, and Mono, plus Atkinson Hyperlegible Next for low vision. All of them are compiled into the binary.
 - **Screen-reader support.** An AccessKit tree, with the off-screen layout skip suspended while an assistive technology is attached.
 - **RSS and Atom feeds.** Open a feed's address and it is read as a list of entries with their summaries, not as a wall of XML. Nothing behind a headline is requested until you follow it, and how much of each entry to show is a setting.
-- **Per-site rules, compiled in and reported.** A rewrite table, a profile table, a search-engine table. Every application is announced before the request goes out, and `Shift+R` reloads bare.
+- **Per-site rules, compiled in and reported.** A rewrite table, a profile table, a search-engine table. Every application is announced before the request goes out, and `Ctrl+Shift+R` reloads bare.
 
 ## Install
 
@@ -140,7 +140,7 @@ cargo run --features gui -- example.com/article   # straight to a page
 cargo build --release --features gui              # ./target/release/hww
 ```
 
-The application lives behind the `gui` feature, so core tests compile without the egui dependency graph or the image subresource path. `hww` takes `--no-rewrite`, `--no-profile`, `--no-search`, and `--no-feed` to switch off one way of reading a response for a single run, `--show-rewrites`, `--show-profiles`, and `--show-engines` to print a table and exit, and `--why` for triage. In the reader, `Shift+R` reloads with all four off at once.
+The application lives behind the `gui` feature, so core tests compile without the egui dependency graph or the image subresource path. `hww` takes `--no-rewrite`, `--no-profile`, `--no-search`, and `--no-feed` to switch off one way of reading a response for a single run, `--show-rewrites`, `--show-profiles`, and `--show-engines` to print a table and exit, and `--why` for triage. In the reader, `Ctrl+Shift+R` (`Cmd+Shift+R` on macOS) reloads with all four off at once.
 
 ### Diagnosing a site
 

@@ -66,7 +66,8 @@ pub enum Event {
     ForgetHistory,
 }
 
-/// Draw the panel. `open` is `Chrome::settings_open`, so `Esc`, `,`, the menu item and the
+/// Draw the panel. `open` is `Chrome::settings_open`, so `Esc`, the settings key, the menu item
+/// and the
 /// window's own close all reach the same bit.
 ///
 /// Returns every change made this frame, in order. `app` applies them and sets `settings_dirty`,

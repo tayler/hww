@@ -346,7 +346,7 @@ rewrite table. Applied before anything is scored, refused when it would remove m
 the page, and reported field by field (matched *n*, matched nothing, rejected) on stderr after
 the page, in `--why`, and in the page-info panel. Each shipped profile carries a synthetic
 fixture and `every_profile_earns_its_keep` runs it with and without the profile. `--no-profile`
-and `Shift+R` (reload bare) switch it off.
+and a bare reload switch it off.
 
 ---
 

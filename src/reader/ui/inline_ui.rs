@@ -173,7 +173,7 @@ fn flush(ui: &mut Ui, job: &mut LayoutJob, ctx: &mut RenderCtx<'_>) {
     let resp = ui.add(Label::new(job).wrap());
     if carries_current_match {
         // A match lives inside a galley section, not in a widget of its own, so the honest
-        // granularity for `n`/`N` is the label that contains it. Splitting the label at the
+        // granularity for stepping matches is the label that contains it. Splitting the label at the
         // match instead would change where the line wraps, which is worse than a scroll that
         // lands a few words early.
         resp.scroll_to_me(Some(Align::Center));
