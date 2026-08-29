@@ -149,119 +149,174 @@ pub fn block_ui(ui: &mut Ui, b: &ir::Block, ctx: &mut RenderCtx<'_>) {
 /// there at all: a column of one placeholder per card was the worst thing about these pages.
 fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
     let gap = theme::snap(ctx.opts.base_size_pt * 0.35);
+    // Asked of the run and not of the row, so one site's mark failing to arrive cannot indent
+    // its neighbours differently. A run with no marks in it — every list a page produced, and
+    // the history — is laid out exactly as it was before the column existed.
+    let icon = entries
+        .iter()
+        .any(|e| e.icon.is_some())
+        .then(|| theme::snap(ctx.opts.base_size_pt * 1.25));
     for e in entries {
         ui.add_space(gap);
         ui.separator();
         ui.add_space(gap);
-        if let Some(img) = &e.image {
-            super::images::thumbnail(ui, img, ctx);
-        }
-        let title = match &e.href {
-            Some(href) => vec![ir::Inline::Link {
-                href: href.clone(),
-                inlines: e.title.clone(),
-            }],
-            None => e.title.clone(),
+        let Some(box_size) = icon else {
+            entry_ui(ui, e, ctx);
+            continue;
         };
-        let set = Setting::headline(ctx.opts, &ctx.pal);
-        // Through `short_date`, as the masthead's dateline is: a feed writes RFC 822, which is
-        // 31 characters of mostly zone offset, and the headline below gets whatever width this
-        // stamp leaves it. See `title::short_date`.
-        let when = e
-            .published
-            .as_deref()
-            .map(crate::reader::title::short_date)
-            .filter(|p| !p.is_empty());
-        // The right-hand end of the headline's first line holds the time and, for a card with
-        // a picture, the small `[image]` control (`images::load_control`). Measure the time,
-        // give the headline the rest, and let the headline wrap under both.
-        let font = theme::chrome_font(ctx.opts);
-        let time_w = when.as_deref().map_or(0.0, |p| {
-            ui.painter()
-                .layout_no_wrap(p.to_owned(), font.clone(), ctx.pal.dim)
-                .rect
-                .width()
+        // Two columns: the mark, then everything the row says. The gutter is the mark plus the
+        // same space the time is given at the other end of the headline, and the right-hand
+        // column is a `Ui` of its own so the headline, the address, and the dek wrap and align
+        // to it rather than to the page — which is what keeps them in the relationship to each
+        // other they have in a list with no marks in it.
+        let pad = theme::snap(ctx.opts.base_size_pt * 0.8);
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let avail = ui.available_width();
+            ui.allocate_ui_with_layout(
+                egui::vec2(box_size, box_size),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| match &e.icon {
+                    Some(src) => super::images::site_icon(ui, src, box_size, ctx),
+                    // A row in a marked run that has no mark of its own — a page kept before
+                    // this column existed, or one whose site named an icon hww will not
+                    // request. The space is claimed anyway, because
+                    // `allocate_ui_with_layout` advances the cursor by what its contents
+                    // *used*: a closure that draws nothing is zero wide, and that row's
+                    // headline would start where the marks are.
+                    None => {
+                        ui.allocate_space(egui::vec2(box_size, box_size));
+                    }
+                },
+            );
+            // `add_space` and not a wider allocation: `allocate_ui_with_layout` hands back the
+            // space its contents *used*, so a gutter padded from the inside collapses onto the
+            // mark and the two columns touch.
+            ui.add_space(pad);
+            ui.allocate_ui_with_layout(
+                egui::vec2((avail - box_size - pad).max(avail * 0.5), 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| entry_ui(ui, e, ctx),
+            );
         });
-        let control_w = if e.image.is_some() {
-            theme::snap(ctx.opts.base_size_pt * 4.0)
-        } else {
-            0.0
-        };
-        // The reading list's own control, reserved like the picture's and drawn beside it. A run
-        // of entries anywhere else is the page's own rows, and hww has nothing to take them off;
-        // see `RenderCtx::reading_list`. A width rather than a measurement, as `control_w` is: the
-        // label is one short word in a face the painter would have to be handed to measure, and
-        // the headline beside it wraps into whatever is left either way.
-        let remove_w = if ctx.reading_list && e.href.is_some() {
-            theme::snap(ctx.opts.base_size_pt * 4.5)
-        } else {
-            0.0
-        };
-        if time_w + control_w + remove_w > 0.0 {
-            let pad = theme::snap(ctx.opts.base_size_pt * 0.8);
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                let avail = ui.available_width();
-                ui.allocate_ui_with_layout(
-                    egui::vec2(
-                        (avail - time_w - control_w - remove_w - pad).max(avail * 0.5),
-                        0.0,
-                    ),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| runs(ui, &title, &set, ctx),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    ui.spacing_mut().item_spacing.x = theme::snap(ctx.opts.base_size_pt * 0.5);
-                    // First, so it sits at the outside edge under the header's own control. The
-                    // other two are about the row's page; this one is about the row.
-                    if remove_w > 0.0
-                        && let Some(href) = &e.href
-                    {
-                        remove_control(ui, href, ctx);
-                    }
-                    if let Some(p) = &when {
-                        ui.label(
-                            RichText::new(p.as_str())
-                                .font(font.clone())
-                                .color(ctx.pal.dim),
-                        );
-                    }
-                    if let Some(img) = &e.image {
-                        super::images::load_control(ui, img, ctx);
-                    }
-                });
-            });
-        } else {
-            runs(ui, &title, &set, ctx);
-        }
-        // Under the headline and above the dek, in the same dim as the date across from it.
-        // `small_font` and not `chrome_font`: the address belongs to the page the row points at,
-        // and this module's rule is that the page's words are set in the page's family. It is
-        // not a link — the headline is the link, and a row with two of them would give Tab two
-        // stops to the same place.
-        //
-        // Through `runs` rather than `ui.label`, which is the only way it reaches
-        // `RenderCtx::begin_list` and so the only way find-in-page can see it. The history and
-        // the library show an address at all because their titles repeat — half a dozen `Home`s
-        // are one list of identical rows without it — so `/` and a hostname is the first thing a
-        // reader tries on a long one, and a search that matched the visible text of every row
-        // except the one distinguishing part of it would be a wrong answer rather than a missing
-        // feature.
-        if let Some(addr) = &e.address {
-            let set = Setting {
-                font: theme::small_font(ctx.opts),
-                color: ctx.pal.dim,
-                role: ctx.opts.family,
-                underline: false,
-            };
-            runs(ui, &[ir::Inline::Text(addr.clone())], &set, ctx);
-        }
-        // Through `budget::lead_in`, not a loop here: `app::walk_blocks` reads the same
-        // function, so the pictures `I` offers to load are exactly the pictures on screen.
-        // See the module doc there.
-        let shown = crate::reader::budget::lead_in(&e.summary, ctx.opts.entry_summary_bytes);
-        blocks_ui(ui, shown, ctx, None);
     }
+}
+
+/// One entry's own column: the thumbnail, the headline with its time, the address, the dek.
+///
+/// Split out of [`entries_ui`] when the site mark arrived, and it draws the same thing at the
+/// same widths whether it was called directly or inside the right-hand column of a two-column
+/// row. Everything in here measures against `ui.available_width()`, which is how one function
+/// serves both.
+fn entry_ui(ui: &mut Ui, e: &ir::Entry, ctx: &mut RenderCtx<'_>) {
+    if let Some(img) = &e.image {
+        super::images::thumbnail(ui, img, ctx);
+    }
+    let title = match &e.href {
+        Some(href) => vec![ir::Inline::Link {
+            href: href.clone(),
+            inlines: e.title.clone(),
+        }],
+        None => e.title.clone(),
+    };
+    let set = Setting::headline(ctx.opts, &ctx.pal);
+    // Through `short_date`, as the masthead's dateline is: a feed writes RFC 822, which is
+    // 31 characters of mostly zone offset, and the headline below gets whatever width this
+    // stamp leaves it. See `title::short_date`.
+    let when = e
+        .published
+        .as_deref()
+        .map(crate::reader::title::short_date)
+        .filter(|p| !p.is_empty());
+    // The right-hand end of the headline's first line holds the time and, for a card with
+    // a picture, the small `[image]` control (`images::load_control`). Measure the time,
+    // give the headline the rest, and let the headline wrap under both.
+    let font = theme::chrome_font(ctx.opts);
+    let time_w = when.as_deref().map_or(0.0, |p| {
+        ui.painter()
+            .layout_no_wrap(p.to_owned(), font.clone(), ctx.pal.dim)
+            .rect
+            .width()
+    });
+    let control_w = if e.image.is_some() {
+        theme::snap(ctx.opts.base_size_pt * 4.0)
+    } else {
+        0.0
+    };
+    // The reading list's own control, reserved like the picture's and drawn beside it. A run
+    // of entries anywhere else is the page's own rows, and hww has nothing to take them off;
+    // see `RenderCtx::reading_list`. A width rather than a measurement, as `control_w` is: the
+    // label is one short word in a face the painter would have to be handed to measure, and
+    // the headline beside it wraps into whatever is left either way.
+    let remove_w = if ctx.reading_list && e.href.is_some() {
+        theme::snap(ctx.opts.base_size_pt * 4.5)
+    } else {
+        0.0
+    };
+    if time_w + control_w + remove_w > 0.0 {
+        let pad = theme::snap(ctx.opts.base_size_pt * 0.8);
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let avail = ui.available_width();
+            ui.allocate_ui_with_layout(
+                egui::vec2(
+                    (avail - time_w - control_w - remove_w - pad).max(avail * 0.5),
+                    0.0,
+                ),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| runs(ui, &title, &set, ctx),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                ui.spacing_mut().item_spacing.x = theme::snap(ctx.opts.base_size_pt * 0.5);
+                // First, so it sits at the outside edge under the header's own control. The
+                // other two are about the row's page; this one is about the row.
+                if remove_w > 0.0
+                    && let Some(href) = &e.href
+                {
+                    remove_control(ui, href, ctx);
+                }
+                if let Some(p) = &when {
+                    ui.label(
+                        RichText::new(p.as_str())
+                            .font(font.clone())
+                            .color(ctx.pal.dim),
+                    );
+                }
+                if let Some(img) = &e.image {
+                    super::images::load_control(ui, img, ctx);
+                }
+            });
+        });
+    } else {
+        runs(ui, &title, &set, ctx);
+    }
+    // Under the headline and above the dek, in the same dim as the date across from it.
+    // `small_font` and not `chrome_font`: the address belongs to the page the row points at,
+    // and this module's rule is that the page's words are set in the page's family. It is
+    // not a link — the headline is the link, and a row with two of them would give Tab two
+    // stops to the same place.
+    //
+    // Through `runs` rather than `ui.label`, which is the only way it reaches
+    // `RenderCtx::begin_list` and so the only way find-in-page can see it. The history and
+    // the bookmarks show an address at all because their titles repeat — half a dozen `Home`s
+    // are one list of identical rows without it — so `/` and a hostname is the first thing a
+    // reader tries on a long one, and a search that matched the visible text of every row
+    // except the one distinguishing part of it would be a wrong answer rather than a missing
+    // feature.
+    if let Some(addr) = &e.address {
+        let set = Setting {
+            font: theme::small_font(ctx.opts),
+            color: ctx.pal.dim,
+            role: ctx.opts.family,
+            underline: false,
+        };
+        runs(ui, &[ir::Inline::Text(addr.clone())], &set, ctx);
+    }
+    // Through `budget::lead_in`, not a loop here: `app::walk_blocks` reads the same
+    // function, so the pictures `I` offers to load are exactly the pictures on screen.
+    // See the module doc there.
+    let shown = crate::reader::budget::lead_in(&e.summary, ctx.opts.entry_summary_bytes);
+    blocks_ui(ui, shown, ctx, None);
 }
 
 /// The control at the trailing edge of a reading-list row: take this one link off the list.

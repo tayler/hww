@@ -79,9 +79,9 @@ mod keyspec {
     pub const ZOOM_RESET: &str = "Ctrl+0";
     pub const BACK: &str = "Alt+Left";
     pub const FORWARD: &str = "Alt+Right";
-    pub const KEEP_PAGE: &str = "Ctrl+D";
+    pub const BOOKMARK_PAGE: &str = "Ctrl+D";
     pub const READ_LATER: &str = "Shift+L";
-    pub const LIBRARY: &str = "Ctrl+Shift+B";
+    pub const BOOKMARKS: &str = "Ctrl+Shift+B";
     pub const HISTORY: &str = "Ctrl+H";
     pub const OUTLINE: &str = "Ctrl+Shift+O";
     pub const PAGE_INFO: &str = "Ctrl+I";
@@ -122,13 +122,13 @@ mod keyspec {
     pub const ZOOM_RESET: &str = "Cmd+0";
     pub const BACK: &str = "Cmd+[";
     pub const FORWARD: &str = "Cmd+]";
-    pub const KEEP_PAGE: &str = "Cmd+D";
+    pub const BOOKMARK_PAGE: &str = "Cmd+D";
     /// Not a modifier swap: Shift is Shift on every platform hww ships to. It is here anyway,
     /// because the rule the `cfg` split enforces is that no table outside this module spells a
     /// modifier — a key that happens to be the same on both is still spelled once, in the one
     /// place a later change to it would be found.
     pub const READ_LATER: &str = "Shift+L";
-    pub const LIBRARY: &str = "Cmd+Shift+B";
+    pub const BOOKMARKS: &str = "Cmd+Shift+B";
     /// The second spec that is not a modifier swap, and for a harder reason than `BACK`'s.
     /// `Cmd+H` hides the application on macOS: the system takes it before any window sees it,
     /// so a Mac told to press it would watch hww vanish instead of listing what it had drawn.
@@ -172,8 +172,8 @@ pub enum Command {
     OpenLocation,
     Reload,
     ReloadBare,
-    KeepPage,
-    OpenLibrary,
+    BookmarkPage,
+    OpenBookmarks,
     ReadLater,
     OpenReadingList,
     OpenHistory,
@@ -207,8 +207,8 @@ pub enum Command {
 /// the click is a toggle: one of these answers "is it on", and the command answers "turn it".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Checked {
-    /// The page on screen is in the reader's library. See `reader::archive`.
-    Kept,
+    /// The page on screen is bookmarked. See `reader::archive`.
+    Bookmarked,
     LinkAddresses,
     Outline,
     PageInfo,
@@ -228,9 +228,9 @@ pub enum Needs {
     Page,
     /// A page that came from a request is on screen.
     ///
-    /// Narrower than [`Needs::Page`], and the difference is the library itself: once a built
+    /// Narrower than [`Needs::Page`], and the difference is the bookmarks view itself: once a built
     /// view is a real `Page::Ready`, `Page` is satisfied on it, and "keep this page" there would
-    /// offer to save the library into the library.
+    /// offer to bookmark the bookmarks view.
     FetchedPage,
     /// Tab has landed on a link.
     FocusedLink,
@@ -349,9 +349,9 @@ pub fn bar() -> Vec<Menu> {
                 // mechanism for a row whose state the reader can see at a glance.
                 Item::Check {
                     label: "Keep this page",
-                    keys: KEEP_PAGE,
-                    command: C::KeepPage,
-                    checked: Checked::Kept,
+                    keys: BOOKMARK_PAGE,
+                    command: C::BookmarkPage,
+                    checked: Checked::Bookmarked,
                     needs: N::FetchedPage,
                 },
                 // `Item::Run` and not `Item::Check` beside "Keep this page", though this is a
@@ -369,14 +369,14 @@ pub fn bar() -> Vec<Menu> {
                 },
                 // The one view worth reaching from the idle screen, so it needs nothing.
                 Item::Run {
-                    label: "Library",
-                    keys: LIBRARY,
-                    command: C::OpenLibrary,
+                    label: "Bookmarks",
+                    keys: BOOKMARKS,
+                    command: C::OpenBookmarks,
                     needs: N::Nothing,
                 },
-                // Beside Library rather than under History with the visited pages, because it is
-                // the other list the reader filled on purpose. It needs nothing for Library's
-                // reason: what it holds outlives the session.
+                // Beside Bookmarks rather than under History with the visited pages, because it is
+                // the other list the reader filled on purpose. It needs nothing on screen, for
+                // the bookmarks' reason: what it holds outlives the session.
                 Item::Run {
                     label: "Read next",
                     keys: "l",
@@ -525,7 +525,7 @@ pub fn bar() -> Vec<Menu> {
                     needs: N::Forward,
                 },
                 Item::Separator,
-                // Under this title rather than beside Library in File, because a reader looking
+                // Under this title rather than beside Bookmarks in File, because a reader looking
                 // for a page they read yesterday looks where Back is. It needs nothing: the
                 // pages it lists outlive the session, so it opens on the splash too.
                 Item::Run {
@@ -582,17 +582,17 @@ pub const HELP: &[(&str, &str)] = &[
     (HELP_FIND, "find in page · next / previous match"),
     ("z / Z", "collapse focused reply · collapse all"),
     ("y / Y", "copy page URL · copy focused link"),
-    (KEEP_PAGE, "keep this page in your library"),
+    (BOOKMARK_PAGE, "bookmark this page"),
     (READ_LATER, "add the focused link to your reading list"),
     // The three openers on one row, as reload and `y / Y` already are. They are one family —
-    // each opens a view hww builds from `library.json` — and the card is sized by the window
+    // each opens a view hww builds from `archive.json` — and the card is sized by the window
     // rather than scrolled, so a row per tenant would push the footnote off the bottom edge the
     // moment a fourth arrives. `the_menu_and_the_help_card_agree` matches per token, so the
     // three menu rows still each find their key here; the reading list is the one of the three
     // no browser has a key for, which is why `l` sits between two chords.
     (
         HELP_LISTS,
-        "open your library · reading list · visited pages",
+        "open your bookmarks · reading list · visited pages",
     ),
     ("[ / ]", "narrow / widen the reading measure"),
     (HELP_ZOOM, "zoom in · out · actual size"),
@@ -663,8 +663,8 @@ mod tests {
             Command::OpenLocation,
             Command::Reload,
             Command::ReloadBare,
-            Command::KeepPage,
-            Command::OpenLibrary,
+            Command::BookmarkPage,
+            Command::OpenBookmarks,
             Command::ReadLater,
             Command::OpenReadingList,
             Command::OpenHistory,
@@ -758,7 +758,7 @@ mod tests {
             }
             // Two branches, and the second is the one that carries most of the table now that
             // the keys are chords: `RELOAD` is `Ctrl+R`, which is *not* a substring of the
-            // `Ctrl+Shift+R` beside it on the card, and `HISTORY` is not one of `LIBRARY`
+            // `Ctrl+Shift+R` beside it on the card, and `HISTORY` is not one of `BOOKMARKS`
             // either. A whole-spec substring still catches the rows the card spells alone, and
             // the token match catches every row that puts two specs on one line.
             let bare = keys.trim();

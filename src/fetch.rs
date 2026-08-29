@@ -313,13 +313,23 @@ impl Fetcher {
 /// property of the construction rather than a promise in a comment.
 fn referer_header(policy: Referer, referrer: Option<&Url>) -> Option<String> {
     match (policy, referrer) {
-        (Referer::PageOrigin, Some(page)) => {
-            let origin = page.origin();
-            // An opaque origin serializes to "null", which discloses nothing and helps nothing.
-            origin.is_tuple().then(|| origin.ascii_serialization())
-        }
+        (Referer::PageOrigin, Some(page)) => page_origin(page),
         _ => None,
     }
+}
+
+/// The `Referer` value a request made on behalf of `page` would carry, or `None`.
+///
+/// Public because the *count* has to be decided by the same function as the header. The reader's
+/// image-referer setting being on is not the same question as a header going out: a page hww
+/// built itself has an opaque origin (`hww:bookmarks` has no authority component at all), so its
+/// site marks disclose no referrer whatever the setting says. `ImageStore::record_request` asks
+/// this rather than the setting, or the panel reports a disclosure that never left the machine —
+/// which is the plausible-looking lie `pageinfo` exists to refuse.
+pub fn page_origin(page: &Url) -> Option<String> {
+    let origin = page.origin();
+    // An opaque origin serializes to "null", which discloses nothing and helps nothing.
+    origin.is_tuple().then(|| origin.ascii_serialization())
 }
 
 fn timeout_error(limits: &Limits) -> FetchError {
@@ -525,6 +535,22 @@ mod tests {
     fn opaque_origin_sends_no_referer() {
         let page = Url::parse("file:///home/reader/notes.html").unwrap();
         assert_eq!(referer_header(Referer::PageOrigin, Some(&page)), None);
+    }
+
+    /// The header and the count are one decision, which is why [`page_origin`] is public.
+    ///
+    /// A page hww built itself is the case that made this matter: the bookmarks' site marks are
+    /// requested on behalf of `hww:bookmarks`, which has no authority component at all, so no
+    /// `Referer` can leave — and `ImageStore::record_request` asks this rather than the reader's
+    /// setting, or page info would report a disclosure that never happened.
+    #[test]
+    fn a_page_hww_built_has_no_origin_to_disclose() {
+        let built = Url::parse(crate::reader::archive::BOOKMARKS).unwrap();
+        assert_eq!(page_origin(&built), None);
+        assert_eq!(referer_header(Referer::PageOrigin, Some(&built)), None);
+        // And the ordinary case still answers, or the two would agree by both being silent.
+        let page = Url::parse("https://example.com/a").unwrap();
+        assert_eq!(page_origin(&page).as_deref(), Some("https://example.com"));
     }
 
     /// A hang on a document is a bot-block; a hang on a subresource is bandwidth. Keeping the

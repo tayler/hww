@@ -17,12 +17,13 @@ hww fetches a web page, parses the HTML, then displays it using hww's own render
 
 - **Page readibility.** Readability-shaped scoring with a recall bias, tuned to find the prose in pages. Work to support more sites is ongoing.
 - **No cookies.** The capability is missing from the build, along with JavaScript, page CSS, ads, and third-party requests.
-- **Choose when images load.** Load them automatically, ask first (the default), turn off article images, or block every image request (including favicons).
+- **Choose when images load.** Load them automatically, ask first (the default), turn off article images, or block every image request (including site icons).
 - **Limited sharing when loading images.** An image's server can see which website the image appears on, but not the full page address. You can switch this off.
 - **Ubuntu, Windows, and macOS,** binaries (See #Install below). More Linux distros planned.
 - **Keyboard navigation** Every action has a keyboard shortcut (uses common browser defaults where possible): `Ctrl+L`, `Ctrl+F`, `Ctrl+R`, `Ctrl+H`, `Ctrl+D`, `Alt+Left`. Press `?` for the card.
-- **A library, a reading list, and a history you can switch off.** `Ctrl+D` (`Cmd+D` on macOS) keeps the page you are reading and `Ctrl+Shift+B` opens the list; `Ctrl+H` (`Cmd+Y` on macOS) opens the pages hww has drawn for you, which it writes down as it goes. Each has its own switch in Settings and its own button to empty it, and none of them takes another with it. The history records the address and the title, once per page rather than once per visit, and nothing about what you did on the page. Page info tells you whether the page on screen is kept.
-- **Line up what to read next.** Tab to a link and press `Shift+L`, or right-click it and choose **Read later**, and it waits on a list `l` opens. hww does not fetch any of them until you open one, so a reading list of thirty links makes no requests and costs no network — it is a list of addresses and the words the links were wearing, nothing else. Each row carries a **remove** button, and **forget all** under the title empties the list; `Shift+L` on a link already listed takes it off too.
+- **Bookmarks, a reading list, and a history you can switch off.** `Ctrl+D` (`Cmd+D` on macOS) bookmarks the page you are reading and `Ctrl+Shift+B` opens them; `Ctrl+H` (`Cmd+Y` on macOS) opens the pages hww has drawn for you, which it writes down as it goes. Each has its own switch in Settings and its own button to empty it, and none of them takes another with it. The history records the address and the title, once per page rather than once per visit, and nothing about what you did on the page. Page info tells you whether the page on screen is bookmarked, and which hosts the site icons came from.
+- **Line up what to read next.** Tab to a link and press `Shift+L`, or right-click it and choose **Read later**, and it waits on a list `l` opens. hww does not fetch any of the pages until you open one: the list holds addresses and the words the links were wearing, nothing else. Each row carries a **remove** button, and **forget all** under the title empties the list; `Shift+L` on a link already listed takes it off too.
+- **A site icon beside every row.** Your bookmarks and your reading list draw each site's favicon in a column to the left of the link. Opening either list asks the sites on screen for their icons, and nothing else — the pages themselves are still not fetched. A bookmark carries the icon address the page gave when you saved it; a reading-list row has never been fetched, so hww guesses the usual `/favicon.ico` and leaves the column empty where that guess comes to nothing. Only the rows on screen are asked for. **No image requests** stops all of it, as it stops every other picture, and page info names every host contacted.
 - **Six themes.** Follow-the-desktop (the default), light, sepia, dark, and a high-contrast AAA pair.
 - **Four typefaces.** IBM Plex Sans, Serif, and Mono, plus Atkinson Hyperlegible Next for low vision. All of them are compiled into the binary.
 - **Screen-reader support.** An AccessKit tree, with the off-screen layout skip suspended while an assistive technology is attached.
@@ -112,7 +113,9 @@ Windows has no door yet. It ships as a zip with no installer, and registering a 
 
 ### On every platform
 
-`HWW_CONFIG_DIR` overrides where settings, the library, and the history are kept; if it was set when hww ran, remove that directory instead of the one named above. Page content and images are never saved to disk. The one file that outlives a run besides `settings.json` is `library.json`, and it holds three lists: the pages you asked hww to keep, the links you marked to read later, and — unless you switch it off — the address and title of each page hww has shown you. **Settings › Library › forget everything** empties the first, **Settings › Reading list › forget the reading list** the second, and **Settings › History › forget history** the third; each leaves the other two alone, and the uninstall commands above delete the file with the rest of the directory.
+`HWW_CONFIG_DIR` overrides where settings, bookmarks, and history are kept; if it was set when hww ran, remove that directory instead of the one named above. Page content and images are never saved to disk, site icons included. The one file that outlives a run besides `settings.json` is `archive.json`, and it holds three lists: the pages you bookmarked, each with the address of its site's icon, the links you marked to read later, and — unless you switch it off — the address and title of each page hww has shown you. **Settings › Bookmarks › forget everything** empties the first, **Settings › Reading list › forget the reading list** the second, and **Settings › History › forget history** the third; each leaves the other two alone, and the uninstall commands above delete the file with the rest of the directory.
+
+Before 0.4 this file was called `library.json` and bookmarks were called the library. hww does not look for the old file: if you are upgrading and want what is in it, rename it to `archive.json` yourself, and change every `"kind": "kept"` in it to `"kind": "bookmark"`. The settings key moved with it — if you had turned page-keeping off, `settings.json` names it `keep_library` and hww now reads `keep_bookmarks`, so the switch comes back on until you set it again.
 
 ## Main files
 
@@ -120,7 +123,7 @@ Windows has no door yet. It ships as a zip with no installer, and registering a 
 | --- | --- |
 | `src/bin/hww.rs` | Parses command-line flags and starts the reader |
 | `src/reader/` | Reading logic and settings; `reader/ui` drives the egui window |
-| `src/reader/archive.rs` | The library, the reading list, and the history, and the doctrine for anything hww is allowed to remember |
+| `src/reader/archive.rs` | The bookmarks, the reading list, and the history, and the doctrine for anything hww is allowed to remember |
 | `src/session.rs` | Runs rewrite → fetch → decode → extract for a URL |
 | `src/sites.rs` | Builtin host rewrites and per-site extraction profiles |
 | `src/search.rs` | Turns a query into a URL and a result page into entries |

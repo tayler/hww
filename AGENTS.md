@@ -10,8 +10,10 @@ ledger. This file contains only rules useful across tasks. Reference symbols, no
 hww is a second browser for stripped, non-app HTML, with text and GUI renderers. RSS 2.0 and
 Atom ship; feed autodiscovery, JSON Feed, RSS 1.0/RDF, gemini, gopher, and Markdown are not
 started. Nothing writes page content to disk. Two files survive a run, both in
-`settings::config_dir()`: `settings.json`, and `library.json`, which holds the three things hww is
-allowed to remember and nothing else. **Read `src/reader/archive.rs` before
+`settings::config_dir()`: `settings.json`, and `archive.json`, which holds the three things hww is
+allowed to remember — a bookmark also carrying the address of its site's icon — and nothing
+else. It is named after the module and the doctrine rather than after any one of its three
+tenants; see `settings::archive_path`. **Read `src/reader/archive.rs` before
 adding anything that writes to disk** — the archive doctrine is there, and it is the rule, not
 this paragraph.
 
@@ -96,7 +98,7 @@ not move under `ui/`. `reader/face` chooses family names; `reader/ui/fonts` regi
 The reading column contains page content only. Page remarks are infobars, error pages, or
 toasts. Positional markers such as `[image]`, `Block::Embed`, and `notice::PENDING` are the
 exceptions. A document hww built itself is not a remark and does not breach the rule: the
-library, the reading list, and the history are titled documents of links that the reader reads
+bookmarks, the reading list, and the history are titled documents of links that the reader reads
 and follows, and
 `search::document` already puts a locally-built document in that column. The rule is about keeping
 remarks *about* a page out of the column, and a list of addresses is not a remark about anything. A
@@ -112,15 +114,17 @@ A built view goes through `ReaderApp::install`/`commit` like every other page, n
 that pins the claimed set — not a `Page` variant and not a render path. `builtin_view` is consulted
 at the top of `navigate` and nowhere else: `reload`, `follow`, and `arrive` all reach `navigate`,
 and `arrive` is the one that bites, because a built view is deliberately never cached and Back
-would otherwise hand `hww:library` to reqwest. It matches each address exactly, never the `hww`
+would otherwise hand `hww:bookmarks` to reqwest. It matches each address exactly, never the `hww`
 scheme, so no http(s) URL can be diverted from a real fetch. Never fabricate a `Provenance` that
 claims a server
 answered; `Provenance::built` carries an address and zeros, and `pageinfo::Arrival::Built` is what
 guarantees the zeros are never drawn. `notice::about_page` takes the arrival and returns nothing
-for a built page, or a two-item library trips the thin-extraction caution. A built view records
+for a built page, or a two-item bookmarks view trips the thin-extraction caution. A built view records
 nothing in the history: `hww:history` must not list itself, and neither may `hww:reading-list`.
 That one is `Archive::visit`'s scheme refusal rather than a rule at the caller, which is why it
-covers an address no one has written yet.
+covers an address no one has written yet. A built view is nonetheless the one page hww assembles
+that still makes a request — the site marks in its left column — so `pageinfo::rows` reports third parties
+for `Arrival::Built` and its Route note claims only that no *response* was received.
 
 Reader-facing wording stays outside `ui/` so the default job tests it: page remarks in
 `reader/notice.rs`, menu and help rows in `reader/menu.rs`, setting labels and notes in
@@ -160,18 +164,18 @@ Do not weaken the contrast tests.
 
 ## Privacy and network
 
-hww remembers three things and none of them quietly. What the reader **names** is the library: a
+hww remembers three things and none of them quietly. What the reader **names** is a bookmark: a
 keypress, about one page, once, in the same category as `search_engine`. What the reader **lines
 up** is the reading list: a link on the page in front of them, marked to open later, never
 fetched until they open it. What hww **watched** is the history: the address and title of every
 page it drew, written without being asked, which is the record that makes a browser profile worth
-stealing. They are three tenants of one file, with `keep_library`, `keep_reading_list`, and
+stealing. They are three tenants of one file, with `keep_bookmarks`, `keep_reading_list`, and
 `keep_history` over them, and the doctrine that governs all three is in `reader::archive` — read
 it before changing any of them. A new tenant is a new `archive::Kind` in the one file, never a
 second file, and it arrives with its own switch, its own row in `prefs::fields`, its own way to be
 forgotten, and its own line in README's uninstall paragraphs.
 
-The library and the reading list are both chosen and are still not the same tenant: the library
+The bookmarks and the reading list are both chosen and are still not the same tenant: a bookmark
 holds pages that were read, so its rows carry a fetched `<title>` and print no address; the
 reading list holds links that were not, so its rows carry whatever words the link wore and print
 the address under them, because those words are "Read more" often enough to name nothing.
@@ -212,7 +216,14 @@ read-timeout is the measured bot-block signal; a subresource timeout is `FetchEr
 
 Article images are a third-party capability behind `gui`. They load only after a control names
 the host and the user acts, are counted in page info, and never touch disk. Never auto-load,
-prefetch, or load on hover. The favicon is the one automatic exception and is chrome identity.
+prefetch, or load on hover. Site icons are the automatic exception and are identity, not content:
+the page's own favicon, and the marks the bookmarks and the reading list draw in a left column,
+fetched for the rows in the layout band. A bookmark stores the address the page declared; a
+reading-list row has none, because hww never fetched it, so `archive::well_known_icon` guesses
+`/favicon.ico` at its origin and the guess stays out of the file. All answer `allows_any_request`,
+all are counted, and page info reports them on a built page, which is why `Arrival::Built` no
+longer claims no third party was contacted. The history neither stores an icon nor draws a
+column: it is thousands of rows nobody chose.
 
 Keep `referer(false)` on the client. Document requests carry no Referer. Image requests alone
 may set an origin-only Referer built from `Url::origin()`, never a path. The setting remains

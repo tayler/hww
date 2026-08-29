@@ -41,19 +41,19 @@ pub struct Settings {
     /// stays the only place in the crate that spells a host out.
     #[serde(deserialize_with = "engine_or_default")]
     pub search_engine: crate::sites::EngineId,
-    /// Whether hww may write the library at all.
+    /// Whether hww may write bookmarks at all.
     ///
-    /// The archive doctrine's off switch. Off means hww stops keeping pages; it does not mean
-    /// what is already kept disappears, and the panel puts "forget everything" in the same group
-    /// for exactly that reason — a switch that silently discarded the library would be as much a
-    /// surprise as one that silently retained it. See [`crate::reader::archive`].
-    pub keep_library: bool,
+    /// The archive doctrine's off switch. Off means hww stops bookmarking pages; it does not mean
+    /// what is already saved disappears, and the panel puts "forget everything" in the same group
+    /// for exactly that reason — a switch that silently discarded the bookmarks would be as much
+    /// a surprise as one that silently retained it. See [`crate::reader::archive`].
+    pub keep_bookmarks: bool,
     /// Whether hww may write the reading list at all.
     ///
     /// The archive doctrine's switch for its third tenant, and it means what
-    /// [`Settings::keep_library`] means by the same word: off stops the marking and leaves what is
-    /// already listed, with "forget the reading list" in the same group as the other half. On by
-    /// default like the library's, and for the library's reason rather than the history's —
+    /// [`Settings::keep_bookmarks`] means by the same word: off stops the marking and leaves what
+    /// is already listed, with "forget the reading list" in the same group as the other half. On
+    /// by default like the bookmarks', and for their reason rather than the history's —
     /// nothing is written until the reader marks a link, so a default that permits it promises
     /// nothing about what hww does on its own. See [`crate::reader::archive`].
     pub keep_reading_list: bool,
@@ -63,7 +63,7 @@ pub struct Settings {
     /// page by page. On by default, which is why the group it sits in prints the file's path and
     /// carries the button that empties it: see [`crate::reader::archive`], where the cost of that
     /// default is argued rather than assumed. Off stops the writing and leaves what is already
-    /// there, exactly as [`Settings::keep_library`] does, because the two switches must not mean
+    /// there, exactly as [`Settings::keep_bookmarks`] does, because the two switches must not mean
     /// different things by the same word.
     pub keep_history: bool,
     /// What hww opens on when the command line names no page.
@@ -109,17 +109,18 @@ where
 /// What is on screen when hww starts with no page named.
 ///
 /// The home screen is not a new surface: `ReaderApp::new` takes the same builtin-view path the
-/// library key takes, so opening on the library is literally "hww opened with the library" and
+/// bookmarks key takes, so opening on them is literally "hww opened with the bookmarks" and
 /// inherits find,
 /// the outline, scrolling, Tab focus, and correct menu gating with no special casing. Drawing
-/// library entries into the idle screen instead would have forked the page model.
+/// bookmarks entries into the idle screen instead would have forked the page model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OpenOn {
-    /// The library, when there is anything in it. An empty one still opens on the splash: first
-    /// run is unchanged, because nothing has happened yet and there is nothing to report.
+    /// The bookmarks, when there are any. An empty list still opens on the splash: first run is
+    /// unchanged, because nothing has happened yet and there is nothing to report.
+    ///
     #[default]
-    Library,
+    Bookmarks,
     /// The splash and an open URL bar, which is what hww has always done.
     Nothing,
 }
@@ -153,7 +154,7 @@ impl Default for Settings {
             send_image_referer: true,
             scroll_lines: 3.0,
             search_engine: crate::sites::EngineId::default(),
-            keep_library: true,
+            keep_bookmarks: true,
             keep_reading_list: true,
             keep_history: true,
             open_on: OpenOn::default(),
@@ -237,15 +238,27 @@ pub fn settings_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("settings.json"))
 }
 
-/// Where the library file lives, beside the settings.
+/// Where the archive file lives, beside the settings.
 ///
 /// One directory, deliberately. Saved items are arguably state rather than configuration, which
 /// on Linux is `XDG_STATE_HOME`, but the archive doctrine (`reader::archive`) is about *what* is
 /// written and *who asked for it*, not about which spec-blessed folder it lands in. A second
 /// directory would double the uninstall instructions in README for no privacy gain, and
 /// `HWW_CONFIG_DIR` would then override half of what hww writes.
+///
+/// **`archive.json`, named after the module and the doctrine rather than after any one of the
+/// three lists inside it.** It was `library.json` while the bookmarks were its only tenant, and
+/// keeping that name past the rename would have left a maintainer translating "library" to
+/// "bookmarks" in their head at every call site — while `bookmarks.json` would have set the same
+/// trap for whoever next opened it looking for the history. The file is the archive: `Archive` is
+/// the type, `reader::archive` is the doctrine, and this is where it lives.
+///
+/// A reader upgrading past the rename finds an empty archive and their old `library.json`
+/// untouched beside it. Renaming that file by hand, and rewriting its `"kind": "kept"` as
+/// `"kind": "bookmark"`, is the whole migration; nothing in the program looks for the old name,
+/// and README says so.
 pub fn archive_path() -> Option<PathBuf> {
-    config_dir().map(|d| d.join("library.json"))
+    config_dir().map(|d| d.join("archive.json"))
 }
 
 /// Load, or fall back to defaults with a reason.
@@ -342,6 +355,39 @@ fn sync_dir(_dir: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// The per-platform directory, spelled out where a test can read it.
+    ///
+    /// `cfg`-selected, so each of these runs on exactly one CI job and the other two arms are
+    /// not even compiled — which is how a blanket rename across the tree once turned
+    /// `Library/Application Support` into a folder Apple does not define, on the one platform
+    /// the fast job cannot see. The strings are Apple's and Microsoft's, not hww's, and are the
+    /// kind of constant that no local reasoning protects: it has to be pinned.
+    #[test]
+    fn the_config_directory_is_the_one_the_platform_defines() {
+        // SAFETY: single-threaded test; the variable is restored before it returns.
+        let saved = std::env::var_os("HWW_CONFIG_DIR");
+        unsafe { std::env::remove_var("HWW_CONFIG_DIR") };
+        let dir = config_dir().expect("a home directory");
+        let tail: Vec<String> = dir
+            .components()
+            .rev()
+            .take(3)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        #[cfg(target_os = "macos")]
+        assert_eq!(tail, ["hww", "Application Support", "Library"]);
+        #[cfg(target_os = "windows")]
+        assert_eq!(tail[0], "hww");
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_eq!(tail[0], "hww");
+        // And README's uninstall paragraph names the same path on every platform.
+        assert!(dir.ends_with("hww"));
+        if let Some(v) = saved {
+            // SAFETY: as above.
+            unsafe { std::env::set_var("HWW_CONFIG_DIR", v) };
+        }
+    }
+
     /// `HWW_CONFIG_DIR` is process-wide, so these run as one test rather than racing.
     #[test]
     fn settings_round_trip_and_survive_a_corrupt_file() {
@@ -361,7 +407,7 @@ mod tests {
         want.send_image_referer = false;
         want.scroll_lines = 5.0;
         want.show_menu_bar = false;
-        want.keep_library = false;
+        want.keep_bookmarks = false;
         want.keep_reading_list = false;
         want.keep_history = false;
         want.open_on = OpenOn::Nothing;
@@ -505,26 +551,26 @@ mod tests {
     }
 
     /// The archive's four switches survive the file, and an existing installation's file —
-    /// which has none of them — keeps the library on rather than silently having it off.
+    /// which has none of them — keeps the bookmarks on rather than silently having it off.
     ///
     /// The history's default is asserted here too, and it is the assertion worth having: it is
     /// the one switch that writes without being asked, so a build that shipped it defaulting the
     /// other way, or silently flipping under an older file, would be a different program from the
     /// one README describes.
     #[test]
-    fn the_library_switches_round_trip_and_default_on() {
+    fn the_bookmark_switches_round_trip_and_default_on() {
         let older: Settings = serde_json::from_str(r#"{"zoom_factor": 1.5}"#).unwrap();
         assert!(
-            older.keep_library,
+            older.keep_bookmarks,
             "an existing file must not turn keeping off"
         );
         assert!(older.keep_history, "nor history");
         assert!(older.keep_reading_list, "nor the reading list");
-        assert_eq!(older.open_on, OpenOn::Library);
+        assert_eq!(older.open_on, OpenOn::Bookmarks);
         assert!(Settings::default().keep_history);
 
         let want = Settings {
-            keep_library: false,
+            keep_bookmarks: false,
             keep_reading_list: false,
             keep_history: false,
             open_on: OpenOn::Nothing,
@@ -538,11 +584,11 @@ mod tests {
     /// a later choice loses every other setting in the file and writes the defaults back.
     #[test]
     fn an_unknown_open_on_costs_only_that_field() {
-        let json = r#"{"open_on": "the-weather", "zoom_factor": 1.4, "keep_library": false}"#;
+        let json = r#"{"open_on": "the-weather", "zoom_factor": 1.4, "keep_bookmarks": false}"#;
         let s: Settings = serde_json::from_str(json).expect("the file still parses");
         assert_eq!(s.open_on, OpenOn::default());
         assert_eq!(s.zoom_factor, 1.4);
-        assert!(!s.keep_library);
+        assert!(!s.keep_bookmarks);
     }
 
     /// A value of the wrong shape entirely, not just an unknown name.

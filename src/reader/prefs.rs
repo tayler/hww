@@ -51,7 +51,7 @@ pub enum Group {
     Replies,
     Window,
     Search,
-    Library,
+    Bookmarks,
     ReadingList,
     History,
     Privacy,
@@ -66,7 +66,7 @@ impl Group {
         Group::Replies,
         Group::Window,
         Group::Search,
-        Group::Library,
+        Group::Bookmarks,
         Group::ReadingList,
         Group::History,
         Group::Privacy,
@@ -81,7 +81,7 @@ impl Group {
             Group::Replies => "Replies",
             Group::Window => "Window",
             Group::Search => "Search",
-            Group::Library => "Library",
+            Group::Bookmarks => "Bookmarks",
             Group::ReadingList => "Reading list",
             Group::History => "History",
             Group::Privacy => "Privacy",
@@ -104,11 +104,11 @@ impl Group {
                 "Typing words rather than an address searches. The words go to the engine \
                  chosen here, and hww names it on screen before the request leaves.",
             ),
-            Group::Library => Some(
-                "The pages you asked hww to keep, one keypress at a time. Nothing is added here \
-                 that you did not name. Dates are shown in UTC.",
+            Group::Bookmarks => Some(
+                "The pages you bookmarked, one keypress at a time. Nothing is added here that you \
+                 did not name. Dates are shown in UTC.",
             ),
-            // Sits between Library and History because that is the order of how much the reader
+            // Sits between Bookmarks and History because that is the order of how much the reader
             // chose: pages they read and saved, links they picked but have not opened, pages hww
             // wrote down on its own.
             Group::ReadingList => Some(
@@ -152,7 +152,7 @@ pub enum FieldId {
     StopIndentingAfter,
     ShowMenuBar,
     SearchEngine,
-    KeepLibrary,
+    KeepBookmarks,
     OpenOn,
     KeepReadingList,
     KeepHistory,
@@ -178,7 +178,7 @@ impl FieldId {
         FieldId::StopIndentingAfter,
         FieldId::ShowMenuBar,
         FieldId::SearchEngine,
-        FieldId::KeepLibrary,
+        FieldId::KeepBookmarks,
         FieldId::OpenOn,
         FieldId::KeepReadingList,
         FieldId::KeepHistory,
@@ -210,7 +210,7 @@ impl FieldId {
             FieldId::ScrollStep => (None, "scroll_lines"),
             FieldId::ShowMenuBar => (None, "show_menu_bar"),
             FieldId::SearchEngine => (None, "search_engine"),
-            FieldId::KeepLibrary => (None, "keep_library"),
+            FieldId::KeepBookmarks => (None, "keep_bookmarks"),
             FieldId::OpenOn => (None, "open_on"),
             FieldId::KeepReadingList => (None, "keep_reading_list"),
             FieldId::KeepHistory => (None, "keep_history"),
@@ -359,21 +359,21 @@ const SEARCH_ENGINES: &[Choice] = &[
     ),
 ];
 
-/// What hww shows when it opens with no page named. The default is first, which is the library:
+/// What hww shows when it opens with no page named. The default is first, which is the bookmarks:
 /// six months of hww should leave something to come back to, and a reader who saved a page last
 /// week should meet it rather than a wordmark.
 ///
-/// An empty library still opens on the splash whichever of these is chosen, so first run is
-/// unchanged; the note says so, because a reader who picks "your library" and then sees a
+/// An empty bookmarks list still opens on the splash whichever of these is chosen, so first run is
+/// unchanged; the note says so, because a reader who picks "your bookmarks" and then sees a
 /// wordmark would otherwise think the setting did nothing.
 const OPEN_ON: &[Choice] = &[
     choice_note(
-        "Your library",
-        "Opens on the pages you have kept. With nothing kept yet, hww opens as it always has.",
+        "Your bookmarks",
+        "Opens on the pages you have bookmarked. With none yet, hww opens as it always has.",
     ),
     choice_note(
         "Nothing",
-        "Opens on the hww wordmark with the address bar ready, whatever you have kept.",
+        "Opens on the hww wordmark with the address bar ready, whatever you have bookmarked.",
     ),
 ];
 
@@ -424,13 +424,13 @@ const IMAGES: &[Choice] = &[
     ),
     choice_note(
         "Article images off",
-        "Saves data and shares less information, but article pictures cannot be viewed. The \
-         small site icon still loads.",
+        "Saves data and shares less information, but article pictures cannot be viewed. Small \
+         site icons still load, including the ones beside your bookmarks and your reading list.",
     ),
     choice_note(
         "No image requests",
         "Uses no data for pictures and shares no information through picture requests, but \
-         neither article pictures nor the small site icon appear.",
+         neither article pictures nor the small site icons appear.",
     ),
 ];
 
@@ -657,20 +657,20 @@ pub fn fields() -> Vec<Field> {
             control: Choice(SEARCH_ENGINES),
         },
         Field {
-            id: F::KeepLibrary,
-            group: G::Library,
-            label: "Keep pages",
+            id: F::KeepBookmarks,
+            group: G::Bookmarks,
+            label: "Keep bookmarks",
             note: Some(
-                "Lets you save the page you are reading and open the list later. Turning this off \
-                 stops hww saving anything new; it does not remove what you have already saved, \
-                 which is what forget everything below is for.",
+                "Lets you bookmark the page you are reading and open the list later. Turning this \
+                 off stops hww bookmarking anything new; it does not remove what you have already \
+                 saved, which is what forget everything below is for.",
             ),
-            keys: crate::reader::menu::KEEP_PAGE,
+            keys: crate::reader::menu::BOOKMARK_PAGE,
             control: Toggle,
         },
         Field {
             id: F::OpenOn,
-            group: G::Library,
+            group: G::Bookmarks,
             label: "When hww opens",
             note: Some("What is on screen when you start hww without naming a page."),
             keys: "",
@@ -756,10 +756,10 @@ pub fn get(s: &Settings, id: FieldId) -> Value {
                 .unwrap_or(0),
         ),
         FieldId::OpenOn => Value::Index(match s.open_on {
-            OpenOn::Library => 0,
+            OpenOn::Bookmarks => 0,
             OpenOn::Nothing => 1,
         }),
-        FieldId::KeepLibrary => Value::Bool(s.keep_library),
+        FieldId::KeepBookmarks => Value::Bool(s.keep_bookmarks),
         FieldId::KeepReadingList => Value::Bool(s.keep_reading_list),
         FieldId::KeepHistory => Value::Bool(s.keep_history),
         FieldId::ShowLinkAddresses => Value::Bool(s.read.show_link_urls),
@@ -847,14 +847,14 @@ pub fn set(s: &mut Settings, id: FieldId, v: Value) {
         }
         FieldId::OpenOn => {
             s.open_on = match v.index() {
-                Some(0) => OpenOn::Library,
+                Some(0) => OpenOn::Bookmarks,
                 Some(1) => OpenOn::Nothing,
                 _ => s.open_on,
             }
         }
-        FieldId::KeepLibrary => {
+        FieldId::KeepBookmarks => {
             if let Some(b) = v.boolean() {
-                s.keep_library = b;
+                s.keep_bookmarks = b;
             }
         }
         FieldId::KeepReadingList => {
@@ -1049,7 +1049,7 @@ mod tests {
                 | FieldId::StopIndentingAfter
                 | FieldId::ShowMenuBar
                 | FieldId::SearchEngine
-                | FieldId::KeepLibrary
+                | FieldId::KeepBookmarks
                 | FieldId::OpenOn
                 | FieldId::KeepReadingList
                 | FieldId::KeepHistory

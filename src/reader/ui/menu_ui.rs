@@ -66,8 +66,8 @@ impl Enable {
 /// The live state a checked item reflects.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Checks {
-    /// The page on screen is in the reader's library.
-    pub kept: bool,
+    /// The page on screen is in the reader's bookmarks.
+    pub bookmarked: bool,
     pub link_addresses: bool,
     pub outline: bool,
     pub page_info: bool,
@@ -77,7 +77,7 @@ pub struct Checks {
 impl Checks {
     fn is_on(self, what: Checked) -> bool {
         match what {
-            Checked::Kept => self.kept,
+            Checked::Bookmarked => self.bookmarked,
             Checked::LinkAddresses => self.link_addresses,
             Checked::Outline => self.outline,
             Checked::PageInfo => self.page_info,

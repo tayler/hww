@@ -199,6 +199,38 @@ fn article_linking(href: &str) -> String {
 /// The two documents the page-cache scene navigates between, served by `serve` at `/one` and
 /// `/two`. Both carry a link to the other, so the scene can be a real Follow rather than a
 /// second typed URL, and both clear `ir::THIN_TEXT` so no extraction bar joins the picture.
+/// The two pages the bookmarks scene keeps, served at `/marked-one` and `/marked-two`.
+///
+/// Their own documents rather than the injected `FRONT` and `THREAD` the scene used before the
+/// bookmarks grew an icon column: a mark is a real request for a real image, so photographing the
+/// column at all means keeping pages hww fetched from a server that answers for their icons.
+/// Two different icons, because the column's job is to tell one site from another, and a
+/// picture in which every row carries the same mark would not show that it does.
+const MARKED_ONE: &str = r#"
+<html lang="en"><head><title>A page worth keeping</title>
+<link rel="icon" href="/mark-a.png"></head><body>
+<article>
+<h1>A page worth keeping</h1>
+<p>Ctrl+D writes this page's address, its title, and the address of the mark above into the one
+file that outlives the run. Nothing else about it is stored, and nothing of what it says.</p>
+<p>The mark is fetched when the bookmarks draws it, not when the page is kept: a list of icons on
+disk would be page content on disk, which is the line this reader does not cross.</p>
+</article></body></html>
+"#;
+
+const MARKED_TWO: &str = r#"
+<html lang="en"><head><title>The second page in the list</title>
+<link rel="icon" href="/mark-b.png"></head><body>
+<article>
+<h1>The second page in the list</h1>
+<p>Two pages from one host would carry one mark between them, so this fixture names a second
+icon and the column has something to distinguish. The bookmarks lists most recently kept first,
+which puts this row above the other one.</p>
+<p>Every row's mark is fetched under the same policy as the icon beside the masthead, and the
+page-info panel names the hosts it came from even here, where nothing else was requested.</p>
+</article></body></html>
+"#;
+
 const KEPT_ONE: &str = r#"
 <html lang="en"><head><title>The page you came back to</title></head><body>
 <article>
@@ -405,30 +437,42 @@ fn catalog(port: u16) -> Vec<Scene> {
             vec![page(FRONT_URL, FRONT)],
         ),
         Scene {
+            settle_ms: 400,
             volatile: true,
             ..scene(
-                "library",
-                "the library: two kept pages, most recent first",
+                "bookmarks",
+                "the bookmarks: two kept pages, each under its site's mark",
                 // Two real keeps and a real open, through `run_command`, which is one of the
                 // four hooks `AGENTS.md` names for this: both commands are reachable that way,
                 // so neither needs key steps nor depends on a synthetic Tab landing focus. It
                 // photographs `Ready::built`, `Provenance::built`, and `archive::document` on the
                 // path a reader takes rather than a page injected to look like one.
                 //
-                // Volatile for the reason the loading scenes are: an entry says the day it was
-                // kept, so the picture carries today's date by construction. Neither page is
-                // `ARTICLE_URL`, so the page-info scenes that photograph that article still show
-                // it as one the reader has not kept, whatever order these run in.
+                // Two real *navigations* as well, which injected pages cannot replace since the
+                // icon column grew: a mark is a third-party image, so the only way to photograph
+                // the column with anything in it is to keep pages a server will answer for. The
+                // waits are the requests — the document, then the mark the built view asks for
+                // once it is drawn.
+                //
+                // Volatile for the reason the loading scenes are, and now for the fixture
+                // server's ephemeral port as well: an entry says the day it was kept, so the
+                // picture carries today's date by construction. Neither page is `ARTICLE_URL`,
+                // so the page-info scenes that photograph that article still show it as one the
+                // reader has not kept, whatever order these run in.
                 vec![
-                    page(FRONT_URL, FRONT),
-                    Step::Run(Command::KeepPage),
-                    page(THREAD_URL, THREAD),
-                    Step::Run(Command::KeepPage),
-                    Step::Run(Command::OpenLibrary),
+                    Step::Nav(format!("http://127.0.0.1:{port}/marked-one")),
+                    Step::Wait(30),
+                    Step::Run(Command::BookmarkPage),
+                    Step::Nav(format!("http://127.0.0.1:{port}/marked-two")),
+                    Step::Wait(30),
+                    Step::Run(Command::BookmarkPage),
+                    Step::Run(Command::OpenBookmarks),
+                    Step::Wait(30),
                 ],
             )
         },
         Scene {
+            settle_ms: 400,
             volatile: true,
             ..scene(
                 "reading-list",
@@ -444,7 +488,7 @@ fn catalog(port: u16) -> Vec<Scene> {
                 // `Item::label`'s fallback to the address and `address_under`'s refusal to print
                 // it twice.
                 //
-                // Volatile for the library scene's reason: a row says the day it was marked.
+                // Volatile for the bookmarks scene's reason: a row says the day it was marked.
                 vec![
                     page(FRONT_URL, FRONT),
                     Step::ReadLater {
@@ -459,7 +503,16 @@ fn catalog(port: u16) -> Vec<Scene> {
                         href: "https://example.net/untitled".to_owned(),
                         title: String::new(),
                     },
+                    // One row on the fixture server, so the picture carries a mark that really
+                    // arrived. The other three point at hosts that do not resolve, which is the
+                    // ordinary case for this list and is worth photographing beside it: a guess
+                    // that comes to nothing leaves the column empty and the row where it was.
+                    Step::ReadLater {
+                        href: format!("http://127.0.0.1:{port}/marked-one"),
+                        title: "A page worth keeping".to_owned(),
+                    },
                     Step::Run(Command::OpenReadingList),
+                    Step::Wait(30),
                 ],
             )
         },
@@ -468,7 +521,7 @@ fn catalog(port: u16) -> Vec<Scene> {
             ..scene(
                 "history",
                 "the pages hww has written down, most recent first",
-                // Volatile, and for one more reason than the library scene: an entry carries the
+                // Volatile, and for one more reason than the bookmarks scene: an entry carries the
                 // day it was drawn, and the list is whatever this run of the catalog has visited
                 // by the time it gets here, so it changes when a scene is added ahead of it.
                 // Photographed, never compared.
@@ -1368,9 +1421,13 @@ fn serve() -> std::io::Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let photo = Arc::new(gradient_png());
+    let mark_a = Arc::new(mark_png([206, 86, 66]));
+    let mark_b = Arc::new(mark_png([54, 108, 168]));
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let photo = Arc::clone(&photo);
+            let mark_a = Arc::clone(&mark_a);
+            let mark_b = Arc::clone(&mark_b);
             std::thread::spawn(move || {
                 let mut stream = stream;
                 let mut buf = [0u8; 2048];
@@ -1379,6 +1436,26 @@ fn serve() -> std::io::Result<u16> {
                 let path = req.split_whitespace().nth(1).unwrap_or("/").to_owned();
                 let _ = match path.as_str() {
                     "/photo.png" => ok(&mut stream, "image/png", &photo),
+                    // The two site marks the bookmarks scene photographs. Small and square,
+                    // because that is what a favicon is, and two colours apart, because the
+                    // column exists to tell one site from another.
+                    "/mark-a.png" => ok(&mut stream, "image/png", &mark_a),
+                    // The reading list's marks are guesses at this path, because hww has
+                    // never fetched the pages those rows point at and so has no declared
+                    // address to have kept. Serving it is what makes that scene photograph a
+                    // real request rather than an empty column. See `archive::well_known_icon`.
+                    "/favicon.ico" => ok(&mut stream, "image/png", &mark_a),
+                    "/mark-b.png" => ok(&mut stream, "image/png", &mark_b),
+                    "/marked-one" => ok(
+                        &mut stream,
+                        "text/html; charset=utf-8",
+                        MARKED_ONE.as_bytes(),
+                    ),
+                    "/marked-two" => ok(
+                        &mut stream,
+                        "text/html; charset=utf-8",
+                        MARKED_TWO.as_bytes(),
+                    ),
                     // Two ordinary documents, for the one scene that needs two *real*
                     // navigations rather than injected pages: `present` resets the history to a
                     // single entry, so a page cache can only be photographed by actually going
@@ -1413,6 +1490,28 @@ fn ok(stream: &mut TcpStream, content_type: &str, body: &[u8]) -> std::io::Resul
     stream
         .write_all(head.as_bytes())
         .and_then(|()| stream.write_all(body))
+}
+
+/// One site mark: a rounded-off square of one colour, at the size a favicon actually is.
+///
+/// Not `gradient_png` scaled down. That one is 640x360, and a wide picture in a square box is
+/// what `images::site_icon` fits rather than stretches, so using it here would photograph the
+/// fitting and never the ordinary case.
+fn mark_png(rgb: [u8; 3]) -> Vec<u8> {
+    const N: u32 = 32;
+    let img = RgbaImage::from_fn(N, N, |x, y| {
+        // A disc, so the picture shows a shape and not a block of colour that could be a
+        // background fill.
+        let (dx, dy) = (x as f32 - 15.5, y as f32 - 15.5);
+        let inside = dx * dx + dy * dy <= 15.0 * 15.0;
+        let a = if inside { 255 } else { 0 };
+        image::Rgba([rgb[0], rgb[1], rgb[2], a])
+    });
+    let mut out = Vec::new();
+    PngEncoder::new(&mut out)
+        .write_image(img.as_raw(), N, N, image::ExtendedColorType::Rgba8)
+        .expect("encoding a generated image cannot fail");
+    out
 }
 
 fn gradient_png() -> Vec<u8> {
@@ -1793,10 +1892,10 @@ fn main() -> ExitCode {
     // into the settings of whoever is running this.
     let scratch = cfg.out.join(".config");
     let _ = std::fs::create_dir_all(&scratch);
-    // The library, unlike the settings, is cleared between runs. The catalog builds its own
-    // through `Command::KeepPage`, so a file left behind by the previous run would leave the
-    // library scene showing a list that grows every time the catalog is run.
-    let _ = std::fs::remove_file(scratch.join("library.json"));
+    // The bookmarks, unlike the settings, is cleared between runs. The catalog builds its own
+    // through `Command::BookmarkPage`, so a file left behind by the previous run would leave the
+    // bookmarks scene showing a list that grows every time the catalog is run.
+    let _ = std::fs::remove_file(scratch.join("archive.json"));
     // Safety: before any thread that reads the environment exists.
     unsafe { std::env::set_var("HWW_CONFIG_DIR", &scratch) };
 

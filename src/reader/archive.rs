@@ -4,7 +4,7 @@
 //!
 //! **hww remembers three things, and none of them quietly.**
 //!
-//! The *library* is what the reader named: an item goes in because a keypress put it there,
+//! The *bookmarks* is what the reader named: an item goes in because a keypress put it there,
 //! about one page, once, in the same category as `search_engine`. The *reading list* is what the
 //! reader named about a page they have **not** read: a link on the page in front of them, marked
 //! to open later. The *history* is what hww watched: the address and title of every page it drew,
@@ -13,16 +13,16 @@
 //! tenants of one file, each with its own switch, its own way to be forgotten, and its own
 //! sentence in the settings panel and in README. None borrows another's rules.
 //!
-//! The library and the reading list are both *chosen*, and they still are not the same tenant.
-//! What separates them is tense, and it decides everything else about them: the library holds
+//! The bookmarks and the reading list are both *chosen*, and they still are not the same tenant.
+//! What separates them is tense, and it decides everything else about them: the bookmarks holds
 //! pages the reader has read and wants back, so its rows are titled by a document hww fetched and
 //! its addresses are redundant; the reading list holds links the reader has not opened, so its
 //! rows are titled by whatever words the link was wearing and the address is the only thing
-//! telling two of them apart. That is why [`Archive::add_next`] is not [`Archive::keep`] with a
+//! telling two of them apart. That is why [`Archive::add_next`] is not [`Archive::bookmark`] with a
 //! different discriminant, and why the one guard it adds is the scheme: `keep` is handed the URL
 //! a fetch actually resolved, and `add_next` is handed page-controlled text.
 //!
-//! **History is on by default.** That reverses what this module said while the library was its
+//! **History is on by default.** That reverses what this module said while the bookmarks was its
 //! only tenant, and the cost of the default is paid here rather than left for the reader to
 //! discover: a record kept without being asked for has to be visible before anybody thinks to
 //! look for it, switchable off in one click, and forgettable in one more.
@@ -47,7 +47,7 @@
 //! the path beside it, and the list itself.
 //!
 //! **Off.** "Off" means stop writing *and* offer to forget, once per tenant.
-//! [`Settings::keep_library`] gates [`Archive::keep`], [`Settings::keep_reading_list`] gates
+//! [`Settings::keep_bookmarks`] gates [`Archive::bookmark`], [`Settings::keep_reading_list`] gates
 //! [`Archive::add_next`], and [`Settings::keep_history`] gates [`Archive::visit`] — each answered
 //! inside the door it guards, never at the call site — and each switch's group carries the button
 //! that empties what that switch has already gathered ([`Archive::forget_all`],
@@ -56,11 +56,11 @@
 //! would be a louder one on the tenant that was never asked for.
 //!
 //! **Deletion.** [`Archive::forget`] for one kept page, [`Archive::forget_next`] for one link on
-//! the reading list, [`Archive::forget_all`] for the library, [`Archive::forget_all_next`] for the
+//! the reading list, [`Archive::forget_all`] for the bookmarks, [`Archive::forget_all_next`] for the
 //! reading list, [`Archive::forget_visits`] for the history, and the file itself is deleted with
 //! the config directory by the uninstall commands in README. Each of them leaves the other tenants
-//! alone: forgetting the history must not empty a library the reader chose page by page, and
-//! forgetting the library must not look like a way to erase a trail.
+//! alone: forgetting the history must not empty a bookmarks list the reader chose page by page, and
+//! forgetting the bookmarks must not look like a way to erase a trail.
 //!
 //! **Forward compatibility.** This file holds data the reader cannot retype, which is what makes
 //! it worth more care than `settings.json` gets. Three mechanisms: [`VERSION`], so a later shape
@@ -75,9 +75,9 @@
 //! [`Archive::file_unreadable`]. `settings.json` can be retyped in a minute and this file
 //! cannot, which is the whole reason it gets the extra care.
 //!
-//! **Caps.** The library refuses at [`MAX_ITEMS`] and the reading list refuses at [`MAX_NEXT`];
+//! **Caps.** The bookmarks refuses at [`MAX_ITEMS`] and the reading list refuses at [`MAX_NEXT`];
 //! the history evicts at [`MAX_VISITS`]. The two answers are not an inconsistency, they are the
-//! doctrine restated as arithmetic: every item in the library and on the reading list was chosen,
+//! doctrine restated as arithmetic: every item in the bookmarks and on the reading list was chosen,
 //! and dropping the oldest chosen thing to make room for a newer one is the silent loss these
 //! rules exist to prevent, while nothing in the history was chosen and a watched record that grew
 //! without bound would be a file nobody agreed to keep for ever. So the two chosen lists say they
@@ -93,14 +93,36 @@
 //! README's uninstall paragraphs, and — if it is a list the reader can open — an address in
 //! `ui::app::builtin_view`.
 //!
-//! # What is not stored
+//! # What is stored, and what is not
 //!
-//! No page content, and no favicon. `ir::Entry::image` is drawn by `ui::blocks::entries_ui` as an
-//! article thumbnail under the reader's image policy, so a library of twenty sites carrying
-//! twenty favicon URLs would offer twenty third-party requests on one screen — which is not what
-//! anybody asked for by opening the library. A stored URL that nothing renders would be mechanism with
-//! no reader, which is the standard that removed `force_thread`. Both lists are names and
-//! addresses.
+//! No page content. Three fields and a kind: the address, the title, the day, and — for a kept
+//! page alone — the address of the site's mark, which draws as a favicon in a column left of each
+//! row. All three lists are still names and addresses; the icon is a third address, and only a
+//! bookmark has one.
+//!
+//! **Drawing a mark and storing one are two different questions.** The bookmarks and the reading
+//! list both draw the column; only a bookmark stores anything for it. A bookmarked page was
+//! fetched, so it declared an icon and [`Archive::bookmark`] writes that address down. A
+//! reading-list row is a link off some other page, so hww has never fetched what it points at and has nothing to
+//! record — [`well_known_icon`] guesses `/favicon.ico` at the row's own origin when the view is
+//! built, and the guess stays out of the file. The history neither stores nor draws.
+//!
+//! This module used to refuse the icon outright, on the ground that twenty bookmarked sites would
+//! put twenty third-party requests on one screen. That cost is real and is now paid
+//! deliberately rather than avoided: opening either chosen list contacts the hosts of the rows on
+//! screen, under [`ImagePolicy::allows_any_request`] like the masthead favicon, bounded to the
+//! layout band so a five-hundred-row reading list is a screenful of requests and not five
+//! hundred, and counted in page info, which is why `pageinfo::rows` reports third parties on a
+//! page `Arrival::Built` says fetched no document. The reading list pays it twice over, because
+//! a mark there is a guess that may 404, and README's promise about that list is amended to say
+//! so: no *page* on it is fetched until the reader opens one, and that is still true.
+//!
+//! What the old argument got right is kept where it still holds: nothing is stored for a page hww
+//! merely watched ([`Archive::visit`]), and the history draws no column ([`Mark`]). It is
+//! thousands of rows nobody chose, and opening it is not an invitation to contact thousands of
+//! hosts.
+//!
+//! [`ImagePolicy::allows_any_request`]: crate::reader::opts::ImagePolicy::allows_any_request
 //!
 //! The history holds **one entry per page, not one per visit**: opening a page again moves its
 //! entry to the top and restamps its date rather than adding a second row. A visit-by-visit
@@ -135,18 +157,18 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
-/// The address of the library view.
+/// The address of the bookmarks view.
 ///
 /// The opaque-path form, with no `//`: there is no authority component, so no hostname enters
 /// any file but `sites.rs`, and every `host_str()` in the reader already answers `None` through
 /// an `unwrap_or`. Page content can never link here — `session::classify_link` refuses every
 /// scheme it does not handle, and `hww` is not one of them — so the only way in is a command the
 /// reader gave. `a_page_cannot_link_into_the_readers_own_views` is what pins that.
-pub const LIBRARY: &str = "hww:library";
+pub const BOOKMARKS: &str = "hww:bookmarks";
 
 /// The address of the history view.
 ///
-/// The same opaque-path form as [`LIBRARY`], and for the same three reasons: no hostname leaves
+/// The same opaque-path form as [`BOOKMARKS`], and for the same three reasons: no hostname leaves
 /// `sites.rs`, no `host_str()` in the reader gains a case, and page content cannot link here
 /// because `session::classify_link` refuses the scheme. Two addresses now, which is why
 /// `ui::app::builtin_view` matches each of them exactly rather than testing the scheme.
@@ -154,7 +176,7 @@ pub const HISTORY: &str = "hww:history";
 
 /// The address of the reading list view.
 ///
-/// The same opaque-path form as [`LIBRARY`] and [`HISTORY`], for the same three reasons. Three
+/// The same opaque-path form as [`BOOKMARKS`] and [`HISTORY`], for the same three reasons. Three
 /// addresses now, and `ui::app::builtin_view` still matches each of them exactly rather than
 /// testing the scheme — a scheme test would divert anything a later build spelled `hww:` into a
 /// view that does not exist, and the point of matching exactly is that an address hww does not
@@ -167,7 +189,7 @@ pub const READING_LIST: &str = "hww:reading-list";
 /// fields do not qualify: [`Item::extra`] carries those through in both directions.
 pub const VERSION: u32 = 1;
 
-/// How many items the library holds.
+/// How many items the bookmarks holds.
 ///
 /// **A cap refuses; it does not evict.** `reader::pagecache` drops its oldest entry when it is
 /// full and that is right for a cache, because nothing there was chosen. Every item here was
@@ -195,12 +217,12 @@ pub const MAX_VISITS: usize = 5_000;
 /// was chosen: the reader pressed a key or picked a menu item about one link, and dropping the
 /// oldest of those to make room is the silent loss the doctrine refuses. Its own number rather
 /// than [`MAX_ITEMS`] shared, because tenants do not borrow each other's rules and these two are
-/// not the same size of thing — a library is a shelf and a reading list is a stack on the desk.
+/// not the same size of thing — a bookmarks list is a shelf and a reading list is a stack on the desk.
 ///
-/// Smaller than the library's cap on purpose, and the smallness is the point: five hundred links
+/// Smaller than the bookmarks' cap on purpose, and the smallness is the point: five hundred links
 /// is already far past the size at which a list of things to read next is a list of things to read
 /// next. Reaching it says so and keeps what is there, which is the honest answer to a reading list
-/// that has become a second library.
+/// that has become a second bookmarks.
 pub const MAX_NEXT: usize = 500;
 
 /// The longest stored title, in characters.
@@ -228,24 +250,24 @@ pub const MAX_URL: usize = 8_192;
 /// fourth here rather than a second file, which is what this discriminant exists for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
-    /// A page the reader asked hww to keep.
-    Kept,
+    /// A page the reader bookmarked.
+    Bookmark,
     /// A link the reader marked to read later.
     ///
-    /// Chosen, like [`Kind::Kept`], and stored by the same arithmetic — but about a page hww has
-    /// never fetched, so its title is the words the link was wearing rather than a `<title>`, and
-    /// its address is drawn under it because those words are often "Read more".
+    /// Chosen, like [`Kind::Bookmark`], and stored by the same arithmetic — but about a page hww
+    /// has never fetched, so its title is the words the link was wearing rather than a `<title>`,
+    /// and its address is drawn under it because those words are often "Read more".
     ReadNext,
     /// A page hww drew, recorded because [`Settings::keep_history`] was on when it did.
     ///
-    /// Never produced by a keypress about this page. It carries the same two facts a kept page
+    /// Never produced by a keypress about this page. It carries the same two facts a bookmark
     /// does — address and title — and one date, which is the last time hww drew it rather than
     /// the first; see [`Archive::visit`].
     Visited,
     /// A kind written by a later build.
     ///
     /// Carried through a load and a save untouched, and shown nowhere. An older binary that
-    /// coerced this to [`Kind::Kept`] would list a page the reader merely *visited* among the
+    /// coerced this to [`Kind::Bookmark`] would list a page the reader merely *visited* among the
     /// pages they chose to save, which is the one confusion this whole module is arranged to
     /// prevent; one that dropped it would delete a later build's data on the next keypress.
     Other(String),
@@ -256,7 +278,7 @@ impl Kind {
     /// person whose data it is.
     pub fn as_str(&self) -> &str {
         match self {
-            Kind::Kept => "kept",
+            Kind::Bookmark => "bookmark",
             Kind::ReadNext => "next",
             Kind::Visited => "visited",
             Kind::Other(s) => s,
@@ -274,7 +296,7 @@ impl<'de> serde::Deserialize<'de> for Kind {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
         Ok(match s.as_str() {
-            "kept" => Kind::Kept,
+            "bookmark" => Kind::Bookmark,
             "next" => Kind::ReadNext,
             "visited" => Kind::Visited,
             _ => Kind::Other(s),
@@ -286,7 +308,7 @@ impl<'de> serde::Deserialize<'de> for Kind {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Item {
     /// The address as it was given, fragment and all, so the link opens what was kept.
-    /// De-duplication compares a fragment-stripped form instead; see [`Archive::holds`].
+    /// De-duplication compares a fragment-stripped form instead; see [`Archive::is_bookmarked`].
     pub url: String,
     /// The page's title, capped at [`MAX_TITLE`] characters. Empty when the page had none, in
     /// which case [`Item::label`] falls back to the address.
@@ -301,17 +323,25 @@ pub struct Item {
     /// is what [`Item::on_day`] returns `None` for.
     #[serde(default)]
     pub added: u64,
+    /// The address of the site's mark, so the bookmarks can draw a favicon column, or empty.
+    ///
+    /// Written only for [`Kind::Bookmark`]; see the module doc's "What is stored" for why the
+    /// history does not get one. Absolute and `http(s)` or not stored at all
+    /// ([`icon_to_store`]), because it is an address hww will later request without being asked
+    /// again, and one that is neither of those things is a request nothing can vouch for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub icon: String,
     /// Fields a later build wrote that this one has no name for.
     ///
     /// Flattened, so they sit beside the known fields in the file rather than in a nested bag,
-    /// and preserved across a save. Without this, an older binary opening a newer library and
+    /// and preserved across a save. Without this, an older binary opening a newer bookmarks and
     /// keeping one page would strip every unknown field from every other item.
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Item {
-    /// What the library calls this item: its title, or its address when it has none.
+    /// What the bookmarks calls this item: its title, or its address when it has none.
     ///
     /// A row with no text at all would be an unclickable blank line, which is worse than an
     /// address. `notice::host_and_path` is the same shortening the loading line uses, so an
@@ -363,7 +393,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// What [`Archive::keep`] or [`Archive::add_next`] did, so the reader can be told which it was.
+/// What [`Archive::bookmark`] or [`Archive::add_next`] did, so the reader can be told which it was.
 ///
 /// An enum and not a `bool`, because "already there" and "no room" are different facts and a
 /// reader who is told neither has pressed a key that appeared to do nothing.
@@ -371,18 +401,18 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// One enum for both chosen tenants rather than two identical ones. They answer the same
 /// questions because they are the same kind of act — a keypress about one address, which either
 /// lands, or is switched off, or is already there, or does not fit, or names something this file
-/// will not write down. [`Kept::Refused`] is the one arm only [`Archive::add_next`] can return,
+/// will not write down. [`Stored::Refused`] is the one arm only [`Archive::add_next`] can return,
 /// and it is what stops the sharing from being a lie.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kept {
+pub enum Stored {
     Added,
     /// Keeping is switched off in the settings. Nothing was written, and nothing already kept
     /// was touched.
     Off,
-    /// This page is already in the library. Not an error, and not a failure to act: the item is
+    /// This page is already in the bookmarks. Not an error, and not a failure to act: the item is
     /// there, which is what the reader wanted.
     Already,
-    /// The library is at [`MAX_ITEMS`]. Nothing was written and nothing was dropped.
+    /// The bookmarks is at [`MAX_ITEMS`]. Nothing was written and nothing was dropped.
     Full,
     /// The address is longer than [`MAX_URL`]. Nothing was written, and it is refused rather
     /// than shortened because a shortened address is a link to somewhere else.
@@ -412,7 +442,7 @@ pub enum Visited {
 
 /// Everything hww was told to remember.
 ///
-/// Insertion order, oldest first. [`Archive::kept`] reverses it, so "most recent first" is a
+/// Insertion order, oldest first. [`Archive::bookmarks`] reverses it, so "most recent first" is a
 /// property of the order things were added rather than of the clock — a hand-edited timestamp,
 /// or a machine whose clock went backwards, cannot shuffle the list.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -445,14 +475,14 @@ impl Archive {
         }
     }
 
-    /// The items this build knows how to show, most recent first.
-    pub fn kept(&self) -> impl Iterator<Item = &Item> {
-        self.items.iter().rev().filter(|i| i.kind == Kind::Kept)
+    /// The bookmarks, most recent first.
+    pub fn bookmarks(&self) -> impl Iterator<Item = &Item> {
+        self.items.iter().rev().filter(|i| i.kind == Kind::Bookmark)
     }
 
     /// The links the reader marked to read later, most recent first.
     ///
-    /// Reversed like [`Archive::kept`], so the link marked a moment ago is at the top of the list
+    /// Reversed like [`Archive::bookmarks`], so the link marked a moment ago is at the top of the list
     /// rather than the bottom: a reading list is read from the end the reader was last thinking
     /// about.
     pub fn read_next(&self) -> impl Iterator<Item = &Item> {
@@ -461,17 +491,17 @@ impl Archive {
 
     /// The pages hww has drawn, most recent first.
     ///
-    /// Insertion order reversed, as [`Archive::kept`] is, so "most recent" is where the entry was
+    /// Insertion order reversed, as [`Archive::bookmarks`] is, so "most recent" is where the entry was
     /// put rather than what its date says: [`Archive::visit`] moves a page it has seen before to
     /// the end of the vector, and a hand-edited or backwards clock cannot shuffle the list.
     pub fn visited(&self) -> impl Iterator<Item = &Item> {
         self.items.iter().rev().filter(|i| i.kind == Kind::Visited)
     }
 
-    /// How many pages the library holds. Not `items.len()`, which counts the history and
+    /// How many pages the bookmarks holds. Not `items.len()`, which counts the history and
     /// whatever a later build wrote as well.
     pub fn len(&self) -> usize {
-        self.kept().count()
+        self.bookmarks().count()
     }
 
     /// How many links the reading list holds. Not `items.len()`, for the reason
@@ -486,7 +516,7 @@ impl Archive {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.kept().next().is_none()
+        self.bookmarks().next().is_none()
     }
 
     /// Whether this page is already kept, fragment ignored.
@@ -494,16 +524,16 @@ impl Archive {
     /// `Url` equality includes the fragment, so a raw comparison files `article#comments` and
     /// `article` as two different keeps and the menu's check mark goes off when the reader
     /// follows an anchor within the page they just saved.
-    pub fn holds(&self, url: &Url) -> bool {
-        self.kept().any(|i| same_page(&i.url, url))
+    pub fn is_bookmarked(&self, url: &Url) -> bool {
+        self.bookmarks().any(|i| same_page(&i.url, url))
     }
 
     /// Whether this address is already on the reading list, fragment ignored.
     ///
-    /// Its own function and not a parameter on [`Archive::holds`], because the two answer for two
+    /// Its own function and not a parameter on [`Archive::is_bookmarked`], because the two answer for two
     /// tenants and a caller that passed the wrong kind would silently make one list answer for the
     /// other: `Ctrl+D` would report a page kept because a link to it was marked to read, and
-    /// `Shift+L` would refuse a link because the page was in the library. The kind is the whole
+    /// `Shift+L` would refuse a link because the page was in the bookmarks. The kind is the whole
     /// question here, so it is in the name rather than in an argument.
     pub fn holds_next(&self, url: &Url) -> bool {
         self.read_next().any(|i| same_page(&i.url, url))
@@ -523,41 +553,57 @@ impl Archive {
     /// the laptop should find it there. That is the same asymmetry [`MAX_ITEMS`] and
     /// [`MAX_VISITS`] draw, one property over — what was chosen is treated more carefully than
     /// what was merely watched.
-    pub fn keep(&mut self, settings: &Settings, url: &Url, title: Option<&str>) -> Kept {
-        if !settings.keep_library {
-            return Kept::Off;
+    pub fn bookmark(
+        &mut self,
+        settings: &Settings,
+        url: &Url,
+        title: Option<&str>,
+        icon: Option<&str>,
+    ) -> Stored {
+        if !settings.keep_bookmarks {
+            return Stored::Off;
         }
-        self.keep_at(url, title, now())
+        self.bookmark_at(url, title, icon, now())
     }
 
-    /// [`Archive::keep`] with the clock supplied, so a test can name the day.
-    fn keep_at(&mut self, url: &Url, title: Option<&str>, added: u64) -> Kept {
+    /// [`Archive::bookmark`] with the clock supplied, so a test can name the day.
+    fn bookmark_at(
+        &mut self,
+        url: &Url,
+        title: Option<&str>,
+        icon: Option<&str>,
+        added: u64,
+    ) -> Stored {
         if url.as_str().len() > MAX_URL {
-            return Kept::TooLong;
+            return Stored::TooLong;
         }
-        if self.holds(url) {
-            return Kept::Already;
+        if self.is_bookmarked(url) {
+            return Stored::Already;
         }
         if self.len() >= MAX_ITEMS {
-            return Kept::Full;
+            return Stored::Full;
         }
         self.items.push(Item {
             url: url.to_string(),
             title: cap_title(title.unwrap_or_default()),
-            kind: Kind::Kept,
+            kind: Kind::Bookmark,
             added,
+            // A page with no mark, or one whose mark is not an address hww will request, is
+            // kept anyway: the icon is a column in a list, and refusing the page over it would
+            // lose the thing the reader actually asked to keep.
+            icon: icon.and_then(icon_to_store).unwrap_or_default(),
             extra: serde_json::Map::new(),
         });
-        Kept::Added
+        Stored::Added
     }
 
     /// Mark one link to read later, if the reader's settings allow it. **The one door.**
     ///
-    /// The switch is answered here, in the door's own name, for the reason [`Archive::keep`] gives
+    /// The switch is answered here, in the door's own name, for the reason [`Archive::bookmark`] gives
     /// one door over. It has two callers already — a key and a context-menu item — which is
     /// exactly the case that argument was written about.
     ///
-    /// **The scheme guard is what this door has and [`Archive::keep`] does not**, and the
+    /// **The scheme guard is what this door has and [`Archive::bookmark`] does not**, and the
     /// difference is where the address came from. `keep` is handed `prov.final_url`: an
     /// `http`/`https` address that a fetch resolved, followed, and got a document back from. This
     /// is handed an `href` **a page wrote**, so `mailto:`, `tel:`, `javascript:`, and `data:` all
@@ -570,45 +616,51 @@ impl Archive {
     /// is a better sentence than silence. This guard is what makes that reporting a courtesy
     /// rather than the only thing standing between a page and this file.
     ///
-    /// No debounce, for the reason [`Archive::keep`] gives: it is a single deliberate act.
-    pub fn add_next(&mut self, settings: &Settings, url: &Url, title: Option<&str>) -> Kept {
+    /// No debounce, for the reason [`Archive::bookmark`] gives: it is a single deliberate act.
+    pub fn add_next(&mut self, settings: &Settings, url: &Url, title: Option<&str>) -> Stored {
         if !settings.keep_reading_list {
-            return Kept::Off;
+            return Stored::Off;
         }
         if !matches!(url.scheme(), "http" | "https")
             || !url.username().is_empty()
             || url.password().is_some()
         {
-            return Kept::Refused;
+            return Stored::Refused;
         }
         self.add_next_at(url, title, now())
     }
 
     /// [`Archive::add_next`] with the clock supplied, so a test can name the day.
-    fn add_next_at(&mut self, url: &Url, title: Option<&str>, added: u64) -> Kept {
+    fn add_next_at(&mut self, url: &Url, title: Option<&str>, added: u64) -> Stored {
         if url.as_str().len() > MAX_URL {
-            return Kept::TooLong;
+            return Stored::TooLong;
         }
         if self.holds_next(url) {
-            return Kept::Already;
+            return Stored::Already;
         }
         if self.next_len() >= MAX_NEXT {
-            return Kept::Full;
+            return Stored::Full;
         }
         self.items.push(Item {
             url: url.to_string(),
             title: cap_title(title.unwrap_or_default()),
             kind: Kind::ReadNext,
             added,
+            // Empty, and not for [`Archive::visit`]'s reason. This door is handed an `href` off
+            // a page hww has **never fetched**, so there is no declared address to write down.
+            // The reading list still draws a column: [`well_known_icon`] guesses one from the
+            // row's own host when it is drawn, which keeps the guess out of the file — nothing
+            // here is a record of anything a site said.
+            icon: String::new(),
             extra: serde_json::Map::new(),
         });
-        Kept::Added
+        Stored::Added
     }
 
     /// Take one link off the reading list, fragment ignored, and say whether there was one.
     ///
     /// Kind-filtered like [`Archive::forget`], and here the filter is doing visible work rather
-    /// than guarding against a later build: a page can be in the library *and* on the reading
+    /// than guarding against a later build: a page can be in the bookmarks *and* on the reading
     /// list at the same address, and taking it off the list must not un-keep it.
     pub fn forget_next(&mut self, url: &Url) -> bool {
         let before = self.items.len();
@@ -623,13 +675,13 @@ impl Archive {
     pub fn forget(&mut self, url: &Url) -> bool {
         let before = self.items.len();
         self.items
-            .retain(|i| !(i.kind == Kind::Kept && same_page(&i.url, url)));
+            .retain(|i| !(i.kind == Kind::Bookmark && same_page(&i.url, url)));
         self.items.len() != before
     }
 
     /// Record that hww drew this page, if the reader's settings allow it. **The one door.**
     ///
-    /// The switch is answered here rather than at the call site, for the reason [`Archive::keep`]
+    /// The switch is answered here rather than at the call site, for the reason [`Archive::bookmark`]
     /// gives one door over: a guard at some callers and not others reads as a guard and is not.
     /// This one is the more important of the two, because its caller is not a keypress — every
     /// page that reaches the column comes through here, so this `if` is the whole difference
@@ -644,12 +696,12 @@ impl Archive {
     /// **Three addresses are refused whatever the switch says**, and they are refused here
     /// rather than at the caller for the reason above. A URL carrying a username or a password would
     /// put a credential in a plain-text file, for ever, because the reader opened a link — the
-    /// library can hold one, since a keypress put it there and `Ctrl+D` takes it out again, but
+    /// bookmarks can hold one, since a keypress put it there and `Ctrl+D` takes it out again, but
     /// nothing the reader did not ask for may write one down. And an address that is not `http`
     /// or `https` is not a page fetched from the web: `hww:history` must not list itself, and
     /// `ReaderApp::install` already declines to record a built view, but a door guarded at one
     /// caller is a door guarded nowhere. And an address past [`MAX_URL`] is refused the way
-    /// [`Archive::keep`] refuses one, silently here because nothing asked for it: this is the
+    /// [`Archive::bookmark`] refuses one, silently here because nothing asked for it: this is the
     /// door a page's own links come through, and one of them carrying a kilobyte of query string
     /// is a line this file would then rewrite on every later save.
     pub fn visit(&mut self, settings: &Settings, url: &Url, title: Option<&str>) -> Visited {
@@ -678,6 +730,10 @@ impl Archive {
             title: cap_title(title.unwrap_or_default()),
             kind: Kind::Visited,
             added: at,
+            // Empty, always. The history is written without anybody asking for it, so it does
+            // not also write down a second address per page, and the history view draws no
+            // icon column; see the module doc.
+            icon: String::new(),
             extra: serde_json::Map::new(),
         });
         self.evict_oldest_visits();
@@ -705,7 +761,7 @@ impl Archive {
 
     /// Forget the history, and say how many pages that was.
     ///
-    /// The other half of [`Settings::keep_history`], and it leaves the library and the reading
+    /// The other half of [`Settings::keep_history`], and it leaves the bookmarks and the reading
     /// list exactly where they are: the three tenants are forgotten by three buttons under three
     /// switches, because a reader clearing a trail is not asking to lose the pages they saved on
     /// purpose or the links they lined up to read.
@@ -718,9 +774,9 @@ impl Archive {
 
     /// Forget the whole reading list, and say how many links that was.
     ///
-    /// The other half of [`Settings::keep_reading_list`], and it leaves the library and the
+    /// The other half of [`Settings::keep_reading_list`], and it leaves the bookmarks and the
     /// history exactly where they are, for the reason [`Archive::forget_visits`] leaves the
-    /// library: three tenants, three buttons, and none of them may take another with it.
+    /// bookmarks: three tenants, three buttons, and none of them may take another with it.
     pub fn forget_all_next(&mut self) -> usize {
         let before = self.next_len();
         self.items.retain(|i| i.kind != Kind::ReadNext);
@@ -728,17 +784,17 @@ impl Archive {
         before
     }
 
-    /// Forget the whole library, and say how many pages that was.
+    /// Forget the whole bookmarks, and say how many pages that was.
     ///
-    /// The other half of [`Settings::keep_library`]: turning keeping off stops the writing, and
+    /// The other half of [`Settings::keep_bookmarks`]: turning keeping off stops the writing, and
     /// this is what makes it possible to also undo it. The history and the reading list survive,
     /// as do items of a kind this build cannot show, for the reason [`Archive::forget`] leaves
-    /// them: this button says "forget my library", and neither the trail, nor the links waiting to
+    /// them: this button says "forget my bookmarks", and neither the trail, nor the links waiting to
     /// be read, nor a record this build cannot describe is something it can claim that sentence
     /// covers.
     pub fn forget_all(&mut self) -> usize {
         let before = self.len();
-        self.items.retain(|i| i.kind != Kind::Kept);
+        self.items.retain(|i| i.kind != Kind::Bookmark);
         self.file_unreadable = false;
         before
     }
@@ -753,43 +809,44 @@ impl Archive {
     }
 }
 
-/// Whether hww should open on the library rather than on the splash.
+/// Whether hww should open on the bookmarks rather than on the splash.
 ///
 /// Out here rather than as a method on `ReaderApp`, so the fast CI job reads the decision: it is
 /// two fields and an `&&`, and both halves are the sort of thing that gets inverted once and
 /// noticed a release later.
 ///
 /// The empty case is the half worth stating. `notice::idle`'s argument for not being a notice is
-/// that nothing has happened yet, and on a fresh install nothing has, so an empty library falls
+/// that nothing has happened yet, and on a fresh install nothing has, so an empty bookmarks list falls
 /// back to the splash whatever the setting says and **first run is unchanged**.
 pub fn opens_on_launch(settings: &Settings, archive: &Archive) -> bool {
-    settings.open_on == crate::reader::settings::OpenOn::Library && !archive.is_empty()
+    settings.open_on == crate::reader::settings::OpenOn::Bookmarks && !archive.is_empty()
 }
 
-/// The library as a document, mirroring `search::document`.
+/// The bookmarks as a document, mirroring `search::document`.
 ///
-/// One `ir::Block::Entries`, which `ui::blocks::entries_ui` already draws, so a library view
+/// One `ir::Block::Entries`, which `ui::blocks::entries_ui` already draws, so a bookmarks list view
 /// needs no rendering code of its own. It carries a title, because `title::masthead` derives the
 /// masthead from the document and a page with none would open under a blank heading.
 ///
-/// **An empty library is a document, not an error.** `search`'s empty result is a `LoadError` and
+/// **An empty bookmarks list is a document, not an error.** `search`'s empty result is a `LoadError` and
 /// an error page, and that is right there: an engine that answered with nothing is a dead end.
-/// An empty library is a new reader, and an error page would be the application scolding them for
+/// An empty bookmarks list is a new reader, and an error page would be the application scolding them for
 /// not having used it yet. `entries_ui` over an empty slice draws literally nothing, so the
-/// one-line paragraph is what stops the library key from opening a blank screen.
-pub fn document(archive: &Archive) -> ir::Document {
+/// one-line paragraph is what stops the bookmarks key from opening a blank screen.
+pub fn bookmarks_document(archive: &Archive) -> ir::Document {
     view(
-        LIBRARY,
-        crate::reader::notice::LIBRARY_TITLE,
-        archive.kept(),
-        crate::reader::notice::library_is_empty(),
+        BOOKMARKS,
+        crate::reader::notice::BOOKMARKS_TITLE,
+        archive.bookmarks(),
+        crate::reader::notice::bookmarks_are_empty(),
         Address::Hidden,
+        Mark::Shown,
     )
 }
 
 /// The reading list as a document, built the same way and drawn by the same code.
 ///
-/// Addresses shown, with the history and against the library, and the reason is the one the
+/// Addresses shown, with the history and against the bookmarks, and the reason is the one the
 /// [`Address`] doc gives: these rows are titled by link text, and link text is "Read more" often
 /// enough that a list of them is a column of identical rows. It is also the only way to see where
 /// a row goes before following it, which matters most on the list whose rows the reader has never
@@ -801,6 +858,7 @@ pub fn reading_list_document(archive: &Archive, settings: &Settings) -> ir::Docu
         archive.read_next(),
         crate::reader::notice::reading_list_is_empty(settings.keep_reading_list),
         Address::Shown,
+        Mark::Shown,
     )
 }
 
@@ -818,23 +876,45 @@ pub fn history_document(archive: &Archive, settings: &Settings) -> ir::Document 
         archive.visited(),
         crate::reader::notice::history_is_empty(settings.keep_history),
         Address::Shown,
+        Mark::Hidden,
     )
 }
 
 /// Whether a view writes each item's address under its title.
 ///
-/// The history and the reading list do; the library does not. It is a difference in what the
-/// lists are for, and the library is the odd one out rather than the rule. The library is short and
+/// The history and the reading list do; the bookmarks does not. It is a difference in what the
+/// lists are for, and the bookmarks is the odd one out rather than the rule. The bookmarks is short and
 /// every row is a page the reader chose, opened, read, and can name; the history is thousands of
 /// rows long, nobody chose any of them, and the titles pages give themselves repeat — half a dozen
 /// "Home"s and three "(1) Inbox"es are one list of identical rows without the address to tell them
-/// apart. The reading list is short like the library and anonymous like the history: its rows are
+/// apart. The reading list is short like the bookmarks and anonymous like the history: its rows are
 /// named by link text, which is "Read more" and "Continue reading" often enough to be no name at
 /// all. So the question is not how long the list is, it is whether the row's own words identify
-/// it, and only the library's do. It is also the only way to see where a row goes before following
+/// it, and only the bookmarks' do. It is also the only way to see where a row goes before following
 /// it, which matters most where the reader has never been.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Address {
+    Shown,
+    Hidden,
+}
+
+/// Whether a view draws each row's site mark in a column of its own.
+///
+/// **The two lists the reader chose do; the history does not**, and the difference is a request
+/// rather than a look. A mark is a third-party image fetched when the view opens, so a page of
+/// rows is a page of requests. The bookmarks and the reading list are short, capped at
+/// [`MAX_ITEMS`] and [`MAX_NEXT`], and every row on either went there one keypress at a time.
+/// The history is thousands of rows nobody chose, and opening it must not contact thousands of
+/// hosts. [`Archive::visit`] stores no icon either, so that is the second of two locks rather
+/// than the only one — a hand-edited file cannot turn the history into a request storm by adding
+/// a field.
+///
+/// The two marked lists get their marks from different places, which [`mark_beside`] settles:
+/// the bookmarks has the address the page declared for itself, and the reading list has nothing at
+/// all, because hww has never fetched the page a row points at. That is what
+/// [`well_known_icon`] is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
     Shown,
     Hidden,
 }
@@ -850,6 +930,7 @@ fn view<'a>(
     items: impl Iterator<Item = &'a Item>,
     when_empty: String,
     address: Address,
+    mark: Mark,
 ) -> ir::Document {
     let entries: Vec<ir::Entry> = items
         .map(|i| ir::Entry {
@@ -858,6 +939,7 @@ fn view<'a>(
             summary: Vec::new(),
             published: i.on_day(),
             address: address_under(i, address),
+            icon: mark_beside(i, mark),
             image: None,
         })
         .collect();
@@ -891,10 +973,83 @@ fn address_under(item: &Item, address: Address) -> Option<String> {
     (address == Address::Shown && !item.title.trim().is_empty()).then(|| item.url.clone())
 }
 
+/// The mark to draw in the column left of an entry's headline, or `None`.
+///
+/// Re-checked through [`icon_to_store`] on the way *out* as well as on the way in, because the
+/// file between the two is one a reader may edit and a later build may write: an item carrying
+/// `file:///etc/passwd` or a `data:` URL in this field must not become a request because an
+/// older save wrote it. The cost of asking twice is a `Url::parse` per visible row.
+fn mark_beside(item: &Item, mark: Mark) -> Option<String> {
+    if mark != Mark::Shown {
+        return None;
+    }
+    icon_to_store(&item.icon).or_else(|| well_known_icon(&item.url))
+}
+
+/// The mark a row's own address implies: `/favicon.ico` at its origin, or `None`.
+///
+/// **A guess, and the same guess `html::favicon_of` makes** when a page's markup names no icon,
+/// so for the bookmarks this reconstructs what would have been stored rather than inventing a new
+/// claim. For the reading list it is the only thing available: those rows point at pages hww has
+/// never fetched, so there is no declared address to have kept, and the choice is this or a
+/// column that is empty on the one list whose rows the reader has not seen.
+///
+/// What it costs is a request that may 404, which is why it is a *guess* stated in the name.
+/// What it does not cost is accuracy about anything else: a site that serves no icon there draws
+/// no mark, exactly as a site that declared one hww could not fetch does.
+///
+/// `http(s)` only, through [`icon_to_store`], so one function decides what may be requested and
+/// a `mailto:` row — which [`Archive::add_next`] refuses, but a hand-edited file does not —
+/// yields nothing rather than a joined address with a scheme `fetch` does not speak. That is
+/// also where the credentials come off: `Url::join` keeps the userinfo of the address it joins
+/// against, so this would otherwise turn a bookmarked `https://user:pass@intranet/page` into an
+/// automatic authenticated request.
+fn well_known_icon(url: &str) -> Option<String> {
+    let url = Url::parse(url).ok()?;
+    icon_to_store(url.join("/favicon.ico").ok()?.as_str())
+}
+
+/// An icon address worth writing down, or `None`.
+///
+/// Absolute, `http(s)`, and inside [`MAX_URL`]. The scheme test is the one that matters: this is
+/// the only address in the file hww fetches *without* the reader following anything, so the set
+/// of things it can name is kept to the two schemes `fetch` speaks. A `data:` URL would also be
+/// page-chosen bytes written to disk, which is the one thing this file does not hold.
+fn icon_to_store(icon: &str) -> Option<String> {
+    let icon = icon.trim();
+    if icon.len() > MAX_URL {
+        return None;
+    }
+    let mut url = Url::parse(icon).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    // **Credentials come off here, and this is the only door they can come off at.**
+    //
+    // `Archive::add_next` and `Archive::visit` refuse a credential-bearing address outright;
+    // `Archive::bookmark` deliberately does not, because a keypress put that page there and
+    // `Ctrl+D` takes it back out. A mark is the third case and is neither: `html::favicon_of`
+    // builds it by joining against `prov.final_url`, so a bookmarked
+    // `https://user:pass@intranet.example/page` yields a mark carrying that password — and
+    // unlike the row's own address, which is only ever followed by a click, *this* one hww
+    // requests by itself the moment the view is drawn, with reqwest deriving a Basic auth
+    // header from the userinfo. An automatic authenticated request, for a page nobody opened.
+    //
+    // Stripped rather than refused, so an intranet bookmark still has a column: the host is
+    // being asked for its icon either way and learns nothing from the request it did not
+    // already know, while the password is the part that must not go. An unauthenticated 401
+    // draws no mark, which is what a site that serves no icon looks like.
+    if !url.username().is_empty() || url.password().is_some() {
+        url.set_username("").ok()?;
+        url.set_password(None).ok()?;
+    }
+    Some(url.to_string())
+}
+
 /// Whether a stored address and a live one are the same page, fragment aside.
 ///
 /// A stored address that will not parse is compared as text. It cannot have come from
-/// [`Archive::keep`], which is handed a `Url`, so this is the hand-edited case, and refusing to
+/// [`Archive::bookmark`], which is handed a `Url`, so this is the hand-edited case, and refusing to
 /// match it at all would let the same page be kept twice.
 fn same_page(stored: &str, url: &Url) -> bool {
     match Url::parse(stored) {
@@ -932,7 +1087,7 @@ pub fn path() -> Option<PathBuf> {
     settings::archive_path()
 }
 
-/// Load, or fall back to an empty library with a reason.
+/// Load, or fall back to an empty bookmarks list with a reason.
 ///
 /// [`settings::load`]'s contract, matched deliberately: a parse failure returns something usable
 /// *and* the complaint, rather than refusing to start. A reader that will not open because of a
@@ -940,7 +1095,7 @@ pub fn path() -> Option<PathBuf> {
 /// status strip.
 ///
 /// Tolerance is per item, which is the half `settings` does not need. An item that will not parse
-/// costs that item and is counted in the complaint; the rest of the library still opens. Unknown
+/// costs that item and is counted in the complaint; the rest of the bookmarks still opens. Unknown
 /// fields ride along in [`Item::extra`] and unknown kinds in [`Kind::Other`], so neither is a
 /// parse failure at all.
 pub fn load() -> (Archive, Option<String>) {
@@ -964,7 +1119,7 @@ pub fn load() -> (Archive, Option<String>) {
 fn parse(text: &str, where_from: &str) -> (Archive, Option<String>) {
     /// The file as read: every item still a `Value`, so one bad item can be dropped rather than
     /// failing the file. `version` and `items` both default, so a file missing either is a file
-    /// with an empty library rather than a complaint about a shape nobody typed.
+    /// with an empty bookmarks list rather than a complaint about a shape nobody typed.
     #[derive(serde::Deserialize)]
     struct Wire {
         #[serde(default)]
@@ -988,7 +1143,7 @@ fn parse(text: &str, where_from: &str) -> (Archive, Option<String>) {
             return (
                 archive,
                 Some(format!(
-                    "{where_from} is not a valid library ({e}); hww opened without it and will \
+                    "{where_from} is not a valid archive ({e}); hww opened without it and will \
                      not write over it — repair or move that file, or empty it from Settings"
                 )),
             );
@@ -1012,7 +1167,7 @@ fn parse(text: &str, where_from: &str) -> (Archive, Option<String>) {
     let note = (dropped > 0).then(|| {
         format!(
             "{where_from}: {dropped} item(s) could not be read and were left out; the rest of \
-             your library opened"
+             your bookmarks opened"
         )
     });
     (
@@ -1025,11 +1180,11 @@ fn parse(text: &str, where_from: &str) -> (Archive, Option<String>) {
     )
 }
 
-/// Write the library, atomically, through the same helper `settings::save` uses.
+/// Write the bookmarks, atomically, through the same helper `settings::save` uses.
 ///
 /// Two refusals, and both are errors rather than a quiet `Ok`. **There is nowhere to write**:
 /// with no `HWW_CONFIG_DIR`, no `HOME` and no `XDG_CONFIG_HOME` there is no config directory at
-/// all, and answering `Ok(())` there let `keep_page` tell the reader their page was kept and the
+/// all, and answering `Ok(())` there let `bookmark_page` tell the reader their page was kept and the
 /// menu draw a tick for a file that does not exist — the one claim the doctrine says may never
 /// be made without the write behind it. **The file could not be read**: see
 /// [`Archive::refuses_to_be_written`].
@@ -1072,26 +1227,26 @@ mod tests {
     fn a_kept_page_round_trips_through_the_file_format() {
         let mut a = Archive::new();
         assert_eq!(
-            a.keep(&on(), &u("https://example.com/a"), Some("A page")),
-            Kept::Added
+            a.bookmark(&on(), &u("https://example.com/a"), Some("A page"), None),
+            Stored::Added
         );
         let text = serde_json::to_string_pretty(&a).unwrap();
         let (back, note) = parse(&text, "the fixture");
         assert!(note.is_none());
         assert_eq!(back, a);
-        let item = back.kept().next().expect("the item");
+        let item = back.bookmarks().next().expect("the item");
         assert_eq!(item.url, "https://example.com/a");
         assert_eq!(item.title, "A page");
-        assert_eq!(item.kind, Kind::Kept);
+        assert_eq!(item.kind, Kind::Bookmark);
     }
 
     /// The `settings::load` contract, one file over: never fatal, always a reason.
     #[test]
-    fn a_corrupt_library_is_never_fatal_and_says_so() {
-        let (a, note) = parse("{ not json", "library.json");
+    fn a_corrupt_archive_is_never_fatal_and_says_so() {
+        let (a, note) = parse("{ not json", "archive.json");
         assert!(a.is_empty());
         let note = note.expect("a complaint");
-        assert!(note.contains("library.json"), "it names the file: {note}");
+        assert!(note.contains("archive.json"), "it names the file: {note}");
         assert!(
             note.contains("not write over it"),
             "and says the file is left alone: {note}"
@@ -1100,19 +1255,19 @@ mod tests {
 
     /// The half of that contract history's default made necessary. An empty archive over a file
     /// hww could not read must not become the file: with history on, the first page drawn writes
-    /// it, so a stray comma would otherwise cost the whole library seconds after start.
+    /// it, so a stray comma would otherwise cost the whole bookmarks seconds after start.
     #[test]
     fn an_unreadable_file_is_not_written_over() {
-        let (a, _) = parse("{ not json", "library.json");
+        let (a, _) = parse("{ not json", "archive.json");
         assert!(a.refuses_to_be_written());
         // A file that parsed does not carry the seal, whatever else it says.
-        let (good, _) = parse(r#"{"version":1,"items":[]}"#, "library.json");
+        let (good, _) = parse(r#"{"version":1,"items":[]}"#, "archive.json");
         assert!(!good.refuses_to_be_written());
         // Nor does a file that parsed with one item dropped: the tolerance rule is that one bad
         // item costs that item, and sealing there would let a single stray field freeze the file.
         let (tolerated, note) = parse(
-            r#"{"version":1,"items":[{"url":7},{"url":"https://e.com/","kind":"kept"}]}"#,
-            "library.json",
+            r#"{"version":1,"items":[{"url":7},{"url":"https://e.com/","kind":"bookmark"}]}"#,
+            "archive.json",
         );
         assert!(note.is_some(), "the dropped item is still reported");
         assert!(!tolerated.refuses_to_be_written());
@@ -1123,16 +1278,16 @@ mod tests {
     /// the thing cannot be undone.
     #[test]
     fn forgetting_a_tenant_unseals_an_unreadable_file() {
-        let (mut a, _) = parse("{ not json", "library.json");
+        let (mut a, _) = parse("{ not json", "archive.json");
         assert_eq!(a.forget_all(), 0);
         assert!(!a.refuses_to_be_written());
 
-        let (mut b, _) = parse("{ not json", "library.json");
+        let (mut b, _) = parse("{ not json", "archive.json");
         assert_eq!(b.forget_visits(), 0);
         assert!(!b.refuses_to_be_written());
 
         // Forgetting *one* page is not that sentence: it is about a page, not about the file.
-        let (mut c, _) = parse("{ not json", "library.json");
+        let (mut c, _) = parse("{ not json", "archive.json");
         assert!(!c.forget(&u("https://example.com/a")));
         assert!(c.refuses_to_be_written());
     }
@@ -1144,15 +1299,21 @@ mod tests {
     fn an_address_past_the_cap_is_refused_by_both_doors() {
         let long = u(&format!("https://example.com/{}", "a".repeat(MAX_URL)));
         let mut a = Archive::new();
-        assert_eq!(a.keep(&on(), &long, Some("A page")), Kept::TooLong);
+        assert_eq!(
+            a.bookmark(&on(), &long, Some("A page"), None),
+            Stored::TooLong
+        );
         assert_eq!(a.len(), 0);
         assert_eq!(a.visit(&on(), &long, Some("A page")), Visited::Refused);
         assert_eq!(a.visits(), 0);
 
         // And an address that fits is untouched, byte for byte: nothing here shortens anything.
         let ordinary = u("https://example.com/a?q=1#x");
-        assert_eq!(a.keep(&on(), &ordinary, None), Kept::Added);
-        assert_eq!(a.kept().next().expect("the item").url, ordinary.as_str());
+        assert_eq!(a.bookmark(&on(), &ordinary, None, None), Stored::Added);
+        assert_eq!(
+            a.bookmarks().next().expect("the item").url,
+            ordinary.as_str()
+        );
     }
 
     /// The half `settings` does not need: one unreadable item costs that item.
@@ -1161,13 +1322,13 @@ mod tests {
         let text = r#"{
             "version": 1,
             "items": [
-                {"url": "https://example.com/a", "title": "A", "kind": "kept", "added": 1},
-                {"kind": "kept"},
-                {"url": "https://example.com/b", "title": "B", "kind": "kept", "added": 2}
+                {"url": "https://example.com/a", "title": "A", "kind": "bookmark", "added": 1},
+                {"kind": "bookmark"},
+                {"url": "https://example.com/b", "title": "B", "kind": "bookmark", "added": 2}
             ]
         }"#;
-        let (a, note) = parse(text, "library.json");
-        let labels: Vec<String> = a.kept().map(|i| i.label()).collect();
+        let (a, note) = parse(text, "archive.json");
+        let labels: Vec<String> = a.bookmarks().map(|i| i.label()).collect();
         assert_eq!(labels, vec!["B", "A"], "most recent first");
         assert!(note.expect("a complaint").contains("1 item(s)"));
     }
@@ -1179,12 +1340,12 @@ mod tests {
         let text = r#"{
             "version": 7,
             "items": [
-                {"url": "https://example.com/a", "title": "A", "kind": "kept", "added": 1,
+                {"url": "https://example.com/a", "title": "A", "kind": "bookmark", "added": 1,
                  "colour": "blue"},
                 {"url": "https://example.com/f", "title": "F", "kind": "subscribed", "added": 2}
             ]
         }"#;
-        let (mut a, note) = parse(text, "library.json");
+        let (mut a, note) = parse(text, "archive.json");
         assert!(note.is_none(), "neither of these is a parse failure");
         assert_eq!(
             a.len(),
@@ -1192,10 +1353,10 @@ mod tests {
             "a tenant this build has no name for is not a keep"
         );
         assert_eq!(a.visits(), 0, "nor is it a page hww drew");
-        assert_eq!(a.kept().next().unwrap().label(), "A");
+        assert_eq!(a.bookmarks().next().unwrap().label(), "A");
 
         // A keep by this build must not strip either of them.
-        a.keep(&on(), &u("https://example.com/b"), Some("B"));
+        a.bookmark(&on(), &u("https://example.com/b"), Some("B"), None);
         let written = serde_json::to_string(&a).unwrap();
         assert!(written.contains("\"colour\":\"blue\""), "{written}");
         assert!(written.contains("\"subscribed\""), "{written}");
@@ -1210,10 +1371,10 @@ mod tests {
     #[test]
     fn forgetting_everything_leaves_a_later_builds_records_alone() {
         let text = r#"{"version": 7, "items": [
-            {"url": "https://example.com/a", "kind": "kept", "added": 1},
+            {"url": "https://example.com/a", "kind": "bookmark", "added": 1},
             {"url": "https://example.com/f", "kind": "subscribed", "added": 2}
         ]}"#;
-        let (mut a, _) = parse(text, "library.json");
+        let (mut a, _) = parse(text, "archive.json");
         assert_eq!(a.forget_all(), 1);
         assert!(a.is_empty());
         assert!(serde_json::to_string(&a).unwrap().contains("subscribed"));
@@ -1225,32 +1386,32 @@ mod tests {
     fn keeping_a_page_twice_or_with_a_fragment_is_one_entry() {
         let mut a = Archive::new();
         assert_eq!(
-            a.keep(&on(), &u("https://example.com/a"), Some("A")),
-            Kept::Added
+            a.bookmark(&on(), &u("https://example.com/a"), Some("A"), None),
+            Stored::Added
         );
         assert_eq!(
-            a.keep(&on(), &u("https://example.com/a"), Some("A")),
-            Kept::Already
+            a.bookmark(&on(), &u("https://example.com/a"), Some("A"), None),
+            Stored::Already
         );
         assert_eq!(
-            a.keep(&on(), &u("https://example.com/a#comments"), Some("A")),
-            Kept::Already
+            a.bookmark(&on(), &u("https://example.com/a#comments"), Some("A"), None),
+            Stored::Already
         );
         assert_eq!(a.len(), 1);
-        assert!(a.holds(&u("https://example.com/a#anything")));
+        assert!(a.is_bookmarked(&u("https://example.com/a#anything")));
         // A different path is a different page.
-        assert!(!a.holds(&u("https://example.com/b")));
+        assert!(!a.is_bookmarked(&u("https://example.com/b")));
         // And a query is part of the address, not decoration on it.
-        assert!(!a.holds(&u("https://example.com/a?page=2")));
+        assert!(!a.is_bookmarked(&u("https://example.com/a?page=2")));
     }
 
     /// The link opens what was kept, fragment included; only the comparison strips it.
     #[test]
     fn the_stored_address_keeps_the_fragment_it_was_given() {
         let mut a = Archive::new();
-        a.keep(&on(), &u("https://example.com/a#part-two"), Some("A"));
+        a.bookmark(&on(), &u("https://example.com/a#part-two"), Some("A"), None);
         assert_eq!(
-            a.kept().next().unwrap().url,
+            a.bookmarks().next().unwrap().url,
             "https://example.com/a#part-two"
         );
     }
@@ -1258,12 +1419,12 @@ mod tests {
     #[test]
     fn forgetting_removes_one_page_and_ignores_the_fragment() {
         let mut a = Archive::new();
-        a.keep(&on(), &u("https://example.com/a"), Some("A"));
-        a.keep(&on(), &u("https://example.com/b"), Some("B"));
+        a.bookmark(&on(), &u("https://example.com/a"), Some("A"), None);
+        a.bookmark(&on(), &u("https://example.com/b"), Some("B"), None);
         assert!(a.forget(&u("https://example.com/a#anywhere")));
         assert!(!a.forget(&u("https://example.com/a")));
         assert_eq!(a.len(), 1);
-        assert!(a.holds(&u("https://example.com/b")));
+        assert!(a.is_bookmarked(&u("https://example.com/b")));
     }
 
     /// The title is untrusted text from a page and now outlives the process.
@@ -1271,64 +1432,77 @@ mod tests {
     fn an_over_long_title_is_capped_on_the_way_in() {
         let mut a = Archive::new();
         let long = "x".repeat(MAX_TITLE * 4);
-        a.keep(&on(), &u("https://example.com/a"), Some(&long));
-        let stored = &a.kept().next().unwrap().title;
+        a.bookmark(&on(), &u("https://example.com/a"), Some(&long), None);
+        let stored = &a.bookmarks().next().unwrap().title;
         assert_eq!(stored.chars().count(), MAX_TITLE);
         assert!(stored.ends_with('…'));
         // Multi-byte characters must not be cut mid-character, which is a panic and not a bug
         // report.
         let mut b = Archive::new();
-        b.keep(
+        b.bookmark(
             &on(),
             &u("https://example.com/b"),
             Some(&"é".repeat(MAX_TITLE * 2)),
+            None,
         );
-        assert_eq!(b.kept().next().unwrap().title.chars().count(), MAX_TITLE);
+        assert_eq!(
+            b.bookmarks().next().unwrap().title.chars().count(),
+            MAX_TITLE
+        );
     }
 
     /// A title arrives as it was written in the markup, newlines and all.
     #[test]
     fn a_stored_title_is_one_line() {
         let mut a = Archive::new();
-        a.keep(
+        a.bookmark(
             &on(),
             &u("https://example.com/a"),
             Some("  A page\n   split over lines  "),
+            None,
         );
-        assert_eq!(a.kept().next().unwrap().title, "A page split over lines");
+        assert_eq!(
+            a.bookmarks().next().unwrap().title,
+            "A page split over lines"
+        );
     }
 
     /// The cap refuses rather than evicting: the oldest keep is still there afterwards.
     #[test]
-    fn a_full_library_refuses_rather_than_dropping_the_oldest() {
+    fn a_full_bookmarks_refuses_rather_than_dropping_the_oldest() {
         let mut a = Archive::new();
         for i in 0..MAX_ITEMS {
             assert_eq!(
-                a.keep(&on(), &u(&format!("https://example.com/{i}")), Some("x")),
-                Kept::Added
+                a.bookmark(
+                    &on(),
+                    &u(&format!("https://example.com/{i}")),
+                    Some("x"),
+                    None
+                ),
+                Stored::Added
             );
         }
         assert_eq!(
-            a.keep(&on(), &u("https://example.com/one-more"), Some("x")),
-            Kept::Full
+            a.bookmark(&on(), &u("https://example.com/one-more"), Some("x"), None),
+            Stored::Full
         );
         assert_eq!(a.len(), MAX_ITEMS);
         assert!(
-            a.holds(&u("https://example.com/0")),
+            a.is_bookmarked(&u("https://example.com/0")),
             "the oldest keep survived"
         );
-        assert!(!a.holds(&u("https://example.com/one-more")));
+        assert!(!a.is_bookmarked(&u("https://example.com/one-more")));
     }
 
-    /// The view is one `Entries` block, which is the whole reason the library needs no
+    /// The view is one `Entries` block, which is the whole reason the bookmarks needs no
     /// rendering code of its own.
     #[test]
-    fn the_library_is_one_entries_block() {
+    fn the_bookmarks_view_is_one_entries_block() {
         let mut a = Archive::new();
-        a.keep(&on(), &u("https://example.com/a"), Some("A"));
-        a.keep(&on(), &u("https://example.com/b"), Some("B"));
-        let doc = document(&a);
-        assert_eq!(doc.url, LIBRARY);
+        a.bookmark(&on(), &u("https://example.com/a"), Some("A"), None);
+        a.bookmark(&on(), &u("https://example.com/b"), Some("B"), None);
+        let doc = bookmarks_document(&a);
+        assert_eq!(doc.url, BOOKMARKS);
         assert!(doc.title.is_some(), "the masthead is derived from this");
         assert_eq!(doc.blocks.len(), 1);
         let ir::Block::Entries(entries) = &doc.blocks[0] else {
@@ -1341,12 +1515,12 @@ mod tests {
         assert!(entries.iter().all(|e| e.image.is_none()));
     }
 
-    /// An empty library is a new reader, not a failure, so the library key opens a page that
-    /// says what to
+    /// An empty bookmarks list is a new reader, not a failure, so the bookmarks key opens a page
+    /// that says what to
     /// do rather than a blank screen or an error.
     #[test]
-    fn an_empty_library_is_a_page_that_says_so() {
-        let doc = document(&Archive::new());
+    fn an_empty_bookmarks_view_is_a_page_that_says_so() {
+        let doc = bookmarks_document(&Archive::new());
         assert_eq!(doc.blocks.len(), 1);
         assert!(matches!(doc.blocks[0], ir::Block::Paragraph(_)));
         let words = ir::plain_text(match &doc.blocks[0] {
@@ -1354,8 +1528,8 @@ mod tests {
             _ => unreachable!(),
         });
         assert!(
-            words.contains(crate::reader::menu::KEEP_PAGE),
-            "the empty library names the key that fills it: {words}"
+            words.contains(crate::reader::menu::BOOKMARK_PAGE),
+            "the empty bookmarks list names the key that fills it: {words}"
         );
     }
 
@@ -1363,31 +1537,31 @@ mod tests {
     #[test]
     fn an_untitled_page_is_named_by_its_address() {
         let mut a = Archive::new();
-        a.keep(&on(), &u("https://example.com/a/b"), None);
-        assert_eq!(a.kept().next().unwrap().label(), "example.com/a/b");
+        a.bookmark(&on(), &u("https://example.com/a/b"), None, None);
+        assert_eq!(a.bookmarks().next().unwrap().label(), "example.com/a/b");
         let mut b = Archive::new();
-        b.keep(&on(), &u("https://example.com/"), Some("   "));
-        assert_eq!(b.kept().next().unwrap().label(), "example.com");
+        b.bookmark(&on(), &u("https://example.com/"), Some("   "), None);
+        assert_eq!(b.bookmarks().next().unwrap().label(), "example.com");
     }
 
-    /// First run is unchanged: an empty library opens on the splash whatever the setting says.
+    /// First run is unchanged: an empty bookmarks list opens on the splash whatever the setting says.
     #[test]
-    fn an_empty_library_never_takes_the_home_screen() {
-        let want_library = Settings::default();
+    fn an_empty_bookmarks_never_takes_the_home_screen() {
+        let want_bookmarks = Settings::default();
         let want_splash = Settings {
             open_on: crate::reader::settings::OpenOn::Nothing,
             ..Settings::default()
         };
         let empty = Archive::new();
         assert!(
-            !opens_on_launch(&want_library, &empty),
+            !opens_on_launch(&want_bookmarks, &empty),
             "a fresh install must still meet the splash"
         );
         assert!(!opens_on_launch(&want_splash, &empty));
 
         let mut full = Archive::new();
-        full.keep(&on(), &u("https://example.com/a"), Some("A"));
-        assert!(opens_on_launch(&want_library, &full));
+        full.bookmark(&on(), &u("https://example.com/a"), Some("A"), None);
+        assert!(opens_on_launch(&want_bookmarks, &full));
         assert!(
             !opens_on_launch(&want_splash, &full),
             "the reader who asked for the splash back gets it"
@@ -1403,7 +1577,7 @@ mod tests {
     }
 
     /// The second tenant, through the file and back, filed under its own kind and counted by
-    /// neither of the library's counters.
+    /// neither of the bookmarks' counters.
     #[test]
     fn a_visited_page_round_trips_and_is_not_a_kept_page() {
         let mut a = Archive::new();
@@ -1422,7 +1596,7 @@ mod tests {
         assert_eq!(back.visits(), 1);
         assert_eq!(back.len(), 0);
         assert!(back.is_empty());
-        assert!(!back.holds(&u("https://example.com/a")));
+        assert!(!back.is_bookmarked(&u("https://example.com/a")));
     }
 
     /// **The switch.** Its caller is not a keypress, so this is the whole difference between a
@@ -1443,8 +1617,13 @@ mod tests {
         );
         // And the other switch is not this one: keeping still works with watching off.
         assert_eq!(
-            a.keep(&watching_off(), &u("https://example.com/k"), Some("K")),
-            Kept::Added
+            a.bookmark(
+                &watching_off(),
+                &u("https://example.com/k"),
+                Some("K"),
+                None
+            ),
+            Stored::Added
         );
     }
 
@@ -1459,7 +1638,7 @@ mod tests {
             "https://user:secret@example.com/a",
             "https://user@example.com/a",
             HISTORY,
-            LIBRARY,
+            BOOKMARKS,
         ] {
             assert_eq!(
                 a.visit(&on(), &u(refused), Some("x")),
@@ -1470,11 +1649,16 @@ mod tests {
         assert_eq!(a.visits(), 0);
         let text = serde_json::to_string(&a).unwrap();
         assert!(!text.contains("secret"), "{text}");
-        // The library is the reader's own choice, one keypress at a time, and `Ctrl+D` takes it
+        // The bookmarks is the reader's own choice, one keypress at a time, and `Ctrl+D` takes it
         // back out; it is not this door and does not inherit this rule.
         assert_eq!(
-            a.keep(&on(), &u("https://user:secret@example.com/a"), Some("x")),
-            Kept::Added
+            a.bookmark(
+                &on(),
+                &u("https://user:secret@example.com/a"),
+                Some("x"),
+                None
+            ),
+            Stored::Added
         );
     }
 
@@ -1489,32 +1673,39 @@ mod tests {
     fn the_three_tenants_never_answer_for_one_another() {
         let mut a = Archive::new();
         let url = u("https://example.com/a");
-        assert_eq!(a.keep(&on(), &url, Some("Kept")), Kept::Added);
-        assert_eq!(a.add_next(&on(), &url, Some("Later")), Kept::Added);
+        assert_eq!(a.bookmark(&on(), &url, Some("Stored"), None), Stored::Added);
+        assert_eq!(a.add_next(&on(), &url, Some("Later")), Stored::Added);
         assert_eq!(a.visit(&on(), &url, Some("Seen")), Visited::Recorded);
         assert_eq!(a.len(), 1);
         assert_eq!(a.next_len(), 1);
         assert_eq!(a.visits(), 1);
-        assert!(a.holds(&url) && a.holds_next(&url));
+        assert!(a.is_bookmarked(&url) && a.holds_next(&url));
 
         // Taking it off the reading list leaves the other two exactly where they are, which is
         // the case a shared `forget` would silently get wrong.
         assert!(a.forget_next(&url));
         assert!(!a.holds_next(&url));
-        assert!(a.holds(&url), "un-keeping is not what was asked for");
+        assert!(
+            a.is_bookmarked(&url),
+            "un-keeping is not what was asked for"
+        );
         assert_eq!(a.visits(), 1);
 
-        assert_eq!(a.add_next(&on(), &url, Some("Later")), Kept::Added);
+        assert_eq!(a.add_next(&on(), &url, Some("Later")), Stored::Added);
         assert_eq!(a.forget_all(), 1);
-        assert_eq!(a.next_len(), 1, "the library button took the reading list");
-        assert_eq!(a.visits(), 1, "the library button took the history");
+        assert_eq!(
+            a.next_len(),
+            1,
+            "the bookmarks button took the reading list"
+        );
+        assert_eq!(a.visits(), 1, "the bookmarks button took the history");
         assert_eq!(a.forget_visits(), 1);
         assert_eq!(a.next_len(), 1, "the history button took the reading list");
         assert_eq!(a.forget_all_next(), 1);
         assert!(a.items.is_empty());
     }
 
-    /// The reading list refuses at its cap and drops nothing, with the library and against the
+    /// The reading list refuses at its cap and drops nothing, with the bookmarks and against the
     /// history. Everything on it was chosen, and the doctrine's whole arithmetic is that a chosen
     /// thing is never evicted to make room for a newer one.
     #[test]
@@ -1523,22 +1714,22 @@ mod tests {
         for i in 0..MAX_NEXT {
             assert_eq!(
                 a.add_next_at(&u(&format!("https://example.com/{i}")), Some("x"), 1),
-                Kept::Added
+                Stored::Added
             );
         }
         let before = a.read_next().next().map(|i| i.url.clone());
         assert_eq!(
             a.add_next_at(&u("https://example.com/one-more"), Some("x"), 1),
-            Kept::Full
+            Stored::Full
         );
         assert_eq!(a.next_len(), MAX_NEXT, "nothing was dropped to make room");
         assert_eq!(a.read_next().next().map(|i| i.url.clone()), before);
-        // Its own cap, not the library's: the two tenants do not borrow each other's rules, and
-        // the library still has all its room.
+        // Its own cap, not the bookmarks': the two tenants do not borrow each other's rules, and
+        // the bookmarks still has all its room.
         assert_ne!(MAX_NEXT, MAX_ITEMS);
         assert_eq!(
-            a.keep(&on(), &u("https://example.com/k"), Some("K")),
-            Kept::Added
+            a.bookmark(&on(), &u("https://example.com/k"), Some("K"), None),
+            Stored::Added
         );
     }
 
@@ -1559,12 +1750,12 @@ mod tests {
             "https://user:secret@example.com/a",
             "https://user@example.com/a",
             READING_LIST,
-            LIBRARY,
+            BOOKMARKS,
             HISTORY,
         ] {
             assert_eq!(
                 a.add_next(&on(), &u(refused), Some("x")),
-                Kept::Refused,
+                Stored::Refused,
                 "{refused}"
             );
         }
@@ -1577,13 +1768,13 @@ mod tests {
     }
 
     /// The switch is answered inside the door, and off means stop writing rather than lose what
-    /// is there — [`Settings::keep_library`]'s meaning of the word, one tenant over.
+    /// is there — [`Settings::keep_bookmarks`]'s meaning of the word, one tenant over.
     #[test]
     fn the_reading_list_switch_is_answered_in_the_door() {
         let mut a = Archive::new();
         assert_eq!(
             a.add_next(&on(), &u("https://example.com/a"), Some("A")),
-            Kept::Added
+            Stored::Added
         );
         let off = Settings {
             keep_reading_list: false,
@@ -1591,7 +1782,7 @@ mod tests {
         };
         assert_eq!(
             a.add_next(&off, &u("https://example.com/b"), Some("B")),
-            Kept::Off
+            Stored::Off
         );
         assert_eq!(
             a.next_len(),
@@ -1600,8 +1791,8 @@ mod tests {
         );
         // Off for this tenant is not off for the others.
         assert_eq!(
-            a.keep(&off, &u("https://example.com/c"), Some("C")),
-            Kept::Added
+            a.bookmark(&off, &u("https://example.com/c"), Some("C"), None),
+            Stored::Added
         );
         assert_eq!(
             a.visit(&off, &u("https://example.com/d"), Some("D")),
@@ -1615,7 +1806,7 @@ mod tests {
     fn an_over_long_link_is_refused_rather_than_shortened() {
         let mut a = Archive::new();
         let long = format!("https://example.com/{}", "q".repeat(MAX_URL));
-        assert_eq!(a.add_next(&on(), &u(&long), Some("x")), Kept::TooLong);
+        assert_eq!(a.add_next(&on(), &u(&long), Some("x")), Stored::TooLong);
         assert_eq!(a.next_len(), 0);
     }
 
@@ -1626,11 +1817,11 @@ mod tests {
         let mut a = Archive::new();
         assert_eq!(
             a.add_next(&on(), &u("https://example.com/a"), Some("A")),
-            Kept::Added
+            Stored::Added
         );
         assert_eq!(
             a.add_next(&on(), &u("https://example.com/a#part-two"), Some("A")),
-            Kept::Already
+            Stored::Already
         );
         assert_eq!(a.next_len(), 1);
     }
@@ -1661,24 +1852,24 @@ mod tests {
         assert!(serde_json::to_string(&m).unwrap().contains("feed"));
     }
 
-    /// The reading list shows each row's address and the library does not, which is
+    /// The reading list shows each row's address and the bookmarks does not, which is
     /// `Address::Shown`'s whole argument: these rows are named by link text, and link text
     /// repeats.
     #[test]
     fn the_reading_list_draws_the_address_under_each_row() {
         let mut a = Archive::new();
         a.add_next_at(&u("https://example.com/a"), Some("Read more"), 86_400);
-        a.keep_at(&u("https://example.com/a"), Some("Read more"), 86_400);
+        a.bookmark_at(&u("https://example.com/a"), Some("Read more"), None, 86_400);
         let listed = reading_list_document(&a, &on());
         let Block::Entries(rows) = &listed.blocks[0] else {
             panic!("the reading list draws entries");
         };
         assert_eq!(rows[0].address.as_deref(), Some("https://example.com/a"));
-        let shelved = document(&a);
+        let shelved = bookmarks_document(&a);
         let Block::Entries(kept) = &shelved.blocks[0] else {
-            panic!("the library draws entries");
+            panic!("the bookmarks draws entries");
         };
-        assert_eq!(kept[0].address, None, "the library names no addresses");
+        assert_eq!(kept[0].address, None, "the bookmarks names no addresses");
     }
 
     /// An empty reading list is a document with a sentence in it, not an error page and not a
@@ -1734,11 +1925,11 @@ mod tests {
     #[test]
     fn the_two_tenants_do_not_overwrite_each_other() {
         let mut a = Archive::new();
-        a.keep_at(&u("https://example.com/a"), Some("As kept"), 86_400);
+        a.bookmark_at(&u("https://example.com/a"), Some("As kept"), None, 86_400);
         a.visit_at(&u("https://example.com/a"), Some("As visited"), 172_800);
         assert_eq!(a.len(), 1);
         assert_eq!(a.visits(), 1);
-        let kept = a.kept().next().unwrap();
+        let kept = a.bookmarks().next().unwrap();
         assert_eq!(kept.title, "As kept");
         assert_eq!(kept.added, 86_400);
         assert_eq!(a.visited().next().unwrap().title, "As visited");
@@ -1746,29 +1937,29 @@ mod tests {
         // And each button empties its own tenant only.
         let mut b = a.clone();
         assert_eq!(b.forget_visits(), 1);
-        assert_eq!(b.len(), 1, "forgetting a trail is not losing the library");
+        assert_eq!(b.len(), 1, "forgetting a trail is not losing the bookmarks");
         assert_eq!(a.forget_all(), 1);
         assert_eq!(a.visits(), 1, "and the reverse");
     }
 
-    /// `Ctrl+D` twice removes a page from the library. It must not also erase the fact that hww
+    /// `Ctrl+D` twice removes a page from the bookmarks. It must not also erase the fact that hww
     /// drew it, which is a different tenant's record with a different switch over it.
     #[test]
     fn forgetting_a_kept_page_leaves_the_history_row_alone() {
         let mut a = Archive::new();
         a.visit(&on(), &u("https://example.com/a"), Some("A"));
-        a.keep(&on(), &u("https://example.com/a"), Some("A"));
+        a.bookmark(&on(), &u("https://example.com/a"), Some("A"), None);
         assert!(a.forget(&u("https://example.com/a")));
         assert_eq!(a.visits(), 1);
     }
 
-    /// The opposite of [`a_full_library_refuses_rather_than_dropping_the_oldest`], and the module
+    /// The opposite of [`a_full_bookmarks_refuses_rather_than_dropping_the_oldest`], and the module
     /// doc says why: nothing here was chosen, so the oldest page goes and the newest is written.
     /// What it may never evict is a page the reader kept.
     #[test]
     fn a_full_history_drops_its_oldest_page_and_never_a_kept_one() {
         let mut a = Archive::new();
-        a.keep(&on(), &u("https://example.com/kept"), Some("Kept"));
+        a.bookmark(&on(), &u("https://example.com/kept"), Some("Stored"), None);
         for i in 0..MAX_VISITS {
             a.visit(&on(), &u(&format!("https://example.com/{i}")), Some("x"));
         }
@@ -1783,11 +1974,11 @@ mod tests {
             "the oldest page was the one that went"
         );
         assert!(urls.contains(&"https://example.com/1"));
-        assert_eq!(a.len(), 1, "the library is not eviction's business");
-        assert!(a.holds(&u("https://example.com/kept")));
+        assert_eq!(a.len(), 1, "the bookmarks is not eviction's business");
+        assert!(a.is_bookmarked(&u("https://example.com/kept")));
     }
 
-    /// The history view, drawn by the same code as the library and never listing itself.
+    /// The history view, drawn by the same code as the bookmarks and never listing itself.
     #[test]
     fn the_history_is_one_entries_block_at_its_own_address() {
         let mut a = Archive::new();
@@ -1795,7 +1986,7 @@ mod tests {
         a.visit(&on(), &u("https://example.com/b"), Some("B"));
         let doc = history_document(&a, &on());
         assert_eq!(doc.url, HISTORY);
-        assert_ne!(doc.url, LIBRARY);
+        assert_ne!(doc.url, BOOKMARKS);
         assert!(doc.title.is_some(), "the masthead is derived from this");
         let ir::Block::Entries(entries) = &doc.blocks[0] else {
             panic!("expected one Entries block, got {:?}", doc.blocks);
@@ -1835,16 +2026,211 @@ mod tests {
         // Not a dek: the summary is the page's own words and stays empty here.
         assert!(entries[1].summary.is_empty());
 
-        // The library is a short list of pages the reader chose and can name, and does not.
+        // The bookmarks is a short list of pages the reader chose and can name, and does not.
         let mut b = Archive::new();
-        b.keep(&on(), &u("https://example.com/a"), Some("A"));
-        let ir::Block::Entries(kept) = &document(&b).blocks[0] else {
+        b.bookmark(&on(), &u("https://example.com/a"), Some("A"), None);
+        let ir::Block::Entries(kept) = &bookmarks_document(&b).blocks[0] else {
             panic!("expected one Entries block");
         };
         assert!(kept[0].address.is_none());
     }
 
-    /// An empty history is a page, like an empty library, and it says which of the two things it
+    /// The mark is stored for a page the reader chose, drawn in the bookmarks, and absent from the
+    /// history — three halves of the argument in [`Mark`], each of which can be broken without
+    /// breaking the other two. The reading list's half is
+    /// [`a_reading_list_row_draws_a_mark_it_never_stored`].
+    #[test]
+    fn the_bookmarks_stores_its_marks_and_the_history_draws_none() {
+        let mut a = Archive::new();
+        a.bookmark(
+            &on(),
+            &u("https://example.com/a"),
+            Some("A"),
+            Some("https://example.com/favicon.png"),
+        );
+        assert_eq!(
+            a.bookmarks().next().unwrap().icon,
+            "https://example.com/favicon.png"
+        );
+        let ir::Block::Entries(kept) = &bookmarks_document(&a).blocks[0] else {
+            panic!("expected one Entries block");
+        };
+        assert_eq!(
+            kept[0].icon.as_deref(),
+            Some("https://example.com/favicon.png")
+        );
+
+        // Watching a page writes no mark down, whatever the page declared.
+        a.visit(&on(), &u("https://example.com/a"), Some("A"));
+        assert_eq!(a.visited().next().unwrap().icon, "");
+
+        // And the history view draws none even for an item that has one, which is what a
+        // hand-edited file, or an item written by a later build, would produce. This is the
+        // lock that is not `Archive::visit` declining to write the field: the two are separate
+        // on purpose, because only one of them survives a file hww did not write.
+        let mut b = Archive::new();
+        b.visit_at(&u("https://example.com/a"), Some("A"), 86_400);
+        b.items[0].icon = "https://example.com/favicon.png".to_owned();
+        let ir::Block::Entries(seen) = &history_document(&b, &on()).blocks[0] else {
+            panic!("expected one Entries block");
+        };
+        assert!(
+            seen[0].icon.is_none(),
+            "the history draws no column, stored icon or not"
+        );
+    }
+
+    /// The mark is an address hww will later request without being asked again, so the set of
+    /// things it may name is the two schemes `fetch` speaks. Anything else costs the mark and
+    /// never the page: the reader pressed a key to keep this, and losing it over a favicon
+    /// would be the silent loss this module exists to prevent.
+    #[test]
+    fn a_mark_that_is_not_a_web_address_is_dropped_and_the_page_is_kept() {
+        let refused = [
+            "data:image/png;base64,AAAA",
+            "file:///home/reader/icon.png",
+            "/favicon.ico",
+            "",
+            "   ",
+        ];
+        for (i, icon) in refused.iter().enumerate() {
+            let mut a = Archive::new();
+            let url = u(&format!("https://example.com/{i}"));
+            assert_eq!(
+                a.bookmark(&on(), &url, Some("A"), Some(icon)),
+                Stored::Added
+            );
+            let item = a.bookmarks().next().expect("the page is kept anyway");
+            assert_eq!(item.icon, "", "{icon} should not have been written down");
+        }
+
+        // And one past the address cap, which is refused where the title cap truncates for the
+        // reason the module doc gives: half an address is a link to somewhere else.
+        let mut a = Archive::new();
+        let long = format!("https://example.com/{}", "a".repeat(MAX_URL));
+        a.bookmark(
+            &on(),
+            &u("https://example.com/a"),
+            Some("A"),
+            Some(long.as_str()),
+        );
+        assert_eq!(a.bookmarks().next().unwrap().icon, "");
+    }
+
+    /// A mark written by an older build, or by hand, is re-checked on the way out: the file
+    /// between the two saves is one a reader may edit, and this is a URL hww fetches.
+    ///
+    /// What replaces it is the guess, not nothing: `mark_beside` falls through to
+    /// [`well_known_icon`], so the row keeps its place in the column and the address hww
+    /// requests is one it derived rather than one the file handed it.
+    #[test]
+    fn a_stored_mark_is_checked_again_before_it_is_drawn() {
+        let mut a = Archive::new();
+        a.bookmark_at(&u("https://example.com/a"), Some("A"), None, 86_400);
+        a.items[0].icon = "javascript:alert(1)".to_owned();
+        let ir::Block::Entries(kept) = &bookmarks_document(&a).blocks[0] else {
+            panic!("expected one Entries block");
+        };
+        assert_eq!(
+            kept[0].icon.as_deref(),
+            Some("https://example.com/favicon.ico")
+        );
+
+        // And a row whose own address is not one `fetch` speaks draws no mark at all, which is
+        // the case the gutter is allocated for whether or not anything fills it.
+        let mut b = Archive::new();
+        b.bookmark_at(&u("https://example.com/a"), Some("A"), None, 86_400);
+        b.items[0].url = "mailto:someone@example.com".to_owned();
+        let ir::Block::Entries(odd) = &bookmarks_document(&b).blocks[0] else {
+            panic!("expected one Entries block");
+        };
+        assert!(odd[0].icon.is_none());
+    }
+
+    /// A mark never carries a credential, whichever of the two doors it came through.
+    ///
+    /// The row's own address may hold one — `Archive::bookmark` allows it, because a keypress
+    /// put that page there — and following it is a click. The mark is not: hww requests it by
+    /// itself when the view is drawn, so a userinfo left on it would be an automatic
+    /// authenticated request for a page nobody opened, with the password read straight out of
+    /// `archive.json`.
+    #[test]
+    fn a_mark_never_carries_the_password_its_row_might() {
+        let mut a = Archive::new();
+        assert_eq!(
+            a.bookmark(
+                &on(),
+                &u("https://user:secret@intranet.example/page"),
+                Some("Intranet"),
+                Some("https://user:secret@intranet.example/favicon.ico"),
+            ),
+            Stored::Added
+        );
+        // The mark is written without it. The row's *own* address keeps what the reader typed —
+        // that is `Archive::bookmark`'s documented difference from the other two doors, and
+        // `credentials_survive_a_keep_and_are_refused_everywhere_else` is where it is pinned.
+        let item = a.bookmarks().next().expect("the page is bookmarked");
+        assert_eq!(item.icon, "https://intranet.example/favicon.ico");
+        assert!(item.url.contains("secret"), "the address is left as given");
+
+        let ir::Block::Entries(rows) = &bookmarks_document(&a).blocks[0] else {
+            panic!("expected one Entries block");
+        };
+        assert_eq!(
+            rows[0].icon.as_deref(),
+            Some("https://intranet.example/favicon.ico")
+        );
+
+        // And the guessed one, which `Url::join` would otherwise build from the row's own
+        // credentialed address. This is the reading list's only path to a mark.
+        let mut b = Archive::new();
+        b.add_next_at(
+            &u("https://user:secret@intranet.example/page"),
+            Some("Read more"),
+            86_400,
+        );
+        let ir::Block::Entries(next) = &reading_list_document(&b, &on()).blocks[0] else {
+            panic!("expected one Entries block");
+        };
+        assert_eq!(
+            next[0].icon.as_deref(),
+            Some("https://intranet.example/favicon.ico"),
+            "the guess must not reproduce the credential"
+        );
+    }
+
+    /// The reading list draws the column with nothing stored for it.
+    ///
+    /// The three halves of [`Mark`]'s argument, one list at a time: a row hww has never fetched
+    /// still gets a mark, the file it came from records no icon for it, and the address drawn is
+    /// the well-known one at that row's own origin rather than anything a site said.
+    #[test]
+    fn a_reading_list_row_draws_a_mark_it_never_stored() {
+        let mut a = Archive::new();
+        assert_eq!(
+            a.add_next(
+                &on(),
+                &u("https://example.net/deep/piece?ref=x"),
+                Some("Read more")
+            ),
+            Stored::Added
+        );
+        assert_eq!(
+            a.read_next().next().expect("the row").icon,
+            "",
+            "a guess must not be written to the file"
+        );
+        let ir::Block::Entries(rows) = &reading_list_document(&a, &on()).blocks[0] else {
+            panic!("expected one Entries block");
+        };
+        assert_eq!(
+            rows[0].icon.as_deref(),
+            Some("https://example.net/favicon.ico"),
+            "the origin's well-known path, never the row's own path"
+        );
+    }
+
+    /// An empty history is a page, like an empty bookmarks list, and it says which of the two things it
     /// means: nothing read yet, or nothing being written down.
     #[test]
     fn an_empty_history_is_a_page_that_says_why_it_is_empty() {
@@ -1881,23 +2267,23 @@ mod tests {
     #[test]
     fn an_item_with_no_time_carries_no_date() {
         let mut a = Archive::new();
-        a.keep_at(&u("https://example.com/a"), Some("A"), 1_756_339_200);
+        a.bookmark_at(&u("https://example.com/a"), Some("A"), None, 1_756_339_200);
         assert_eq!(
-            a.kept().next().unwrap().on_day().as_deref(),
+            a.bookmarks().next().unwrap().on_day().as_deref(),
             Some("2025-08-28")
         );
         let (b, _) = parse(
-            r#"{"items":[{"url":"https://example.com/a","kind":"kept"}]}"#,
-            "library.json",
+            r#"{"items":[{"url":"https://example.com/a","kind":"bookmark"}]}"#,
+            "archive.json",
         );
-        assert!(b.kept().next().unwrap().on_day().is_none());
+        assert!(b.bookmarks().next().unwrap().on_day().is_none());
     }
 
-    /// The address of the library view carries no authority component, so no hostname enters any
+    /// The address of the bookmarks view carries no authority component, so no hostname enters any
     /// file but `sites.rs`, and every `host_str()` in the reader answers `None` without panicking.
     #[test]
-    fn the_library_address_has_no_host() {
-        let url = Url::parse(LIBRARY).expect("hww:library parses");
+    fn the_bookmarks_address_has_no_host() {
+        let url = Url::parse(BOOKMARKS).expect("hww:bookmarks parses");
         assert_eq!(url.scheme(), "hww");
         assert!(url.host_str().is_none());
         assert!(
@@ -1908,37 +2294,37 @@ mod tests {
 
     /// The off switch, at the door rather than at the call site. Nothing is written, and what was
     /// already kept is left exactly where it is: turning keeping off is not a way to lose a
-    /// library, which is what the panel's "forget everything" is for.
+    /// bookmarks, which is what the panel's "forget everything" is for.
     #[test]
     fn the_off_switch_prevents_the_write_and_keeps_what_is_there() {
         let off = Settings {
-            keep_library: false,
+            keep_bookmarks: false,
             ..Settings::default()
         };
         let mut a = Archive::new();
-        a.keep(&on(), &u("https://example.com/a"), Some("A"));
+        a.bookmark(&on(), &u("https://example.com/a"), Some("A"), None);
         assert_eq!(
-            a.keep(&off, &u("https://example.com/b"), Some("B")),
-            Kept::Off
+            a.bookmark(&off, &u("https://example.com/b"), Some("B"), None),
+            Stored::Off
         );
         assert_eq!(a.len(), 1);
         assert!(
-            a.holds(&u("https://example.com/a")),
+            a.is_bookmarked(&u("https://example.com/a")),
             "the switch is not a delete"
         );
         // And the answer does not depend on whether the page was already there.
         assert_eq!(
-            a.keep(&off, &u("https://example.com/a"), Some("A")),
-            Kept::Off
+            a.bookmark(&off, &u("https://example.com/a"), Some("A"), None),
+            Stored::Off
         );
     }
 
     /// Page content can never reach the reader's own views. `classify_link` refuses every scheme
-    /// it does not handle, and `hww` is not one of them, so only a command opens the library.
+    /// it does not handle, and `hww` is not one of them, so only a command opens the bookmarks.
     #[test]
     fn a_page_cannot_link_into_the_readers_own_views() {
         use crate::session::{Target, classify_link};
-        for href in [LIBRARY, "hww:anything", "hww://library/"] {
+        for href in [BOOKMARKS, "hww:anything", "hww://bookmarks/"] {
             let Target::Refuse { reason, .. } = classify_link(href) else {
                 panic!("{href} was not refused");
             };

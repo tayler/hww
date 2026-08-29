@@ -243,6 +243,9 @@ pub fn parse(html: &Html, base: &Url, shape: &SearchShape) -> Vec<Entry> {
             // The engines print a breadcrumb of their own inside the result, which arrives as
             // part of `summary`. See `ir::Entry::address`.
             address: None,
+            // Nor a site mark: the same argument as `image` below, one field over. `ir::Entry`
+            // documents why a page's own entries carry neither.
+            icon: None,
             // Result favicons come from the engine's own image host
             // (`imgs.search.brave.com`, `external-content.duckduckgo.com`). Carrying one would
             // put a third-party image offer on every row of the page.

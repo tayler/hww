@@ -46,22 +46,22 @@ use eframe::egui::{self, RichText, Ui};
 pub enum Event {
     Changed,
     ZoomSet(f32),
-    /// The Library group's "forget everything" was pressed.
+    /// The Bookmarks group's "forget everything" was pressed.
     ///
     /// A value rather than a direct write, for the same reason [`Event::ZoomSet`] is one: the
-    /// library is not in `Settings` and this panel is handed nothing else. `app` owns the store
-    /// and the file, and it is also the only place that knows whether the library is the page on
+    /// bookmarks is not in `Settings` and this panel is handed nothing else. `app` owns the store
+    /// and the file, and it is also the only place that knows whether the bookmarks is the page on
     /// screen and has to be redrawn under the reader.
     ///
     /// It needs no `Control` variant. `prefs_ui` already draws the per-group `reset` and the
     /// foot's `reset all` outside the field walk, each calling a pure function a test can reach;
     /// this is that pattern a third time. A `Control::Button` would be mechanism with one caller,
     /// which is the standard that removed `force_thread`.
-    ForgetLibrary,
-    /// The Reading list group's "forget the reading list" was pressed. [`Event::ForgetLibrary`]'s
+    ForgetBookmarks,
+    /// The Reading list group's "forget the reading list" was pressed. [`Event::ForgetBookmarks`]'s
     /// argument, one tenant over.
     ForgetReadingList,
-    /// The History group's "forget history" was pressed. [`Event::ForgetLibrary`]'s argument,
+    /// The History group's "forget history" was pressed. [`Event::ForgetBookmarks`]'s argument,
     /// one tenant over: the panel owns neither the store nor the file.
     ForgetHistory,
 }
@@ -221,7 +221,7 @@ fn group_heading(
 /// Below the fields rather than beside the heading, because "forget everything" is the second
 /// half of the switch above it and reads as a consequence of it; drawn from the heading it would
 /// sit above the setting it completes. And here rather than at the foot with `reset all`, because
-/// forgetting a library is not resetting a preference and must not be reachable by a button that
+/// forgetting a bookmarks list is not resetting a preference and must not be reachable by a button that
 /// says it is.
 fn group_footer(
     ui: &mut Ui,
@@ -235,10 +235,10 @@ fn group_footer(
     // the history with it, a reader clearing a trail is not asking to lose the pages they saved on
     // purpose, and neither of them is asking to lose the links they lined up to read next.
     let (label, hover, event) = match group {
-        Group::Library => (
+        Group::Bookmarks => (
             "forget everything",
             "Remove every page you have kept. This cannot be undone.",
-            Event::ForgetLibrary,
+            Event::ForgetBookmarks,
         ),
         Group::ReadingList => (
             "forget the reading list",
@@ -261,7 +261,7 @@ fn group_footer(
         }
     });
     // Under all three groups, because all three write to it and a reader who scrolled straight to
-    // History must not have to have read the Library group to learn where its file is. The archive
+    // History must not have to have read the Bookmarks group to learn where its file is. The archive
     // doctrine's disclosure requirement is that a store whose shape the reader cannot see is one
     // they cannot reason about; this is the same sentence the settings path gets at the foot.
     // And a sentence either way: with no config directory there is no path to print and

@@ -141,30 +141,31 @@ pub const URL_BAR_HINT: &str = "Search or type a URL";
 pub const RELOADED_BARE: &str =
     "reloaded bare: no rewrite rule, no site profile, no search shape, no feed reader";
 
-/// The library's masthead, and so also its window title in the outline and the status strip.
+/// The bookmarks' masthead, and so also its window title in the outline and the status strip.
 ///
 /// "Your", because the whole doctrine of `reader::archive` is that this holds what the reader
-/// named and nothing hww decided to collect. A neutral "Library" would read as a catalogue the
-/// application maintains.
-pub const LIBRARY_TITLE: &str = "Your library";
+/// named and nothing hww decided to collect. A bare "Bookmarks" would read as a catalogue the
+/// application maintains. The noun is the one every other browser uses, which is the point of
+/// it: a second browser gets to be unusual about what it does, not about what things are called.
+pub const BOOKMARKS_TITLE: &str = "Your bookmarks";
 
-/// The one line an empty library shows.
+/// The one line an empty bookmarks page shows.
 ///
 /// A function and not a const, because it names a key and the key is `cfg`-selected: a Mac
 /// reader told to press Ctrl+D is told to press a key nothing binds. Not an error page, either:
-/// see `archive::document` for why an engine that found nothing and a reader who has not saved
-/// anything yet are different situations.
-pub fn library_is_empty() -> String {
+/// see `archive::bookmarks_document` for why an engine that found nothing and a reader who has
+/// not saved anything yet are different situations.
+pub fn bookmarks_are_empty() -> String {
     format!(
-        "Nothing kept yet. {} keeps the page you are reading, and hww never keeps a page you did \
-         not ask it to.",
-        crate::reader::menu::KEEP_PAGE
+        "No bookmarks yet. {} saves the page you are reading, and hww never bookmarks a page you \
+         did not ask it to.",
+        crate::reader::menu::BOOKMARK_PAGE
     )
 }
 
 /// The reading list's masthead, and so also its window title and its line in the status strip.
 ///
-/// "Your", for [`LIBRARY_TITLE`]'s reason. "Read next" rather than "Reading list" because the
+/// "Your", for [`BOOKMARKS_TITLE`]'s reason. "Read next" rather than "Reading list" because the
 /// list is a queue and the title is the instruction: these are the things the reader said they
 /// would come back to.
 pub const READING_LIST_TITLE: &str = "Read next";
@@ -175,9 +176,9 @@ pub const READING_LIST_TITLE: &str = "Read next";
 /// or means hww has been told not to keep one, and a reader who switched it off would otherwise
 /// meet a blank page that looks like a bug.
 ///
-/// The first arm has a job the library's and the history's do not, and it is why this is the
-/// longest of the three. Keeping a page and opening the history act on the page in front of the
-/// reader, so their empty
+/// The first arm has a job the bookmarks' and the history's do not, and it is why this is the
+/// longest of the three. Bookmarking a page and opening the history act on the page in front of
+/// the reader, so their empty
 /// states can assume the reader already knows what to press. This list is filled from a *link*,
 /// which is a thing the reader has to be told how to aim at — so the sentence names both routes,
 /// the key and the right-click, and a list that can only be filled by a gesture nobody mentioned
@@ -208,7 +209,7 @@ pub fn read_later(label: &str) -> String {
 /// What the reader is told when a link comes off the reading list.
 pub const READ_LATER_REMOVED: &str = "hww took that link off your reading list.";
 
-/// The store's answer when the link is already listed. Not a failure, for [`ALREADY_KEPT`]'s
+/// The store's answer when the link is already listed. Not a failure, for [`ALREADY_BOOKMARKED`]'s
 /// reason, and pre-empted by the same toggle.
 pub const ALREADY_READ_LATER: &str = "that link is already on your reading list.";
 
@@ -223,7 +224,7 @@ pub const ADDRESS_TOO_LONG_TO_READ_LATER: &str =
 pub const CANNOT_READ_LATER: &str = "hww only puts web links on your reading list.";
 
 /// The reading list is at its cap. It says the number and says nothing was dropped, for
-/// [`library_is_full`]'s reason.
+/// [`bookmarks_are_full`]'s reason.
 pub fn reading_list_is_full(cap: usize) -> String {
     format!(
         "your reading list holds {cap} links, which is all hww keeps; nothing was removed to \
@@ -232,7 +233,7 @@ pub fn reading_list_is_full(cap: usize) -> String {
 }
 
 /// A link was marked while the reading list is switched off. Said rather than swallowed, for
-/// [`KEEPING_IS_OFF`]'s reason.
+/// [`BOOKMARKING_IS_OFF`]'s reason.
 pub const READING_LIST_IS_OFF: &str =
     "hww is set not to keep a reading list; change Keep a reading list in Settings › Reading list.";
 
@@ -245,11 +246,11 @@ pub fn no_link_to_read_later() -> String {
     format!(
         "hww has no link to read later: none is focused. Tab picks one, and {} keeps the page \
          you are reading.",
-        crate::reader::menu::KEEP_PAGE
+        crate::reader::menu::BOOKMARK_PAGE
     )
 }
 
-/// What "forget the reading list" reports. The count, for [`library_forgotten`]'s reason.
+/// What "forget the reading list" reports. The count, for [`bookmarks_forgotten`]'s reason.
 pub fn reading_list_forgotten(n: usize) -> String {
     match n {
         0 => "your reading list was already empty.".to_owned(),
@@ -291,7 +292,7 @@ pub const READING_LIST_FORGET_ALL_HOVER: &str = "Remove every link you marked to
 
 /// The history's masthead, and so also its window title and its line in the status strip.
 ///
-/// "Your", for the reason [`LIBRARY_TITLE`] is: hww wrote this list, but it is a record of the
+/// "Your", for the reason [`BOOKMARKS_TITLE`] is: hww wrote this list, but it is a record of the
 /// reader's own reading and calling it anything else would make it sound like the application's
 /// property.
 pub const HISTORY_TITLE: &str = "Pages you have visited";
@@ -314,7 +315,7 @@ pub fn history_is_empty(recording: bool) -> String {
     }
 }
 
-/// What "forget history" reports. The count, for the reason [`library_forgotten`] gives: a button
+/// What "forget history" reports. The count, for the reason [`bookmarks_forgotten`] gives: a button
 /// whose effect is invisible is a button nobody trusts.
 pub fn history_forgotten(n: usize) -> String {
     match n {
@@ -328,44 +329,43 @@ pub fn history_forgotten(n: usize) -> String {
 ///
 /// It names the page rather than saying "kept", because `Ctrl+D` is one keystroke away from
 /// `Ctrl+F` and a reader who hit the wrong one deserves to see which page just went in.
-pub fn kept(title: &str) -> String {
+pub fn bookmarked(title: &str) -> String {
     format!(
-        "hww kept {title} in your library; {} opens it",
-        crate::reader::menu::LIBRARY
+        "hww bookmarked {title}; {} opens your bookmarks",
+        crate::reader::menu::BOOKMARKS
     )
 }
 
-/// The store's answer when the page is already there. Not a failure: the item is in the library,
+/// The store's answer when the page is already there. Not a failure: the page is bookmarked,
 /// which is what was wanted.
 ///
-/// `ReaderApp::keep_page` pre-empts it, because the menu row is a check mark and a second press
-/// removes rather than repeats. This is `Archive::keep`'s own answer, and the exhaustive arm that
+/// `ReaderApp::bookmark_page` pre-empts it, because the menu row is a check mark and a second press
+/// removes rather than repeats. This is `Archive::bookmark`'s own answer, and the exhaustive arm that
 /// receives it says it in the reader's words rather than inventing a sentence under `ui/`.
-pub const ALREADY_KEPT: &str = "this page is already in your library.";
+pub const ALREADY_BOOKMARKED: &str = "hww has this page bookmarked already.";
 
 /// What a key that cannot keep anything says: on the splash, on an error screen, and on hww's own
 /// pages, where the menu row is greyed out instead.
 ///
 /// `Ctrl+D` is bound whatever is on screen, and a press that does nothing and says nothing reads
 /// as a broken binding — the same argument as [`IMAGES_ARE_OFF`], one key over.
-pub const NOTHING_TO_KEEP: &str = "there is nothing here for hww to keep.";
+pub const NOTHING_TO_BOOKMARK: &str = "there is nothing here for hww to bookmark.";
 
-/// What the reader is told when a page leaves the library.
-pub const FORGOTTEN: &str = "hww removed this page from your library.";
+/// What the reader is told when a page stops being bookmarked.
+pub const FORGOTTEN: &str = "hww removed this page from your bookmarks.";
 
-/// The library is at its cap. It says the number, and it says that nothing was dropped, because
-/// the alternative every cache takes is to evict quietly and this one deliberately does not.
-pub fn library_is_full(cap: usize) -> String {
-    format!(
-        "your library holds {cap} pages, which is all hww keeps; nothing was removed to make room."
-    )
+/// The bookmarks are at their cap. It says the number, and it says that nothing was dropped,
+/// because the alternative every cache takes is to evict quietly and this one deliberately does
+/// not.
+pub fn bookmarks_are_full(cap: usize) -> String {
+    format!("you have {cap} bookmarks, which is all hww holds; nothing was removed to make room.")
 }
 
 /// The archive could not be written. Rare, and worth saying out loud rather than swallowing:
 /// something hww was going to remember was not written down.
 ///
 /// It names neither tenant. One file holds both, the failure is the same failure, and the two
-/// callers are a keypress and a page arriving — a sentence about the library after a navigation
+/// callers are a keypress and a page arriving — a sentence about the bookmarks after a navigation
 /// would be a wrong answer to a question nobody asked.
 pub fn archive_not_saved(reason: &str) -> String {
     format!("hww could not save what it remembers: {reason}")
@@ -373,13 +373,13 @@ pub fn archive_not_saved(reason: &str) -> String {
 
 /// What a forget button says when the file it has just written was one hww could not read.
 ///
-/// `library_forgotten(0)` would answer "your library was already empty", which is what hww saw
+/// `bookmarks_forgotten(0)` would answer "your bookmarks was already empty", which is what hww saw
 /// and not what happened: the file was there, it could not be parsed, and pressing this replaced
 /// it. A count is the wrong sentence about a file whose contents were never known.
 pub const UNREADABLE_FILE_REPLACED: &str =
     "hww could not read that file when it started; it has now been replaced by what hww holds.";
 
-/// What the settings panel says under the Library and History groups when there is no
+/// What the settings panel says under the Bookmarks and History groups when there is no
 /// configuration directory at all — no `HWW_CONFIG_DIR`, no `HOME`, no `XDG_CONFIG_HOME`.
 ///
 /// The place the file's path would otherwise be printed. A group that named no file at all
@@ -390,7 +390,7 @@ pub const NO_ARCHIVE_PATH: &str = "Not saved: hww has no configuration directory
 
 /// A keep was asked for on a page whose address is longer than `archive::MAX_URL`.
 ///
-/// Said rather than swallowed, for [`KEEPING_IS_OFF`]'s reason: the key is bound, the reader
+/// Said rather than swallowed, for [`BOOKMARKING_IS_OFF`]'s reason: the key is bound, the reader
 /// pressed it, and a press that did nothing and said nothing reads as a broken binding. It names
 /// the address as the thing that was refused, because nothing about the page is wrong and
 /// reaching it by a shorter link would work.
@@ -400,17 +400,16 @@ pub const ADDRESS_TOO_LONG: &str =
 /// A keep was asked for while keeping is switched off. The key is bound whatever the setting
 /// says, so a press that did nothing and said nothing would read as a broken binding — the same
 /// argument as [`IMAGES_ARE_OFF`], one setting over.
-pub const KEEPING_IS_OFF: &str =
-    "hww is set not to keep pages; change Keep pages in Settings › Library.";
+pub const BOOKMARKING_IS_OFF: &str =
+    "hww is set not to keep bookmarks; change Keep bookmarks in Settings › Bookmarks.";
 
 /// What "forget everything" reports. The count, because a button whose effect is invisible is a
-/// button nobody trusts, and an empty library after it looks identical to one that was empty
-/// before.
-pub fn library_forgotten(n: usize) -> String {
+/// button nobody trusts, and no bookmarks after it looks identical to none before.
+pub fn bookmarks_forgotten(n: usize) -> String {
     match n {
-        0 => "your library was already empty.".to_owned(),
-        1 => "hww forgot the one page in your library.".to_owned(),
-        n => format!("hww forgot all {n} pages in your library."),
+        0 => "hww found no bookmarks to forget.".to_owned(),
+        1 => "hww forgot your one bookmark.".to_owned(),
+        n => format!("hww forgot all {n} of your bookmarks."),
     }
 }
 
@@ -550,7 +549,7 @@ pub fn about_page(prov: &Provenance, text_len: usize, arrival: Arrival) -> Vec<N
     let mut out = Vec::new();
     // A page hww built has nothing to be cautioned about: no rule chose it, no body was cut, no
     // server answered, and its length is whatever the reader has kept. Without this, a two-item
-    // library trips the thin-extraction caution and hww tells the reader their own saved list
+    // bookmarks trips the thin-extraction caution and hww tells the reader their own saved list
     // "may need JavaScript to show its content".
     //
     // Passed in rather than left to `app.rs` to skip the call, for the reason `loading` states
@@ -939,8 +938,8 @@ pub fn elapsed_fraction(elapsed: Duration) -> f32 {
 ///
 /// A wording decision, so it lives with the other wording decisions rather than in `ui/`.
 pub fn host_and_path(url: &Url) -> String {
-    // hww's own views (`hww:library`) have no authority component, so there is no host to
-    // shorten and the path is a bare word. Shortening one anyway spells `hwwlibrary`, which is
+    // hww's own views (`hww:bookmarks`) have no authority component, so there is no host to
+    // shorten and the path is a bare word. Shortening one anyway spells `hwwbookmarks`, which is
     // not an address anybody typed; the whole thing is already short, so say it as written.
     if url.cannot_be_a_base() {
         return url.as_str().to_owned();
@@ -1300,11 +1299,11 @@ mod tests {
     }
 
     /// A built page has nothing to be cautioned about, and the thin-text caution is the one that
-    /// would otherwise fire: a library of two items is well under `THIN_TEXT`, and hww would tell
+    /// would otherwise fire: a bookmarks list of two items is well under `THIN_TEXT`, and hww would tell
     /// the reader their own saved list may need JavaScript.
     #[test]
     fn a_built_page_draws_no_bars_least_of_all_the_thin_one() {
-        let p = Provenance::built(url(crate::reader::archive::LIBRARY));
+        let p = Provenance::built(url(crate::reader::archive::BOOKMARKS));
         assert!(about_page(&p, 0, Arrival::Built).is_empty());
         assert!(about_page(&p, THIN_TEXT - 1, Arrival::Built).is_empty());
         // The same provenance read as a fetch would say three things, which is the measure of
@@ -1330,38 +1329,41 @@ mod tests {
         }
     }
 
-    /// The library's own wording: a title for the masthead, and an empty state that names the
+    /// The bookmarks' own wording: a title for the masthead, and an empty state that names the
     /// key that fills it, spelled for the platform the reader is on.
     #[test]
-    fn the_library_says_what_it_is_and_how_to_fill_it() {
-        assert!(!LIBRARY_TITLE.is_empty());
-        let empty = library_is_empty();
-        assert!(empty.contains(crate::reader::menu::KEEP_PAGE), "{empty}");
+    fn the_bookmarks_say_what_they_are_and_how_to_fill_them() {
+        assert!(!BOOKMARKS_TITLE.is_empty());
+        let empty = bookmarks_are_empty();
         assert!(
-            empty.contains("never keeps"),
-            "the empty library states the doctrine, not just the key: {empty}"
+            empty.contains(crate::reader::menu::BOOKMARK_PAGE),
+            "{empty}"
+        );
+        assert!(
+            empty.contains("never bookmarks"),
+            "the empty page states the doctrine, not just the key: {empty}"
         );
         // A toast that names a key has to name one the reader can press. This is the cheap half
         // of the gap `menu`'s agreement test leaves open: nothing can check `handle_keys` from
         // here, but a hardcoded letter left behind by a rebinding is catchable, and this one was
-        // written as a bare `b` for as long as `b` opened the library.
-        let toast = kept("A page");
+        // written as a bare `b` for as long as `b` opened the bookmarks.
+        let toast = bookmarked("A page");
         assert!(
-            toast.contains(crate::reader::menu::LIBRARY),
+            toast.contains(crate::reader::menu::BOOKMARKS),
             "the key is named for this platform: {toast}"
         );
-        // Every string this module can put on screen about the library names hww or the reader,
-        // never a passive.
+        // Every string this module can put on screen about the bookmarks names hww or the
+        // reader, never a passive.
         for s in [
-            kept("A page"),
-            ALREADY_KEPT.to_owned(),
-            NOTHING_TO_KEEP.to_owned(),
+            bookmarked("A page"),
+            ALREADY_BOOKMARKED.to_owned(),
+            NOTHING_TO_BOOKMARK.to_owned(),
             FORGOTTEN.to_owned(),
-            library_is_full(crate::reader::archive::MAX_ITEMS),
-            KEEPING_IS_OFF.to_owned(),
-            library_forgotten(0),
-            library_forgotten(1),
-            library_forgotten(4),
+            bookmarks_are_full(crate::reader::archive::MAX_ITEMS),
+            BOOKMARKING_IS_OFF.to_owned(),
+            bookmarks_forgotten(0),
+            bookmarks_forgotten(1),
+            bookmarks_forgotten(4),
             history_is_empty(true),
             history_is_empty(false),
             history_forgotten(0),
@@ -1414,7 +1416,7 @@ mod tests {
         // The key that fails names the key that would have worked, rather than only reporting
         // that nothing was focused.
         let none = no_link_to_read_later();
-        assert!(none.contains(crate::reader::menu::KEEP_PAGE), "{none}");
+        assert!(none.contains(crate::reader::menu::BOOKMARK_PAGE), "{none}");
     }
 
     /// The reading list's own two controls. Labels rather than remarks, which is why they are not
@@ -1452,16 +1454,16 @@ mod tests {
     #[test]
     fn no_tenant_borrows_another_tenants_words() {
         for (a, b) in [
-            (KEEPING_IS_OFF, READING_LIST_IS_OFF),
-            (ALREADY_KEPT, ALREADY_READ_LATER),
+            (BOOKMARKING_IS_OFF, READING_LIST_IS_OFF),
+            (ALREADY_BOOKMARKED, ALREADY_READ_LATER),
             (ADDRESS_TOO_LONG, ADDRESS_TOO_LONG_TO_READ_LATER),
         ] {
             assert_ne!(a, b);
         }
-        assert_ne!(LIBRARY_TITLE, READING_LIST_TITLE);
+        assert_ne!(BOOKMARKS_TITLE, READING_LIST_TITLE);
         assert_ne!(HISTORY_TITLE, READING_LIST_TITLE);
-        assert_ne!(library_forgotten(3), reading_list_forgotten(3));
-        assert_ne!(library_is_empty(), reading_list_is_empty(true));
+        assert_ne!(bookmarks_forgotten(3), reading_list_forgotten(3));
+        assert_ne!(bookmarks_are_empty(), reading_list_is_empty(true));
     }
 
     /// A readable 404 is not a failure. Many paywalls answer 403 with the article intact, and
@@ -1610,9 +1612,9 @@ mod tests {
     #[test]
     fn a_view_with_no_host_is_named_as_written() {
         assert_eq!(
-            host_and_path(&url(crate::reader::archive::LIBRARY)),
-            "hww:library",
-            "shortening an authority-less address spells hwwlibrary"
+            host_and_path(&url(crate::reader::archive::BOOKMARKS)),
+            "hww:bookmarks",
+            "shortening an authority-less address spells hwwbookmarks"
         );
     }
 

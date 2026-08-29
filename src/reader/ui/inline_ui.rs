@@ -356,7 +356,7 @@ fn link_ui(
     // href, painting no ring, and naming nothing to a screen reader. Registering `resp.id`
     // again after them closed the pair into a loop: Tab left the first row, egui gave focus to
     // the second, and the re-registration handed it straight back. A page whose headlines wrap,
-    // which is what a library, a history, and every front page are, trapped Tab on its first
+    // which is what a bookmarks list, a history, and every front page are, trapped Tab on its first
     // link.
     //
     // So the rows sense clicks without being focusable, and one focusable, non-interactive
@@ -566,7 +566,7 @@ mod tests {
     /// wrapped label takes, and `Sense::click()` is `CLICK | FOCUSABLE`. Every row of a
     /// headline used to be its own tab stop, and re-registering the first row after the last
     /// closed the pair into a loop: Tab moved from row one to row two and straight back, and a
-    /// page of wrapped headlines — a library, a history, any front page — trapped the reader on
+    /// page of wrapped headlines — a bookmarks list, a history, any front page — trapped the reader on
     /// its first link.
     #[test]
     fn tab_visits_each_link_once_and_in_order() {
