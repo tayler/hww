@@ -52,13 +52,14 @@ pub enum Group {
     Window,
     Search,
     Library,
+    ReadingList,
     History,
     Privacy,
 }
 
 impl Group {
     /// Every group, in panel order.
-    pub const ALL: [Group; 9] = [
+    pub const ALL: [Group; 10] = [
         Group::Text,
         Group::Theme,
         Group::Page,
@@ -66,6 +67,7 @@ impl Group {
         Group::Window,
         Group::Search,
         Group::Library,
+        Group::ReadingList,
         Group::History,
         Group::Privacy,
     ];
@@ -80,6 +82,7 @@ impl Group {
             Group::Window => "Window",
             Group::Search => "Search",
             Group::Library => "Library",
+            Group::ReadingList => "Reading list",
             Group::History => "History",
             Group::Privacy => "Privacy",
         }
@@ -104,6 +107,14 @@ impl Group {
             Group::Library => Some(
                 "The pages you asked hww to keep, one keypress at a time. Nothing is added here \
                  that you did not name. Dates are shown in UTC.",
+            ),
+            // Sits between Library and History because that is the order of how much the reader
+            // chose: pages they read and saved, links they picked but have not opened, pages hww
+            // wrote down on its own.
+            Group::ReadingList => Some(
+                "Links you marked to open later, one at a time. Nothing is added here that you \
+                 did not pick, and hww does not fetch any of them until you open it. Dates are \
+                 shown in UTC.",
             ),
             // The one group in the panel describing something hww writes without being asked, so
             // it says so in the first clause rather than after the reader has read past it.
@@ -143,6 +154,7 @@ pub enum FieldId {
     SearchEngine,
     KeepLibrary,
     OpenOn,
+    KeepReadingList,
     KeepHistory,
     SendImageReferer,
 }
@@ -150,7 +162,7 @@ pub enum FieldId {
 impl FieldId {
     /// Every field. Walked by the tests, and by nothing else: the panel walks [`fields`],
     /// which carries the order and the grouping.
-    pub const ALL: [FieldId; 19] = [
+    pub const ALL: [FieldId; 20] = [
         FieldId::LineWidth,
         FieldId::TextSize,
         FieldId::LineSpacing,
@@ -168,6 +180,7 @@ impl FieldId {
         FieldId::SearchEngine,
         FieldId::KeepLibrary,
         FieldId::OpenOn,
+        FieldId::KeepReadingList,
         FieldId::KeepHistory,
         FieldId::SendImageReferer,
     ];
@@ -199,6 +212,7 @@ impl FieldId {
             FieldId::SearchEngine => (None, "search_engine"),
             FieldId::KeepLibrary => (None, "keep_library"),
             FieldId::OpenOn => (None, "open_on"),
+            FieldId::KeepReadingList => (None, "keep_reading_list"),
             FieldId::KeepHistory => (None, "keep_history"),
             FieldId::SendImageReferer => (None, "send_image_referer"),
         }
@@ -663,6 +677,18 @@ pub fn fields() -> Vec<Field> {
             control: Choice(OPEN_ON),
         },
         Field {
+            id: F::KeepReadingList,
+            group: G::ReadingList,
+            label: "Keep a reading list",
+            note: Some(
+                "Lets you mark a link to open later and come back to the list; l opens it. \
+                 Turning this off stops hww adding anything new; it does not remove what is \
+                 already listed, which is what forget the reading list below is for.",
+            ),
+            keys: crate::reader::menu::READ_LATER,
+            control: Toggle,
+        },
+        Field {
             id: F::KeepHistory,
             group: G::History,
             label: "Remember pages you visit",
@@ -731,6 +757,7 @@ pub fn get(s: &Settings, id: FieldId) -> Value {
             OpenOn::Nothing => 1,
         }),
         FieldId::KeepLibrary => Value::Bool(s.keep_library),
+        FieldId::KeepReadingList => Value::Bool(s.keep_reading_list),
         FieldId::KeepHistory => Value::Bool(s.keep_history),
         FieldId::ShowLinkAddresses => Value::Bool(s.read.show_link_urls),
         FieldId::EntrySummary => Value::Num(f32::from(s.read.entry_summary_bytes)),
@@ -825,6 +852,11 @@ pub fn set(s: &mut Settings, id: FieldId, v: Value) {
         FieldId::KeepLibrary => {
             if let Some(b) = v.boolean() {
                 s.keep_library = b;
+            }
+        }
+        FieldId::KeepReadingList => {
+            if let Some(b) = v.boolean() {
+                s.keep_reading_list = b;
             }
         }
         FieldId::KeepHistory => {
@@ -1016,6 +1048,7 @@ mod tests {
                 | FieldId::SearchEngine
                 | FieldId::KeepLibrary
                 | FieldId::OpenOn
+                | FieldId::KeepReadingList
                 | FieldId::KeepHistory
                 | FieldId::SendImageReferer => true,
             };

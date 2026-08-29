@@ -2,15 +2,25 @@
 //!
 //! # The doctrine
 //!
-//! **hww remembers two things, and neither of them quietly.**
+//! **hww remembers three things, and none of them quietly.**
 //!
 //! The *library* is what the reader named: an item goes in because a keypress put it there,
-//! about one page, once, in the same category as `search_engine`. The *history* is what hww
-//! watched: the address and title of every page it drew, written without anybody asking for it.
-//! Those are different objects with different consent stories — the watched one is what makes a
-//! browser profile worth stealing — so they are two tenants of one file, each with its own
-//! switch, its own way to be forgotten, and its own sentence in the settings panel and in
-//! README. Neither borrows the other's rules.
+//! about one page, once, in the same category as `search_engine`. The *reading list* is what the
+//! reader named about a page they have **not** read: a link on the page in front of them, marked
+//! to open later. The *history* is what hww watched: the address and title of every page it drew,
+//! written without anybody asking for it. Those are different objects with different consent
+//! stories — the watched one is what makes a browser profile worth stealing — so they are three
+//! tenants of one file, each with its own switch, its own way to be forgotten, and its own
+//! sentence in the settings panel and in README. None borrows another's rules.
+//!
+//! The library and the reading list are both *chosen*, and they still are not the same tenant.
+//! What separates them is tense, and it decides everything else about them: the library holds
+//! pages the reader has read and wants back, so its rows are titled by a document hww fetched and
+//! its addresses are redundant; the reading list holds links the reader has not opened, so its
+//! rows are titled by whatever words the link was wearing and the address is the only thing
+//! telling two of them apart. That is why [`Archive::add_next`] is not [`Archive::keep`] with a
+//! different discriminant, and why the one guard it adds is the scheme: `keep` is handed the URL
+//! a fetch actually resolved, and `add_next` is handed page-controlled text.
 //!
 //! **History is on by default.** That reverses what this module said while the library was its
 //! only tenant, and the cost of the default is paid here rather than left for the reader to
@@ -27,7 +37,7 @@
 //! `HWW_CONFIG_DIR` still names everything hww writes and README's uninstall paragraphs still
 //! name one path. See that function for why the `XDG_STATE_HOME` split was not taken.
 //!
-//! **Disclosure.** The settings panel prints this file's path under both groups that write to
+//! **Disclosure.** The settings panel prints this file's path under every group that writes to
 //! it, the way it already prints the settings path at its foot, and page info carries a row
 //! saying whether the page on screen is kept. A store the reader cannot see the shape of is a
 //! store they cannot reason about. The history has no page-info row of its own on purpose: with
@@ -36,16 +46,18 @@
 //! the path beside it, and the list itself.
 //!
 //! **Off.** "Off" means stop writing *and* offer to forget, once per tenant.
-//! [`Settings::keep_library`] gates [`Archive::keep`] and [`Settings::keep_history`] gates
-//! [`Archive::visit`] — each answered inside the door it guards, never at the call site — and
-//! each switch's group carries the button that empties what that switch has already gathered
-//! ([`Archive::forget_all`], [`Archive::forget_visits`]). A switch that silently retains what it
-//! collected is the quiet lie this project's whole notice system exists to refuse, and it would
-//! be a louder one on the tenant that was never asked for.
+//! [`Settings::keep_library`] gates [`Archive::keep`], [`Settings::keep_reading_list`] gates
+//! [`Archive::add_next`], and [`Settings::keep_history`] gates [`Archive::visit`] — each answered
+//! inside the door it guards, never at the call site — and each switch's group carries the button
+//! that empties what that switch has already gathered ([`Archive::forget_all`],
+//! [`Archive::forget_all_next`], [`Archive::forget_visits`]). A switch that silently retains what
+//! it collected is the quiet lie this project's whole notice system exists to refuse, and it
+//! would be a louder one on the tenant that was never asked for.
 //!
-//! **Deletion.** [`Archive::forget`] for one kept page, [`Archive::forget_all`] for the library,
-//! [`Archive::forget_visits`] for the history, and the file itself is deleted with the config
-//! directory by the uninstall commands in README. Each of the three leaves the other tenant
+//! **Deletion.** [`Archive::forget`] for one kept page, [`Archive::forget_next`] for one link on
+//! the reading list, [`Archive::forget_all`] for the library, [`Archive::forget_all_next`] for the
+//! reading list, [`Archive::forget_visits`] for the history, and the file itself is deleted with
+//! the config directory by the uninstall commands in README. Each of them leaves the other tenants
 //! alone: forgetting the history must not empty a library the reader chose page by page, and
 //! forgetting the library must not look like a way to erase a trail.
 //!
@@ -62,16 +74,23 @@
 //! [`Archive::file_unreadable`]. `settings.json` can be retyped in a minute and this file
 //! cannot, which is the whole reason it gets the extra care.
 //!
-//! **Caps.** The library refuses at [`MAX_ITEMS`]; the history evicts at [`MAX_VISITS`]. The two
-//! answers are not an inconsistency, they are the doctrine restated as arithmetic: every item in
-//! the library was chosen, and dropping the oldest chosen thing to make room for a newer one is
-//! the silent loss these rules exist to prevent, while nothing in the history was chosen and a
-//! watched record that grew without bound would be a file nobody agreed to keep for ever. So the
-//! library says it is full and keeps what is there; the history forgets its oldest page and says
-//! nothing, which is what a reader expects of the thing that is already forgetting for them.
+//! **Caps.** The library refuses at [`MAX_ITEMS`] and the reading list refuses at [`MAX_NEXT`];
+//! the history evicts at [`MAX_VISITS`]. The two answers are not an inconsistency, they are the
+//! doctrine restated as arithmetic: every item in the library and on the reading list was chosen,
+//! and dropping the oldest chosen thing to make room for a newer one is the silent loss these
+//! rules exist to prevent, while nothing in the history was chosen and a watched record that grew
+//! without bound would be a file nobody agreed to keep for ever. So the two chosen lists say they
+//! are full and keep what is there; the history forgets its oldest page and says nothing, which is
+//! what a reader expects of the thing that is already forgetting for them. Which side of that line
+//! a tenant falls on is the only question a new one has to answer.
 //!
 //! **Future tenants.** Feed subscriptions, and whatever follows them, are new [`Kind`]s in this
-//! file, not new files. That is why an item carries a kind at all.
+//! file, not new files. That is why an item carries a kind at all. The reading list was the first
+//! to arrive that way, and what it had to bring with it is the checklist: a [`Kind`], a cap on the
+//! refusing or the evicting side, a switch in [`Settings`], a door that answers that switch inside
+//! itself, a way to forget one item and a way to forget all of them, a `prefs` row, a line in
+//! README's uninstall paragraphs, and — if it is a list the reader can open — an address in
+//! `ui::app::builtin_view`.
 //!
 //! # What is not stored
 //!
@@ -132,6 +151,15 @@ pub const LIBRARY: &str = "hww:library";
 /// `ui::app::builtin_view` matches each of them exactly rather than testing the scheme.
 pub const HISTORY: &str = "hww:history";
 
+/// The address of the reading list view.
+///
+/// The same opaque-path form as [`LIBRARY`] and [`HISTORY`], for the same three reasons. Three
+/// addresses now, and `ui::app::builtin_view` still matches each of them exactly rather than
+/// testing the scheme — a scheme test would divert anything a later build spelled `hww:` into a
+/// view that does not exist, and the point of matching exactly is that an address hww does not
+/// claim goes to the fetch that will say so.
+pub const READING_LIST: &str = "hww:reading-list";
+
 /// The schema this build writes.
 ///
 /// Bumped when the *shape* changes in a way a reader of the old shape would misread. Additive
@@ -160,6 +188,20 @@ pub const MAX_ITEMS: usize = 2_000;
 /// at that size.
 pub const MAX_VISITS: usize = 5_000;
 
+/// How many links the reading list holds.
+///
+/// **This cap refuses**, with [`MAX_ITEMS`] and against [`MAX_VISITS`], because every link here
+/// was chosen: the reader pressed a key or picked a menu item about one link, and dropping the
+/// oldest of those to make room is the silent loss the doctrine refuses. Its own number rather
+/// than [`MAX_ITEMS`] shared, because tenants do not borrow each other's rules and these two are
+/// not the same size of thing — a library is a shelf and a reading list is a stack on the desk.
+///
+/// Smaller than the library's cap on purpose, and the smallness is the point: five hundred links
+/// is already far past the size at which a list of things to read next is a list of things to read
+/// next. Reaching it says so and keeps what is there, which is the honest answer to a reading list
+/// that has become a second library.
+pub const MAX_NEXT: usize = 500;
+
 /// The longest stored title, in characters.
 ///
 /// Characters and not bytes, so the cut cannot land inside one. Long enough for any headline
@@ -181,12 +223,18 @@ pub const MAX_URL: usize = 8_192;
 
 /// What sort of thing an item is.
 ///
-/// Two known kinds, which are the doctrine's two tenants. A feed subscribed to would be a third
-/// here rather than a second file, which is what this discriminant exists for.
+/// Three known kinds, which are the doctrine's three tenants. A feed subscribed to would be a
+/// fourth here rather than a second file, which is what this discriminant exists for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
     /// A page the reader asked hww to keep.
     Kept,
+    /// A link the reader marked to read later.
+    ///
+    /// Chosen, like [`Kind::Kept`], and stored by the same arithmetic — but about a page hww has
+    /// never fetched, so its title is the words the link was wearing rather than a `<title>`, and
+    /// its address is drawn under it because those words are often "Read more".
+    ReadNext,
     /// A page hww drew, recorded because [`Settings::keep_history`] was on when it did.
     ///
     /// Never produced by a keypress about this page. It carries the same two facts a kept page
@@ -208,6 +256,7 @@ impl Kind {
     pub fn as_str(&self) -> &str {
         match self {
             Kind::Kept => "kept",
+            Kind::ReadNext => "next",
             Kind::Visited => "visited",
             Kind::Other(s) => s,
         }
@@ -225,6 +274,7 @@ impl<'de> serde::Deserialize<'de> for Kind {
         let s = String::deserialize(d)?;
         Ok(match s.as_str() {
             "kept" => Kind::Kept,
+            "next" => Kind::ReadNext,
             "visited" => Kind::Visited,
             _ => Kind::Other(s),
         })
@@ -312,10 +362,16 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// What [`Archive::keep`] did, so the reader can be told which of the three it was.
+/// What [`Archive::keep`] or [`Archive::add_next`] did, so the reader can be told which it was.
 ///
 /// An enum and not a `bool`, because "already there" and "no room" are different facts and a
 /// reader who is told neither has pressed a key that appeared to do nothing.
+///
+/// One enum for both chosen tenants rather than two identical ones. They answer the same
+/// questions because they are the same kind of act — a keypress about one address, which either
+/// lands, or is switched off, or is already there, or does not fit, or names something this file
+/// will not write down. [`Kept::Refused`] is the one arm only [`Archive::add_next`] can return,
+/// and it is what stops the sharing from being a lie.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kept {
     Added,
@@ -330,6 +386,10 @@ pub enum Kept {
     /// The address is longer than [`MAX_URL`]. Nothing was written, and it is refused rather
     /// than shortened because a shortened address is a link to somewhere else.
     TooLong,
+    /// The address is not one this file writes down: not `http`/`https`, or carrying a
+    /// credential. Only [`Archive::add_next`] answers this, and only because only it is handed an
+    /// address a *page* chose; see the guard there.
+    Refused,
 }
 
 /// What [`Archive::visit`] did, so the caller knows whether the file changed.
@@ -389,6 +449,15 @@ impl Archive {
         self.items.iter().rev().filter(|i| i.kind == Kind::Kept)
     }
 
+    /// The links the reader marked to read later, most recent first.
+    ///
+    /// Reversed like [`Archive::kept`], so the link marked a moment ago is at the top of the list
+    /// rather than the bottom: a reading list is read from the end the reader was last thinking
+    /// about.
+    pub fn read_next(&self) -> impl Iterator<Item = &Item> {
+        self.items.iter().rev().filter(|i| i.kind == Kind::ReadNext)
+    }
+
     /// The pages hww has drawn, most recent first.
     ///
     /// Insertion order reversed, as [`Archive::kept`] is, so "most recent" is where the entry was
@@ -402,6 +471,12 @@ impl Archive {
     /// whatever a later build wrote as well.
     pub fn len(&self) -> usize {
         self.kept().count()
+    }
+
+    /// How many links the reading list holds. Not `items.len()`, for the reason
+    /// [`Archive::len`] is not.
+    pub fn next_len(&self) -> usize {
+        self.read_next().count()
     }
 
     /// How many pages the history holds.
@@ -420,6 +495,17 @@ impl Archive {
     /// follows an anchor within the page they just saved.
     pub fn holds(&self, url: &Url) -> bool {
         self.kept().any(|i| same_page(&i.url, url))
+    }
+
+    /// Whether this address is already on the reading list, fragment ignored.
+    ///
+    /// Its own function and not a parameter on [`Archive::holds`], because the two answer for two
+    /// tenants and a caller that passed the wrong kind would silently make one list answer for the
+    /// other: `Ctrl+D` would report a page kept because a link to it was marked to read, and
+    /// `Shift+L` would refuse a link because the page was in the library. The kind is the whole
+    /// question here, so it is in the name rather than in an argument.
+    pub fn holds_next(&self, url: &Url) -> bool {
+        self.read_next().any(|i| same_page(&i.url, url))
     }
 
     /// Keep one page, if the reader's settings allow it. **The one door.**
@@ -462,6 +548,72 @@ impl Archive {
             extra: serde_json::Map::new(),
         });
         Kept::Added
+    }
+
+    /// Mark one link to read later, if the reader's settings allow it. **The one door.**
+    ///
+    /// The switch is answered here, in the door's own name, for the reason [`Archive::keep`] gives
+    /// one door over. It has two callers already — a key and a context-menu item — which is
+    /// exactly the case that argument was written about.
+    ///
+    /// **The scheme guard is what this door has and [`Archive::keep`] does not**, and the
+    /// difference is where the address came from. `keep` is handed `prov.final_url`: an
+    /// `http`/`https` address that a fetch resolved, followed, and got a document back from. This
+    /// is handed an `href` **a page wrote**, so `mailto:`, `tel:`, `javascript:`, and `data:` all
+    /// reach it, as does a link carrying a credential. Refusing them here rather than at the
+    /// caller is the same rule as [`Archive::visit`]'s three refusals: a door guarded at one
+    /// caller is a door guarded nowhere, and this one has two callers on the day it lands.
+    ///
+    /// The reader is still told — `ReaderApp` runs the href through `session::classify_link` first
+    /// and reports what it says, because "hww will not put a `javascript:` link on a reading list"
+    /// is a better sentence than silence. This guard is what makes that reporting a courtesy
+    /// rather than the only thing standing between a page and this file.
+    ///
+    /// No debounce, for the reason [`Archive::keep`] gives: it is a single deliberate act.
+    pub fn add_next(&mut self, settings: &Settings, url: &Url, title: Option<&str>) -> Kept {
+        if !settings.keep_reading_list {
+            return Kept::Off;
+        }
+        if !matches!(url.scheme(), "http" | "https")
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Kept::Refused;
+        }
+        self.add_next_at(url, title, now())
+    }
+
+    /// [`Archive::add_next`] with the clock supplied, so a test can name the day.
+    fn add_next_at(&mut self, url: &Url, title: Option<&str>, added: u64) -> Kept {
+        if url.as_str().len() > MAX_URL {
+            return Kept::TooLong;
+        }
+        if self.holds_next(url) {
+            return Kept::Already;
+        }
+        if self.next_len() >= MAX_NEXT {
+            return Kept::Full;
+        }
+        self.items.push(Item {
+            url: url.to_string(),
+            title: cap_title(title.unwrap_or_default()),
+            kind: Kind::ReadNext,
+            added,
+            extra: serde_json::Map::new(),
+        });
+        Kept::Added
+    }
+
+    /// Take one link off the reading list, fragment ignored, and say whether there was one.
+    ///
+    /// Kind-filtered like [`Archive::forget`], and here the filter is doing visible work rather
+    /// than guarding against a later build: a page can be in the library *and* on the reading
+    /// list at the same address, and taking it off the list must not un-keep it.
+    pub fn forget_next(&mut self, url: &Url) -> bool {
+        let before = self.items.len();
+        self.items
+            .retain(|i| !(i.kind == Kind::ReadNext && same_page(&i.url, url)));
+        self.items.len() != before
     }
 
     /// Drop one page, fragment ignored, and say whether there was one. Kinds this build does not
@@ -552,9 +704,10 @@ impl Archive {
 
     /// Forget the history, and say how many pages that was.
     ///
-    /// The other half of [`Settings::keep_history`], and it leaves the library exactly where it
-    /// is: the two tenants are forgotten by two buttons under two switches, because a reader
-    /// clearing a trail is not asking to lose the pages they saved on purpose.
+    /// The other half of [`Settings::keep_history`], and it leaves the library and the reading
+    /// list exactly where they are: the three tenants are forgotten by three buttons under three
+    /// switches, because a reader clearing a trail is not asking to lose the pages they saved on
+    /// purpose or the links they lined up to read.
     pub fn forget_visits(&mut self) -> usize {
         let before = self.visits();
         self.items.retain(|i| i.kind != Kind::Visited);
@@ -562,13 +715,26 @@ impl Archive {
         before
     }
 
+    /// Forget the whole reading list, and say how many links that was.
+    ///
+    /// The other half of [`Settings::keep_reading_list`], and it leaves the library and the
+    /// history exactly where they are, for the reason [`Archive::forget_visits`] leaves the
+    /// library: three tenants, three buttons, and none of them may take another with it.
+    pub fn forget_all_next(&mut self) -> usize {
+        let before = self.next_len();
+        self.items.retain(|i| i.kind != Kind::ReadNext);
+        self.file_unreadable = false;
+        before
+    }
+
     /// Forget the whole library, and say how many pages that was.
     ///
     /// The other half of [`Settings::keep_library`]: turning keeping off stops the writing, and
-    /// this is what makes it possible to also undo it. The history survives, as do items of a
-    /// kind this build cannot show, for the reason [`Archive::forget`] leaves them: this button
-    /// says "forget my library", and neither the trail nor a record this build cannot describe is
-    /// something it can claim that sentence covers.
+    /// this is what makes it possible to also undo it. The history and the reading list survive,
+    /// as do items of a kind this build cannot show, for the reason [`Archive::forget`] leaves
+    /// them: this button says "forget my library", and neither the trail, nor the links waiting to
+    /// be read, nor a record this build cannot describe is something it can claim that sentence
+    /// covers.
     pub fn forget_all(&mut self) -> usize {
         let before = self.len();
         self.items.retain(|i| i.kind != Kind::Kept);
@@ -620,6 +786,23 @@ pub fn document(archive: &Archive) -> ir::Document {
     )
 }
 
+/// The reading list as a document, built the same way and drawn by the same code.
+///
+/// Addresses shown, with the history and against the library, and the reason is the one the
+/// [`Address`] doc gives: these rows are titled by link text, and link text is "Read more" often
+/// enough that a list of them is a column of identical rows. It is also the only way to see where
+/// a row goes before following it, which matters most on the list whose rows the reader has never
+/// opened.
+pub fn reading_list_document(archive: &Archive, settings: &Settings) -> ir::Document {
+    view(
+        READING_LIST,
+        crate::reader::notice::READING_LIST_TITLE,
+        archive.read_next(),
+        crate::reader::notice::reading_list_is_empty(settings.keep_reading_list),
+        Address::Shown,
+    )
+}
+
 /// The history as a document, built the same way and drawn by the same code.
 ///
 /// The reason the history is a page at all rather than a file the reader is told the path of:
@@ -639,12 +822,16 @@ pub fn history_document(archive: &Archive, settings: &Settings) -> ir::Document 
 
 /// Whether a view writes each item's address under its title.
 ///
-/// The history does and the library does not, which is a difference in what the two lists are
-/// for. The library is short and every row is a page the reader chose and can name; the history
-/// is thousands of rows long, nobody chose any of them, and the titles pages give themselves
-/// repeat — half a dozen "Home"s and three "(1) Inbox"es are one list of identical rows without
-/// the address to tell them apart. It is also the only way to see where a row goes before
-/// following it, which matters more on the list hww wrote than on the one the reader did.
+/// The history and the reading list do; the library does not. It is a difference in what the
+/// lists are for, and the library is the odd one out rather than the rule. The library is short and
+/// every row is a page the reader chose, opened, read, and can name; the history is thousands of
+/// rows long, nobody chose any of them, and the titles pages give themselves repeat — half a dozen
+/// "Home"s and three "(1) Inbox"es are one list of identical rows without the address to tell them
+/// apart. The reading list is short like the library and anonymous like the history: its rows are
+/// named by link text, which is "Read more" and "Continue reading" often enough to be no name at
+/// all. So the question is not how long the list is, it is whether the row's own words identify
+/// it, and only the library's do. It is also the only way to see where a row goes before following
+/// it, which matters most where the reader has never been.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Address {
     Shown,
@@ -1287,6 +1474,226 @@ mod tests {
             a.keep(&on(), &u("https://user:secret@example.com/a"), Some("x")),
             Kept::Added
         );
+    }
+
+    /// The reading list is a third tenant, and the file proves it: one address can be in all
+    /// three lists at once and each of them answers only for itself.
+    ///
+    /// This is the test the `Kind` discriminant exists for. `holds`, `holds_next`, `forget`,
+    /// `forget_next`, `forget_all`, `forget_all_next`, and `forget_visits` are seven functions
+    /// that all match on a kind, and any one of them written without the filter compiles and
+    /// quietly makes one list answer for another.
+    #[test]
+    fn the_three_tenants_never_answer_for_one_another() {
+        let mut a = Archive::new();
+        let url = u("https://example.com/a");
+        assert_eq!(a.keep(&on(), &url, Some("Kept")), Kept::Added);
+        assert_eq!(a.add_next(&on(), &url, Some("Later")), Kept::Added);
+        assert_eq!(a.visit(&on(), &url, Some("Seen")), Visited::Recorded);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a.next_len(), 1);
+        assert_eq!(a.visits(), 1);
+        assert!(a.holds(&url) && a.holds_next(&url));
+
+        // Taking it off the reading list leaves the other two exactly where they are, which is
+        // the case a shared `forget` would silently get wrong.
+        assert!(a.forget_next(&url));
+        assert!(!a.holds_next(&url));
+        assert!(a.holds(&url), "un-keeping is not what was asked for");
+        assert_eq!(a.visits(), 1);
+
+        assert_eq!(a.add_next(&on(), &url, Some("Later")), Kept::Added);
+        assert_eq!(a.forget_all(), 1);
+        assert_eq!(a.next_len(), 1, "the library button took the reading list");
+        assert_eq!(a.visits(), 1, "the library button took the history");
+        assert_eq!(a.forget_visits(), 1);
+        assert_eq!(a.next_len(), 1, "the history button took the reading list");
+        assert_eq!(a.forget_all_next(), 1);
+        assert!(a.items.is_empty());
+    }
+
+    /// The reading list refuses at its cap and drops nothing, with the library and against the
+    /// history. Everything on it was chosen, and the doctrine's whole arithmetic is that a chosen
+    /// thing is never evicted to make room for a newer one.
+    #[test]
+    fn a_full_reading_list_refuses_and_keeps_what_it_has() {
+        let mut a = Archive::new();
+        for i in 0..MAX_NEXT {
+            assert_eq!(
+                a.add_next_at(&u(&format!("https://example.com/{i}")), Some("x"), 1),
+                Kept::Added
+            );
+        }
+        let before = a.read_next().next().map(|i| i.url.clone());
+        assert_eq!(
+            a.add_next_at(&u("https://example.com/one-more"), Some("x"), 1),
+            Kept::Full
+        );
+        assert_eq!(a.next_len(), MAX_NEXT, "nothing was dropped to make room");
+        assert_eq!(a.read_next().next().map(|i| i.url.clone()), before);
+        // Its own cap, not the library's: the two tenants do not borrow each other's rules, and
+        // the library still has all its room.
+        assert_ne!(MAX_NEXT, MAX_ITEMS);
+        assert_eq!(
+            a.keep(&on(), &u("https://example.com/k"), Some("K")),
+            Kept::Added
+        );
+    }
+
+    /// **The guard that makes this door not `keep`'s twin.** `keep` is handed the URL a fetch
+    /// resolved; this one is handed an `href` a *page* wrote, so every scheme a page can put in an
+    /// anchor arrives here. `ReaderApp` reports these in `classify_link`'s words before it ever
+    /// calls in, and that is exactly why the refusal has to live here too: a door guarded at one
+    /// caller is a door guarded nowhere, and this door has two callers on the day it lands.
+    #[test]
+    fn a_page_cannot_put_a_non_web_link_on_the_reading_list() {
+        let mut a = Archive::new();
+        for refused in [
+            "javascript:alert(1)",
+            "data:text/html,<b>x</b>",
+            "mailto:someone@example.com",
+            "tel:+15550100",
+            "file:///etc/passwd",
+            "https://user:secret@example.com/a",
+            "https://user@example.com/a",
+            READING_LIST,
+            LIBRARY,
+            HISTORY,
+        ] {
+            assert_eq!(
+                a.add_next(&on(), &u(refused), Some("x")),
+                Kept::Refused,
+                "{refused}"
+            );
+        }
+        assert_eq!(a.next_len(), 0);
+        let text = serde_json::to_string(&a).unwrap();
+        assert!(!text.contains("secret"), "{text}");
+        // And the refusal is not the switch answering: it holds with the switch on, which is the
+        // only state in which the rest of the door runs at all.
+        assert!(on().keep_reading_list);
+    }
+
+    /// The switch is answered inside the door, and off means stop writing rather than lose what
+    /// is there — [`Settings::keep_library`]'s meaning of the word, one tenant over.
+    #[test]
+    fn the_reading_list_switch_is_answered_in_the_door() {
+        let mut a = Archive::new();
+        assert_eq!(
+            a.add_next(&on(), &u("https://example.com/a"), Some("A")),
+            Kept::Added
+        );
+        let off = Settings {
+            keep_reading_list: false,
+            ..Settings::default()
+        };
+        assert_eq!(
+            a.add_next(&off, &u("https://example.com/b"), Some("B")),
+            Kept::Off
+        );
+        assert_eq!(
+            a.next_len(),
+            1,
+            "off must not discard what is already there"
+        );
+        // Off for this tenant is not off for the others.
+        assert_eq!(
+            a.keep(&off, &u("https://example.com/c"), Some("C")),
+            Kept::Added
+        );
+        assert_eq!(
+            a.visit(&off, &u("https://example.com/d"), Some("D")),
+            Visited::Recorded
+        );
+    }
+
+    /// An address longer than [`MAX_URL`] is refused rather than shortened, and the reading list
+    /// is the door a page's own links come through — so this is the one most likely to meet one.
+    #[test]
+    fn an_over_long_link_is_refused_rather_than_shortened() {
+        let mut a = Archive::new();
+        let long = format!("https://example.com/{}", "q".repeat(MAX_URL));
+        assert_eq!(a.add_next(&on(), &u(&long), Some("x")), Kept::TooLong);
+        assert_eq!(a.next_len(), 0);
+    }
+
+    /// A link already listed is said so rather than duplicated, fragment ignored — the same
+    /// answer `keep` gives, over the same `same_page` comparison.
+    #[test]
+    fn a_link_already_on_the_reading_list_is_not_repeated() {
+        let mut a = Archive::new();
+        assert_eq!(
+            a.add_next(&on(), &u("https://example.com/a"), Some("A")),
+            Kept::Added
+        );
+        assert_eq!(
+            a.add_next(&on(), &u("https://example.com/a#part-two"), Some("A")),
+            Kept::Already
+        );
+        assert_eq!(a.next_len(), 1);
+    }
+
+    /// The wire spelling, and that an unknown kind still survives a build that has three.
+    #[test]
+    fn the_reading_lists_wire_spelling_round_trips_beside_an_unknown_kind() {
+        let mut a = Archive::new();
+        a.add_next_at(&u("https://example.com/a"), Some("A"), 86_400);
+        let text = serde_json::to_string(&a).unwrap();
+        assert!(text.contains(r#""kind":"next""#), "{text}");
+        let (back, note) = parse(&text, "the fixture");
+        assert!(note.is_none());
+        assert_eq!(back, a);
+        assert_eq!(
+            back.read_next().next().expect("the item").kind,
+            Kind::ReadNext
+        );
+
+        // A kind a later build wrote is carried through untouched and shown by none of the three.
+        let mixed = r#"{"version":1,"items":[
+            {"url":"https://example.com/f","title":"F","kind":"feed","added":1}]}"#;
+        let (m, note) = parse(mixed, "the fixture");
+        assert!(note.is_none(), "one unknown kind is not a broken file");
+        assert_eq!(m.next_len(), 0);
+        assert_eq!(m.len(), 0);
+        assert_eq!(m.visits(), 0);
+        assert!(serde_json::to_string(&m).unwrap().contains("feed"));
+    }
+
+    /// The reading list shows each row's address and the library does not, which is
+    /// `Address::Shown`'s whole argument: these rows are named by link text, and link text
+    /// repeats.
+    #[test]
+    fn the_reading_list_draws_the_address_under_each_row() {
+        let mut a = Archive::new();
+        a.add_next_at(&u("https://example.com/a"), Some("Read more"), 86_400);
+        a.keep_at(&u("https://example.com/a"), Some("Read more"), 86_400);
+        let listed = reading_list_document(&a, &on());
+        let Block::Entries(rows) = &listed.blocks[0] else {
+            panic!("the reading list draws entries");
+        };
+        assert_eq!(rows[0].address.as_deref(), Some("https://example.com/a"));
+        let shelved = document(&a);
+        let Block::Entries(kept) = &shelved.blocks[0] else {
+            panic!("the library draws entries");
+        };
+        assert_eq!(kept[0].address, None, "the library names no addresses");
+    }
+
+    /// An empty reading list is a document with a sentence in it, not an error page and not a
+    /// blank screen — `document`'s argument, third tenant.
+    #[test]
+    fn an_empty_reading_list_is_a_document_and_not_a_blank_screen() {
+        let a = Archive::new();
+        let doc = reading_list_document(&a, &on());
+        assert_eq!(doc.url, READING_LIST);
+        assert_eq!(
+            doc.title.as_deref(),
+            Some(crate::reader::notice::READING_LIST_TITLE)
+        );
+        let [Block::Paragraph(line)] = doc.blocks.as_slice() else {
+            panic!("an empty reading list is one paragraph");
+        };
+        assert!(!ir::plain_text(line).trim().is_empty());
     }
 
     /// One row per page, not one per visit: the entry moves to the top and is restamped and

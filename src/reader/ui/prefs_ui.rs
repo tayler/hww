@@ -58,6 +58,9 @@ pub enum Event {
     /// this is that pattern a third time. A `Control::Button` would be mechanism with one caller,
     /// which is the standard that removed `force_thread`.
     ForgetLibrary,
+    /// The Reading list group's "forget the reading list" was pressed. [`Event::ForgetLibrary`]'s
+    /// argument, one tenant over.
+    ForgetReadingList,
     /// The History group's "forget history" was pressed. [`Event::ForgetLibrary`]'s argument,
     /// one tenant over: the panel owns neither the store nor the file.
     ForgetHistory,
@@ -212,8 +215,7 @@ fn group_heading(
     ui.add_space(theme::snap(opts.base_size_pt * 0.3));
 }
 
-/// What a group has to say after its own settings, which today is the Library group and nothing
-/// else.
+/// What a group has to say after its own settings: the three that write to the archive.
 ///
 /// Below the fields rather than beside the heading, because "forget everything" is the second
 /// half of the switch above it and reads as a consequence of it; drawn from the heading it would
@@ -227,20 +229,27 @@ fn group_footer(
     group: Group,
     events: &mut Vec<Event>,
 ) {
-    // Both tenants of `reader::archive`, each with the button that empties it under the switch
-    // that fills it. Two buttons and not one: "forget everything" must not quietly take the
-    // history with it, and a reader clearing a trail is not asking to lose the pages they saved
-    // on purpose.
+    // All three tenants of `reader::archive`, each with the button that empties it under the
+    // switch that fills it. Three buttons and not one: "forget everything" must not quietly take
+    // the history with it, a reader clearing a trail is not asking to lose the pages they saved on
+    // purpose, and neither of them is asking to lose the links they lined up to read next.
     let (label, hover, event) = match group {
         Group::Library => (
             "forget everything",
             "Remove every page you have kept. This cannot be undone.",
             Event::ForgetLibrary,
         ),
+        Group::ReadingList => (
+            "forget the reading list",
+            // The one sentence, shared with the button the reading list itself carries: two
+            // buttons that empty the same list have to describe it the same way.
+            crate::reader::notice::READING_LIST_FORGET_ALL_HOVER,
+            Event::ForgetReadingList,
+        ),
         Group::History => (
             "forget history",
             "Remove every page hww has written down. This cannot be undone, and it leaves the \
-             pages you have kept alone.",
+             pages you have kept and your reading list alone.",
             Event::ForgetHistory,
         ),
         _ => return,
@@ -250,8 +259,8 @@ fn group_footer(
             events.push(event);
         }
     });
-    // Under both groups, because both write to it and a reader who scrolled straight to History
-    // must not have to have read the Library group to learn where its file is. The archive
+    // Under all three groups, because all three write to it and a reader who scrolled straight to
+    // History must not have to have read the Library group to learn where its file is. The archive
     // doctrine's disclosure requirement is that a store whose shape the reader cannot see is one
     // they cannot reason about; this is the same sentence the settings path gets at the foot.
     // And a sentence either way: with no config directory there is no path to print and

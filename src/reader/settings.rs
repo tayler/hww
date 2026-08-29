@@ -48,6 +48,15 @@ pub struct Settings {
     /// for exactly that reason — a switch that silently discarded the library would be as much a
     /// surprise as one that silently retained it. See [`crate::reader::archive`].
     pub keep_library: bool,
+    /// Whether hww may write the reading list at all.
+    ///
+    /// The archive doctrine's switch for its third tenant, and it means what
+    /// [`Settings::keep_library`] means by the same word: off stops the marking and leaves what is
+    /// already listed, with "forget the reading list" in the same group as the other half. On by
+    /// default like the library's, and for the library's reason rather than the history's —
+    /// nothing is written until the reader marks a link, so a default that permits it promises
+    /// nothing about what hww does on its own. See [`crate::reader::archive`].
+    pub keep_reading_list: bool,
     /// Whether hww may write down the pages it draws.
     ///
     /// The archive doctrine's second switch, and the one that governs a record nobody asked for
@@ -144,6 +153,7 @@ impl Default for Settings {
             scroll_lines: 3.0,
             search_engine: crate::sites::EngineId::default(),
             keep_library: true,
+            keep_reading_list: true,
             keep_history: true,
             open_on: OpenOn::default(),
             show_menu_bar: true,
@@ -351,6 +361,7 @@ mod tests {
         want.scroll_lines = 5.0;
         want.show_menu_bar = false;
         want.keep_library = false;
+        want.keep_reading_list = false;
         want.keep_history = false;
         want.open_on = OpenOn::Nothing;
         save(&want).unwrap();
@@ -492,7 +503,7 @@ mod tests {
         assert!(!s.send_image_referer);
     }
 
-    /// The archive's three switches survive the file, and an existing installation's file —
+    /// The archive's four switches survive the file, and an existing installation's file —
     /// which has none of them — keeps the library on rather than silently having it off.
     ///
     /// The history's default is asserted here too, and it is the assertion worth having: it is
@@ -507,11 +518,13 @@ mod tests {
             "an existing file must not turn keeping off"
         );
         assert!(older.keep_history, "nor history");
+        assert!(older.keep_reading_list, "nor the reading list");
         assert_eq!(older.open_on, OpenOn::Library);
         assert!(Settings::default().keep_history);
 
         let want = Settings {
             keep_library: false,
+            keep_reading_list: false,
             keep_history: false,
             open_on: OpenOn::Nothing,
             ..Settings::default()
