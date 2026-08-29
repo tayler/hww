@@ -20,17 +20,17 @@ use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadOptions {
-    /// Apply the builtin rewrite table. `--no-rewrite` and the reader's `Shift+R` clear it.
+    /// Apply the builtin rewrite table. `--no-rewrite` and the reader's bare reload clear it.
     pub rewrite: bool,
     /// Apply the builtin profile table to the page that arrives. `--no-profile` and the
-    /// reader's `Shift+R` clear it.
+    /// reader's bare reload clear it.
     pub profile: bool,
     /// Read a known engine's result page as results rather than as prose. `--no-search` and
-    /// the reader's `Shift+R` clear it, which is how you see the SERP the engine actually
+    /// the reader's bare reload clears it, which is how you see the SERP the engine actually
     /// sent when a shape looks wrong.
     pub search: bool,
     /// Read an RSS or Atom response as a feed rather than as prose. `--no-feed` and the
-    /// reader's `Shift+R` clear it, which is how you see the raw XML the generic extractor
+    /// reader's bare reload clear it, which is how you see the raw XML the generic extractor
     /// makes of a feed — the only way to tell a stale reading from a stale publisher.
     ///
     /// Not keyed on a host, unlike the three tables beside it: a feed is recognised from its
@@ -575,7 +575,7 @@ fn named(title: &str, url: &Url) -> String {
 /// It takes no [`LoadOptions`], and that is the rule rather than an omission.
 /// `LoadOptions::search` decides how the *response* is read, while `search::resolve_input` has
 /// already turned the reader's words into this URL whatever the flag says. Gating the
-/// disclosure on it would make `--no-search` and `Shift+R` the two quietest ways to search,
+/// disclosure on it would make `--no-search` and a bare reload the two quietest ways to search,
 /// which is the opposite of what both are for.
 fn search_notice(url: &Url) -> Option<Rewrite> {
     let engine = crate::sites::engine_for(url)?;
@@ -849,7 +849,7 @@ mod tests {
 
     /// The search disclosure is owed by the request, not by how the answer will be read.
     ///
-    /// `--no-search` and `Shift+R` turn off *reading* a result page as results. They used to
+    /// `--no-search` and a bare reload turn off *reading* a result page as results. They used to
     /// turn off saying that a search was leaving, which made them the two quietest ways to
     /// send a query to a third party. The signature is the guarantee: no `LoadOptions` reaches
     /// this decision.
@@ -869,7 +869,7 @@ mod tests {
         assert!(search_notice(&Url::parse("https://lorem.test/one").unwrap()).is_none());
     }
 
-    /// `Shift+R` and `--no-search` are how you see the result page the engine actually sent.
+    /// A bare reload and `--no-search` are how you see the result page the engine actually sent.
     /// If `BARE` left search on, a stale shape would be unfalsifiable from inside the reader.
     #[test]
     fn bare_reads_a_result_page_as_a_page() {
@@ -878,7 +878,7 @@ mod tests {
     }
 
     /// The same argument for feeds, and it is the sharper one: the generic extractor reads a
-    /// result page acceptably, and reads an XML document as nonsense. `Shift+R` on a feed is
+    /// result page acceptably, and reads an XML document as nonsense. A bare reload on a feed is
     /// how you see what `feed::read` was handed, which is the only way to tell a stale reading
     /// from a publisher who changed their generator.
     ///

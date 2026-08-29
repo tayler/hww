@@ -693,13 +693,16 @@ pub fn fields() -> Vec<Field> {
             group: G::History,
             label: "Remember pages you visit",
             note: Some(
-                "Keeps a list of the pages hww has shown you, most recent first; h opens it. \
-                 Turning this off stops hww writing anything new; it does not remove what is \
-                 already there, which is what forget history below is for.",
+                "Keeps a list of the pages hww has shown you, most recent first; the History \
+                 menu opens it, and the help card names the key. Turning this off stops hww \
+                 writing anything new; it does not remove what is already there, which is what \
+                 forget history below is for.",
             ),
-            // No key, unlike Keep pages above it. `h` opens the list rather than recording a
-            // page, and a key printed beside a switch reads as the key that works the switch;
-            // the note names it where it can say what it does.
+            // No key, unlike Keep pages above it. The history key opens the list rather than
+            // recording a page, and a key printed beside a switch reads as the key that works
+            // the switch; the note points at the menu, where the key can say what it does.
+            // The note cannot name the key itself: it is a modifier now, and `note` is a
+            // `&'static str` that cannot interpolate the `cfg`-selected `menu::HISTORY`.
             keys: "",
             control: Toggle,
         },

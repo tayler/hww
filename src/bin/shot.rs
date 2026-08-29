@@ -674,7 +674,10 @@ fn catalog(port: u16) -> Vec<Scene> {
         scene(
             "outline",
             "the outline panel over an article",
-            vec![page(ARTICLE_URL, ARTICLE), key(Key::T)],
+            vec![
+                page(ARTICLE_URL, ARTICLE),
+                Step::Key(Modifiers::COMMAND | Modifiers::SHIFT, Key::O),
+            ],
         ),
         scene(
             "help",
@@ -694,7 +697,10 @@ fn catalog(port: u16) -> Vec<Scene> {
         scene(
             "settings",
             "the settings panel: every setting, with a sentence about each",
-            vec![page(ARTICLE_URL, ARTICLE), key(Key::Comma)],
+            vec![
+                page(ARTICLE_URL, ARTICLE),
+                Step::Key(Modifiers::COMMAND, Key::Comma),
+            ],
         ),
         scene(
             "menubar",
@@ -743,25 +749,31 @@ fn catalog(port: u16) -> Vec<Scene> {
                     p.encoding = "windows-1252";
                     p.bytes = 184_320;
                 }),
-                key(Key::P),
+                Step::Key(Modifiers::COMMAND, Key::I),
             ],
         ),
         scene(
             "pageinfo-thin",
             "page info on a thin page: the extraction floor is in the record",
-            vec![page("https://example.com/app", THIN), key(Key::P)],
+            vec![
+                page("https://example.com/app", THIN),
+                Step::Key(Modifiers::COMMAND, Key::I),
+            ],
         ),
         scene(
             "pageinfo-rtl",
             "page info on an RTL page: layout stays in the record",
-            vec![page("https://example.com/he", RTL), key(Key::P)],
+            vec![
+                page("https://example.com/he", RTL),
+                Step::Key(Modifiers::COMMAND, Key::I),
+            ],
         ),
         scene(
             "find",
             "the find bar, with every match on the page highlighted",
             vec![
                 page(ARTICLE_URL, ARTICLE),
-                key(Key::Slash),
+                Step::Key(Modifiers::COMMAND, Key::F),
                 Step::Wait(2),
                 Step::Type("read".to_owned()),
             ],

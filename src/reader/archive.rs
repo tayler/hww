@@ -28,7 +28,8 @@
 //! look for it, switchable off in one click, and forgettable in one more.
 //! [`Settings::keep_history`] sits in a settings group of its own with this file's path printed
 //! under it, beside the button that empties it; the pages it holds are a page the reader can
-//! open (`h`) rather than a file they have to find. A default that could not be seen or undone
+//! open, with the key every browser opens its history with, rather than a file they have to
+//! find. A default that could not be seen or undone
 //! would be the quiet lie this project's whole notice system exists to refuse.
 //!
 //! Seven consequences, each settled here rather than left to the call site:
@@ -96,18 +97,18 @@
 //!
 //! No page content. Three fields and a kind: the address, the title, the day, and — for a kept
 //! page alone — the address of the site's mark, which draws as a favicon in a column left of each
-//! row. All three lists are still names and addresses; the icon is a third address, and only the
-//! bookmarks has one.
+//! row. All three lists are still names and addresses; the icon is a third address, and only a
+//! bookmark has one.
 //!
 //! **Drawing a mark and storing one are two different questions.** The bookmarks and the reading
-//! list both draw the column; only the bookmarks stores anything for it. A kept page was fetched,
-//! so it declared an icon and [`Archive::bookmark`] writes that address down. A reading-list row is a
-//! link off some other page, so hww has never fetched what it points at and has nothing to
+//! list both draw the column; only a bookmark stores anything for it. A bookmarked page was
+//! fetched, so it declared an icon and [`Archive::bookmark`] writes that address down. A
+//! reading-list row is a link off some other page, so hww has never fetched what it points at and has nothing to
 //! record — [`well_known_icon`] guesses `/favicon.ico` at the row's own origin when the view is
 //! built, and the guess stays out of the file. The history neither stores nor draws.
 //!
-//! This module used to refuse the icon outright, on the ground that a bookmarks list of twenty sites
-//! would put twenty third-party requests on one screen. That cost is real and is now paid
+//! This module used to refuse the icon outright, on the ground that twenty bookmarked sites would
+//! put twenty third-party requests on one screen. That cost is real and is now paid
 //! deliberately rather than avoided: opening either chosen list contacts the hosts of the rows on
 //! screen, under [`ImagePolicy::allows_any_request`] like the masthead favicon, bounded to the
 //! layout band so a five-hundred-row reading list is a screenful of requests and not five
@@ -831,7 +832,7 @@ pub fn opens_on_launch(settings: &Settings, archive: &Archive) -> bool {
 /// an error page, and that is right there: an engine that answered with nothing is a dead end.
 /// An empty bookmarks list is a new reader, and an error page would be the application scolding them for
 /// not having used it yet. `entries_ui` over an empty slice draws literally nothing, so the
-/// one-line paragraph is what stops `b` from opening a blank screen.
+/// one-line paragraph is what stops the bookmarks key from opening a blank screen.
 pub fn bookmarks_document(archive: &Archive) -> ir::Document {
     view(
         BOOKMARKS,
@@ -1514,7 +1515,8 @@ mod tests {
         assert!(entries.iter().all(|e| e.image.is_none()));
     }
 
-    /// An empty bookmarks list is a new reader, not a failure, so `b` opens a page that says what to
+    /// An empty bookmarks list is a new reader, not a failure, so the bookmarks key opens a page
+    /// that says what to
     /// do rather than a blank screen or an error.
     #[test]
     fn an_empty_bookmarks_view_is_a_page_that_says_so() {

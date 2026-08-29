@@ -187,7 +187,8 @@ to hold.
 
 History is on by default, so its disclosures are the load-bearing ones: the switch is in a group
 of its own with the file's path under it and the button that empties it beside it, and the record
-itself is a page the reader opens with `h`. Keep it one row per page rather than one per visit —
+itself is a page the reader opens with the key every browser opens its history with. Keep it one
+row per page rather than one per visit —
 `Archive::visit` moves and restamps an entry it has seen before — because a visit-by-visit trail
 is a different and sharper claim about a person, and nothing in hww has a use for it. The two
 chosen tenants' caps refuse and the history's evicts; that asymmetry is argued in
@@ -257,8 +258,8 @@ a rate limit. An empty answer is the frame *and* less than `THIN_TEXT` inside it
 with no parsable rows is a redesign and falls through to the extractor. The parser stays a
 candidate with a floor, so no reading of a result page may end in a blank screen.
 
-`session::search_notice` takes no `LoadOptions` and must not: `--no-search` and `Shift+R` decide
-how a response is read, never whether the request is disclosed. `search::resolve_input` refuses
+`session::search_notice` takes no `LoadOptions` and must not: `--no-search` and a bare reload
+decide how a response is read, never whether the request is disclosed. `search::resolve_input` refuses
 empty input, so no keystroke turns a blank URL bar into a request. Do not widen
 `FetchError::LikelyBlocked` to cover a challenge page; it means a document read-timeout and the
 split is measured. Do not name a build hash in a selector
@@ -290,7 +291,12 @@ content out of hww's own views, or the exact set of addresses `builtin_view` cla
 
 Linux, Windows, and macOS are verified and all three ship a binary. Use
 `Modifiers::COMMAND`, never a literal Ctrl; it maps to Cmd on macOS and Ctrl elsewhere.
-Back/forward support both Alt+arrows and Cmd+brackets. What a table *says* about a key is
+Back/forward support both Alt+arrows and Cmd+brackets. Every binding is the one another browser
+already uses, and an action gets exactly one: the bare-letter twins a text reader would carry are
+gone from everything but scrolling. Where two browsers disagree the platform wins — History is
+`Cmd+Y` on macOS because `Cmd+H` is the system Hide binding no window ever sees, the second spec
+after Back whose *key* and not merely its modifier changes with the platform, and the only one
+needing a `cfg` inside `handle_keys` as well as in the tables. What a table *says* about a key is
 `menu::keyspec`, which is `cfg`-selected: never write a modifier into a menu row, a help row, a
 `prefs` field, or the help card's footnote, or a Mac reader is told to press a key nothing binds.
 

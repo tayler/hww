@@ -28,8 +28,8 @@
 //!
 //! # Why the options have to match
 //!
-//! The cache may only answer with the page the fetch it replaced would have produced. `Shift+R`
-//! reads a page with both builtin tables off; handing that document back on an ordinary Back
+//! The cache may only answer with the page the fetch it replaced would have produced. A bare
+//! reload reads a page with both builtin tables off; handing that document back on an ordinary Back
 //! would show the reader a page they did not ask for and could not tell apart. The rule is one
 //! equality test at [`PageCache::take`] rather than a special case at each call site.
 //!
@@ -226,7 +226,8 @@ mod tests {
     }
 
     /// The rule the module doc states: only the page the fetch it replaced would have produced.
-    /// `Shift+R` reads a page with both tables off, and an ordinary Back must not be handed it.
+    /// A bare reload reads a page with both tables off, and an ordinary Back must not be handed
+    /// it.
     #[test]
     fn a_page_kept_under_other_options_is_not_handed_back() {
         let h = stack(&["https://a/"]);

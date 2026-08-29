@@ -17,7 +17,7 @@
 //! What it does *not* carry is provenance. Seven facts `·`-joined into one dim right-aligned
 //! line crowded the URL, and with `wrap_mode = Truncate` on a narrow window the tail was not
 //! drawn at all, which is a poor way to report anything. They are labelled rows in the
-//! page-info panel now (`p`, or the italic `i`, `reader::ui::pageinfo_ui`). The two that could
+//! page-info panel now (its key, or the italic `i`, `reader::ui::pageinfo_ui`). The two that could
 //! not wait for a click went the other way and became infobars under the top chrome: a truncated
 //! body and a rewrite rule that landed on the wrong host both change how the page in front of
 //! the reader should be read. The dead rule in particular used to be a twelve-second `flash`
@@ -216,7 +216,8 @@ struct Ready {
     ///
     /// **Not `ReaderApp::last_opts`**, which by the time this page is filed away already holds
     /// the options of the navigation replacing it: `navigate` writes it at dispatch. Filing with
-    /// that would put a `Shift+R` page under the default options and hand it back on an ordinary
+    /// that would put a bare-reloaded page under the default options and hand it back on an
+    /// ordinary
     /// Back. The rule is `reader::pagecache`'s: the cache may only answer with the page the
     /// fetch it replaced would have produced.
     opts: LoadOptions,
@@ -377,7 +378,8 @@ pub struct ReaderApp {
     /// The *default* options for this session. `--no-rewrite` and `--no-profile` clear a
     /// table each.
     opts: LoadOptions,
-    /// The options of the navigation in flight, which `Shift+R` makes differ from the default.
+    /// The options of the navigation in flight, which a bare reload makes differ from the
+    /// default.
     last_opts: LoadOptions,
     /// One-shot: block index to bring into view on the next frame.
     scroll_to_block: Option<usize>,
@@ -461,10 +463,9 @@ pub struct ReaderApp {
     pending_href: Option<String>,
     /// One-shot: give the URL bar keyboard focus on the next frame, after it exists.
     focus_url_bar: bool,
-    /// One-shot: the same for the find field. Focusing it from the keymap instead would hand
-    /// the field the `/` that opened it: `consume_key` takes the key event, but the text event
-    /// that arrives with it is a separate event, and a field focused earlier in the same frame
-    /// still reads it.
+    /// One-shot: the same for the find field, which does not exist until `find_bar` runs, so
+    /// the keymap cannot focus it directly. It also carries the selection: `find_bar` reads this
+    /// to offer the last query back highlighted, the way the URL bar offers the address.
     focus_find: bool,
     /// The first block touching the top of the window last frame, which is what the outline
     /// marks as the current section. Found in `ready_screen`, a frame late like everything the
@@ -680,8 +681,9 @@ impl ReaderApp {
                     // Only on the splash. With nothing to read, the URL bar is the only sensible
                     // thing on screen and so the only sensible thing to be typing into — but
                     // `handle_keys` returns early while the bar has focus, so doing this over the
-                    // bookmarks would hand the reader a page they cannot scroll, Tab into, find in,
-                    // or press `b` on until they think to press Esc. A page in the column is a
+                    // bookmarks would hand the reader a page they cannot scroll, Tab into, find
+                    // in, or reopen the bookmarks on until they think to press Esc. A page in
+                    // the column is a
                     // page to read; the bar is one keystroke away when it is not.
                     app.chrome.url_bar = Some(String::new());
                     app.focus_url_bar = true;
@@ -697,7 +699,7 @@ impl ReaderApp {
     ///
     /// Back and Forward reach this only when they have to: [`ReaderApp::arrive`] tries the page
     /// cache first and comes here on a miss. Every other navigation — a link, a typed URL,
-    /// `reload`, `Shift+R`, Retry — arrives here directly and always asks the site.
+    /// `reload`, a bare reload, Retry — arrives here directly and always asks the site.
     ///
     /// The resets that belong to the page being *fetched* are not done here; they are
     /// [`ReaderApp::commit`]'s, and they run when a document actually takes the column. Doing
@@ -774,7 +776,8 @@ impl ReaderApp {
                 self.history.replace(url.clone());
             } else {
                 // `History::push` treats a re-push of the current URL as a reload that keeps the
-                // entry's id and offset, so `b` pressed on the bookmarks rebuilds it in place with
+                // entry's id and offset, so the bookmarks key pressed on the bookmarks rebuilds
+                // it in place with
                 // the reading position intact rather than stacking a second entry.
                 self.history.push(url.clone());
             }
@@ -803,7 +806,7 @@ impl ReaderApp {
         }));
     }
 
-    /// Open the bookmarks, as `b` and the menu item do.
+    /// Open the bookmarks, as the bookmarks key and the menu item do.
     fn open_bookmarks(&mut self, push: bool) {
         let url = Url::parse(archive::BOOKMARKS).expect("hww:bookmarks is a valid address");
         self.navigate(url, self.opts, push);
@@ -815,7 +818,7 @@ impl ReaderApp {
         self.navigate(url, self.opts, push);
     }
 
-    /// Open the history, as `h` and the menu item do.
+    /// Open the history, as the history key and the menu item do.
     fn open_history(&mut self, push: bool) {
         let url = Url::parse(archive::HISTORY).expect("hww:history is a valid address");
         self.navigate(url, self.opts, push);
@@ -1235,7 +1238,7 @@ impl ReaderApp {
     /// still has it and from the network if not.
     ///
     /// The one place the page cache is consulted, which is why no other navigation needs to opt
-    /// out of it: `reload`, `Shift+R`, `Retry`, a link, and a typed URL all reach `navigate`
+    /// out of it: `reload`, a bare reload, `Retry`, a link, and a typed URL all reach `navigate`
     /// directly. A check inside `navigate` would have needed a flag argument at every call site
     /// and would have been the wrong shape.
     fn arrive(&mut self) {
@@ -2020,7 +2023,7 @@ impl ReaderApp {
         // `Escape` in its own `popup.rs`, and it never sees the key because this function runs
         // before any panel is drawn and takes `Escape` unconditionally two lines below. Without
         // this guard an open menu could not be dismissed, and every bare letter below would fire
-        // its page action underneath it: `q` would quit out from under an open File menu.
+        // its page action underneath it: `d` would cycle the theme under an open View menu.
         //
         // This was already true of the link context menu before there was a menu bar. The bar is
         // what makes it constant rather than obscure.
@@ -2042,6 +2045,15 @@ impl ReaderApp {
             return;
         }
         if typing {
+            // One exception, and it is the find key over the find field. Every browser answers
+            // it there by offering the last query back selected rather than by doing nothing,
+            // which is the whole use of pressing it twice: search, read, press it again, type
+            // over what you searched for. It is a chord and never text, so letting it through
+            // costs the field no keystroke it wanted. Everything else while a field has focus
+            // stays text, which is what this guard is for.
+            if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
+                self.open_find();
+            }
             return;
         }
 
@@ -2070,7 +2082,9 @@ impl ReaderApp {
         if k(Modifiers::SHIFT, Key::G) || k(Modifiers::NONE, Key::End) {
             self.scroll_offset = Some(self.max_scroll);
         }
-        if k(Modifiers::SHIFT, Key::R) {
+        // Before `COMMAND+R` below. `consume_key` ignores an *extra* Shift, so a bare reload
+        // tested second would fire an ordinary one and the toast would never appear.
+        if k(Modifiers::COMMAND | Modifiers::SHIFT, Key::R) {
             self.reload(LoadOptions::BARE);
             self.flash(notice::RELOADED_BARE.to_owned());
         }
@@ -2094,10 +2108,6 @@ impl ReaderApp {
         if k(Modifiers::SHIFT, Key::L) {
             self.read_focused_link_later();
         }
-        if self.find_total > 0 && k(Modifiers::SHIFT, Key::N) {
-            self.find_current = (self.find_current + self.find_total - 1) % self.find_total;
-            self.find_scroll = true;
-        }
         if k(Modifiers::SHIFT, Key::Space) || k(Modifiers::NONE, Key::PageUp) {
             self.scroll_delta += page;
         }
@@ -2112,6 +2122,37 @@ impl ReaderApp {
         }
         if k(Modifiers::COMMAND, Key::F) {
             self.open_find();
+        }
+        if k(Modifiers::COMMAND, Key::R) {
+            self.reload(self.opts);
+        }
+        if k(Modifiers::COMMAND | Modifiers::SHIFT, Key::B) {
+            self.open_bookmarks(true);
+        }
+        if k(Modifiers::COMMAND | Modifiers::SHIFT, Key::O) {
+            self.chrome.outline_open = !self.chrome.outline_open;
+        }
+        if k(Modifiers::COMMAND, Key::I) {
+            self.chrome.info_open = !self.chrome.info_open;
+        }
+        // `Cmd+H` hides the application on macOS: the system takes it and no window ever sees
+        // it, so History is `Cmd+Y` there, as it is in Safari and Chrome. The one binding whose
+        // *key* and not merely its modifier changes with the platform; `menu::HISTORY` carries
+        // the same split for what the tables say, and its comment carries the argument.
+        #[cfg(target_os = "macos")]
+        let history = k(Modifiers::COMMAND, Key::Y);
+        #[cfg(not(target_os = "macos"))]
+        let history = k(Modifiers::COMMAND, Key::H);
+        if history {
+            self.open_history(true);
+        }
+        if k(Modifiers::COMMAND, Key::Q) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        // `Cmd+,` is the macOS convention for preferences and `Ctrl+,` is what everything with
+        // a settings key binds elsewhere, which is one spec through `Modifiers::COMMAND`.
+        if k(Modifiers::COMMAND, Key::Comma) {
+            self.chrome.settings_open = !self.chrome.settings_open;
         }
         // Alt+arrows on Linux and Windows, Cmd+[ / ] on macOS. Both bound rather than picking
         // a winner; the mouse side buttons work identically everywhere.
@@ -2139,36 +2180,8 @@ impl ReaderApp {
         if k(Modifiers::NONE, Key::G) || k(Modifiers::NONE, Key::Home) {
             self.scroll_offset = Some(0.0);
         }
-        if k(Modifiers::NONE, Key::O) {
-            self.open_url_bar();
-        }
-        if k(Modifiers::NONE, Key::B) {
-            self.open_bookmarks(true);
-        }
         if k(Modifiers::NONE, Key::L) {
             self.open_reading_list(true);
-        }
-        if k(Modifiers::NONE, Key::H) {
-            self.open_history(true);
-        }
-        if k(Modifiers::NONE, Key::Backspace) {
-            self.go_back();
-        }
-        if k(Modifiers::NONE, Key::R) {
-            self.reload(self.opts);
-        }
-        if k(Modifiers::NONE, Key::T) {
-            self.chrome.outline_open = !self.chrome.outline_open;
-        }
-        if k(Modifiers::NONE, Key::P) {
-            self.chrome.info_open = !self.chrome.info_open;
-        }
-        if k(Modifiers::NONE, Key::Slash) {
-            self.open_find();
-        }
-        if self.find_total > 0 && k(Modifiers::NONE, Key::N) {
-            self.find_current = (self.find_current + 1) % self.find_total;
-            self.find_scroll = true;
         }
         if k(Modifiers::NONE, Key::I) {
             match self.focused_image.clone() {
@@ -2205,14 +2218,6 @@ impl ReaderApp {
         }
         if k(Modifiers::NONE, Key::Z) {
             self.collapse_focused();
-        }
-        if k(Modifiers::NONE, Key::Q) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
-        // `,` is the settings key everywhere else, and `Cmd+,` is the macOS convention, so both
-        // are bound rather than picking one.
-        if k(Modifiers::NONE, Key::Comma) || k(Modifiers::COMMAND, Key::Comma) {
-            self.chrome.settings_open = !self.chrome.settings_open;
         }
         // The GTK and Windows convention for reaching a menu bar. It reveals the bar first, so
         // hiding it is never a way to lose it.
@@ -2490,7 +2495,7 @@ impl eframe::App for ReaderApp {
 
     /// The debounce in [`ReaderApp::persist`] exists so holding `[` does not write the file
     /// once per frame. It must not be the reason a change is *lost*: `last_saved` starts at
-    /// construction, so changing the measure and pressing `q` inside the window discarded it
+    /// construction, so changing the measure and quitting inside the window discarded it
     /// silently. Quitting is exactly when a pending write has to land.
     fn on_exit(&mut self) {
         if self.settings_dirty {
@@ -3051,59 +3056,72 @@ impl ReaderApp {
         let total = self.find_total;
         let current = self.find_current;
         let mut next = None;
-        let bar = egui::Panel::top("hww-find")
-            .show_separator_line(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(pal.chrome_bg)
-                    .inner_margin(egui::Margin::symmetric(10, 6)),
-            )
-            .show(ui, |ui| {
-                ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
-                ui.horizontal(|ui| {
-                    ui.label("Find");
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut query)
+        let bar =
+            egui::Panel::top("hww-find")
+                .show_separator_line(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(pal.chrome_bg)
+                        .inner_margin(egui::Margin::symmetric(10, 6)),
+                )
+                .show(ui, |ui| {
+                    ui.style_mut().override_font_id = Some(theme::chrome_font(&self.settings.read));
+                    ui.horizontal(|ui| {
+                        ui.label("Find");
+                        let out = egui::TextEdit::singleline(&mut query)
                             .id(egui::Id::new(FIND_ID))
                             .desired_width(240.0)
-                            .margin(egui::Margin::symmetric(8, 3)),
-                    );
-                    if self.focus_find {
-                        resp.request_focus();
-                        self.focus_find = false;
-                    }
-                    if resp.changed() {
-                        next = Some(0);
-                    }
-                    // Bare Enter is TextEdit's return_key and surrenders focus; Shift+Enter is
-                    // not, so previous has to fire while the field still holds it.
-                    if total > 0
-                        && ui.input(|i| i.key_pressed(Key::Enter))
-                        && (resp.lost_focus() || resp.has_focus())
-                    {
-                        let prev = ui.input(|i| i.modifiers.shift);
-                        next = Some(if prev {
-                            (current + total - 1) % total
+                            .margin(egui::Margin::symmetric(8, 3))
+                            .show(ui);
+                        let resp = out.response.response;
+                        if self.focus_find {
+                            resp.request_focus();
+                            self.focus_find = false;
+                            // The offer the URL bar makes, for the same reason: the find key reopens
+                            // the bar over the last thing searched for, so hand it back selected.
+                            // Typing then replaces it and Enter alone repeats the search, which is
+                            // what every browser's find bar does. `.show` rather than `ui.add`
+                            // because the selection has to be written into the stored state, and
+                            // only `TextEditOutput` carries the state and the galley to write it
+                            // from; `request_focus` alone leaves the caret where it was.
+                            let mut state = out.state;
+                            state.cursor.set_char_range(Some(
+                                egui::text::CCursorRange::select_all(&out.galley),
+                            ));
+                            state.store(ui.ctx(), resp.id);
+                        }
+                        if resp.changed() {
+                            next = Some(0);
+                        }
+                        // Bare Enter is TextEdit's return_key and surrenders focus; Shift+Enter is
+                        // not, so previous has to fire while the field still holds it.
+                        if total > 0
+                            && ui.input(|i| i.key_pressed(Key::Enter))
+                            && (resp.lost_focus() || resp.has_focus())
+                        {
+                            let prev = ui.input(|i| i.modifiers.shift);
+                            next = Some(if prev {
+                                (current + total - 1) % total
+                            } else {
+                                (current + 1) % total
+                            });
+                            resp.request_focus();
+                        }
+                        let shown = if query.is_empty() {
+                            String::new()
+                        } else if total == 0 {
+                            "no matches".to_owned()
                         } else {
-                            (current + 1) % total
-                        });
-                        resp.request_focus();
-                    }
-                    let shown = if query.is_empty() {
-                        String::new()
-                    } else if total == 0 {
-                        "no matches".to_owned()
-                    } else {
-                        format!("{} of {total}", current + 1)
-                    };
-                    ui.label(shown);
-                    ui.label(
-                        RichText::new("Esc to dismiss")
-                            .color(pal.dim)
-                            .font(theme::chrome_font(&self.settings.read)),
-                    );
+                            format!("{} of {total}", current + 1)
+                        };
+                        ui.label(shown);
+                        ui.label(
+                            RichText::new("Esc to dismiss")
+                                .color(pal.dim)
+                                .font(theme::chrome_font(&self.settings.read)),
+                        );
+                    });
                 });
-            });
         panel_edge(ui, bar.response.rect, Side::Bottom, pal);
         if let Some(n) = next {
             self.find_current = n;

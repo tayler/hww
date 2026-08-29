@@ -108,8 +108,9 @@ where
 
 /// What is on screen when hww starts with no page named.
 ///
-/// The home screen is not a new surface: `ReaderApp::new` takes the same builtin-view path `b`
-/// takes, so opening on the bookmarks is literally "hww opened with the bookmarks" and inherits find,
+/// The home screen is not a new surface: `ReaderApp::new` takes the same builtin-view path the
+/// bookmarks key takes, so opening on them is literally "hww opened with the bookmarks" and
+/// inherits find,
 /// the outline, scrolling, Tab focus, and correct menu gating with no special casing. Drawing
 /// bookmarks entries into the idle screen instead would have forked the page model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
