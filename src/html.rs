@@ -27,7 +27,7 @@
 //! 2. Content-root candidates are scored and the winner is mapped to blocks. When class-name
 //!    chrome hints consume most of a root, [`blocks_guarded`] walks it without those hints.
 //!    Headers and footers inside an article or section remain content.
-//! 3. [`crate::thread::extract_thread`] runs independently. A longer thread replaces the
+//! 3. [`crate::thread::extract_thread_traced`] runs independently. A longer thread replaces the
 //!    article result; a thread over 200 characters is appended to a longer article result.
 //! 4. A result below [`crate::ir::THIN_TEXT`], or below 1,000 characters when `<body>` emits
 //!    five times as much, falls back to `<body>`.
@@ -395,7 +395,11 @@ fn extract_traced(
         lang: html.root_element().value().attr("lang").map(str::to_owned),
         blocks: Vec::new(),
     };
-    let (card_map, cards) = crate::cards::detect(&html);
+    // One sibling-group census, lent to both detectors. They ask the same question of the same
+    // tree — which runs of same-signature siblings does this page have — and each used to walk
+    // every element and build a signature for it. See `thread::extract_thread_in`.
+    let groups = crate::thread::sibling_groups(&html);
+    let (card_map, cards) = crate::cards::detect_in(&groups);
     let mut why = Explanation {
         url: url.to_string(),
         candidates: Vec::new(),
@@ -434,7 +438,7 @@ fn extract_traced(
     }
     // A discussion is not a subtree, so it gets its own algorithm. When the thread dominates
     // the page it *is* the document; when it merely accompanies an article, it is appended.
-    let (thread, verdict) = crate::thread::extract_thread_traced(&html, url, &card_map);
+    let (thread, verdict) = crate::thread::extract_thread_in(&html, url, &card_map, &groups);
     why.thread = verdict;
     if let Some(comments) = thread {
         let tlen = crate::thread::comments_text_len(&comments);
@@ -463,8 +467,7 @@ fn extract_traced(
     why.cards_text = cards_text;
     let have = doc.text_len();
     if (have < SLIVER_TEXT || cards_text > CARDS_RATIO * have)
-        && let Ok(sel) = Selector::parse("body")
-        && let Some(body) = html.select(&sel).next()
+        && let Some(body) = html.select(&sel::BODY).next()
     {
         let (fallback, hints_off) = blocks_guarded(body, url, &card_map);
         let got = block_text(&fallback);
@@ -482,7 +485,50 @@ fn extract_traced(
     trim_tail(&mut doc.blocks);
     why.blocks = doc.blocks.len();
     why.text_len = doc.text_len();
+    #[cfg(test)]
+    snapshot::record(source, &why);
     (doc, why)
+}
+
+/// A scaffold for proving an extraction change moved nothing.
+///
+/// Every fixture in this crate is an inline `#[cfg(test)]` string, so there is no corpus a
+/// binary can be pointed at: `--why` takes a URL and fetches, and nothing may assert on that
+/// binary's output anyway. This records the [`Explanation`] of every extraction any test
+/// performs, keyed by the source, so `HWW_WHY_DUMP=path cargo test` before and after a change
+/// yields two files that must be identical. Compiled only under `cfg(test)` and inert unless
+/// the variable is set.
+#[cfg(test)]
+mod snapshot {
+    use super::Explanation;
+    use std::io::Write;
+
+    pub fn record(source: &str, why: &Explanation) {
+        // Read once. `std::env::var` takes a lock and allocates, and this sits in the pass every
+        // extraction test runs — asking it per document made the `html` tests 18% slower than
+        // the change they exist to measure.
+        static PATH: std::sync::LazyLock<Option<String>> =
+            std::sync::LazyLock::new(|| std::env::var("HWW_WHY_DUMP").ok());
+        let Some(path) = PATH.as_ref() else {
+            return;
+        };
+        // Tests run in parallel and each appends a multi-line record, so the write is taken
+        // under a lock of this process's own rather than trusting a single `write` to be
+        // atomic. Keyed by the source and sorted at read time, so thread order does not show.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let mut key = 0xcbf2_9ce4_8422_2325u64;
+        for b in source.as_bytes() {
+            key = (key ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let _held = LOCK.lock();
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = write!(f, "\u{1}{key:016x}\n{why}\n");
+        }
+    }
 }
 
 /// The text of every accepted story card whose list is not inside chrome: what
@@ -551,6 +597,9 @@ fn is_rubble(b: &Block) -> bool {
         } => image.alt.as_deref().is_none_or(|a| a.len() < 40),
         // The same badges set inline: a run that is nothing but short-alt images.
         Block::Paragraph(inl) if images_only(inl) => true,
+        // `plain_text` and not `ir::inlines_text_len`, which is the cheaper currency: a heading
+        // may hold an `Inline::Image`, and a badge whose alt text is the only thing in it should
+        // be measured by that text rather than counted as empty and trimmed away.
         Block::Heading { inlines, .. } => crate::ir::plain_text(inlines).len() < RUBBLE_TEXT,
         Block::Paragraph(inl) => links_only(inl),
         Block::List { items, .. } => items.iter().all(|item| {
@@ -601,7 +650,10 @@ fn links_only(inl: &[Inline]) -> bool {
         true
     }
     let mut any = false;
-    walk(inl, &mut any) && any && crate::ir::plain_text(inl).len() < RUBBLE_TEXT
+    // `ir::inlines_text_len` and not `ir::plain_text(..).len()`: the walk above has already
+    // returned `false` for every variant the two count differently (an `Image`'s alt text and a
+    // `Break`'s newline), so this is the same number without the string.
+    walk(inl, &mut any) && any && crate::ir::inlines_text_len(inl) < RUBBLE_TEXT
 }
 
 /// A byline names a person. Two of the top-ten US news sites put a URL in
@@ -723,7 +775,7 @@ fn block_text(blocks: &[Block]) -> usize {
 fn own_text(node: NodeRef<'_, Node>) -> String {
     let mut out = String::new();
     own_text_into(node, &mut out, true);
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    crate::ir::normalize_ws(&out)
 }
 
 /// Iterative for the same reason as [`collect_text`]. The `root` flag rides on the stack.
@@ -764,16 +816,17 @@ fn root_candidates<'h>(
     metrics: &TextMetrics,
 ) -> Vec<(ElementRef<'h>, Candidate)> {
     // Emitted length is measured against a dummy base: hrefs do not change how much text a
-    // root yields, and the real base is not known here.
-    let base = Url::parse("https://x.invalid/").unwrap();
+    // root yields, and the real base is not known here. See `DUMMY_BASE`.
+    let base = &*DUMMY_BASE;
     let mut candidates: Vec<(ElementRef<'_>, &'static str)> = Vec::new();
-    for sel in ["article", "main", "[role=main]"] {
-        let Ok(selector) = Selector::parse(sel) else {
-            continue;
-        };
-        candidates.extend(html.select(&selector).map(|el| (el, sel)));
+    for (name, selector) in [
+        ("article", &*sel::ARTICLE),
+        ("main", &*sel::MAIN),
+        ("[role=main]", &*sel::ROLE_MAIN),
+    ] {
+        candidates.extend(html.select(selector).map(|el| (el, name)));
     }
-    candidates.extend(score_best(html, &Walk::bare(&base), metrics).map(|el| (el, "scored")));
+    candidates.extend(score_best(html, &Walk::bare(base), metrics).map(|el| (el, "scored")));
     let mut ranked: Vec<(ElementRef<'_>, Candidate)> = candidates
         .into_iter()
         .map(|(el, origin)| {
@@ -806,7 +859,7 @@ fn root_candidates<'h>(
     // dense with text yet yield almost nothing once chrome and empty wrappers are dropped,
     // which is how a newsletter post lost 90% of its body to a higher-scoring ancestor.
     for (el, c) in &mut ranked {
-        let (blocks, hints_off) = blocks_guarded(*el, &base, cards);
+        let (blocks, hints_off) = blocks_guarded(*el, base, cards);
         c.emitted = block_text(&blocks);
         c.hints_off = hints_off;
     }
@@ -825,7 +878,23 @@ fn blocks_guarded(
     base: &Url,
     cards: &crate::cards::CardMap,
 ) -> (Vec<Block>, bool) {
-    let with = blocks_from(root, &Walk::bare(base).cards(cards));
+    // Every candidate root is walked twice and the body fallback twice more, up to a dozen full
+    // IR builds of one page. The two walks differ on exactly one line — the hint arm at the end
+    // of `is_noise`, which is the only reader of `Walk::noise_hints` — so a hinted walk that
+    // dropped nothing *on hint grounds* has already produced what the unhinted walk would, and
+    // the second is a re-derivation of a result in hand. The comparison agrees: with both
+    // lengths equal, `without > 2 * with` is false for any length including zero, so the
+    // shortcut returns the arm the full form would have.
+    //
+    // Counted rather than compared, and drops rather than dropped text: a zero is a proof, and
+    // anything else falls through to the two-walk answer unchanged. It rarely fires on a real
+    // page — `nav`, `footer`, and `share` are hints and most sites carry one — which is the
+    // point of making it cost a counter rather than a heuristic.
+    let drops = std::cell::Cell::new(0usize);
+    let with = blocks_from(root, &Walk::bare(base).cards(cards).counting_hints(&drops));
+    if drops.get() == 0 {
+        return (with, false);
+    }
     let without = blocks_from(root, &Walk::without_hints(base).cards(cards));
     if block_text(&without) > 2 * block_text(&with) {
         (without, true)
@@ -860,9 +929,7 @@ fn score_best<'h>(
     let mut scores: HashMap<ego_tree::NodeId, f64> = HashMap::new();
     // `div`/`section` are included because most modern pages never emit a `<p>`. A container
     // only counts when the prose is its *own* (see `own_text`).
-    let sel = Selector::parse("p, td, pre, blockquote, li, div, section, dd").ok()?;
-
-    for el in html.select(&sel) {
+    for el in html.select(&sel::SCORED) {
         let text = own_text(*el);
         if text.len() < 25 {
             continue;
@@ -892,7 +959,23 @@ fn score_best<'h>(
             Some((el, s * (1.0 - metrics.link_density(el.id()))))
         })
         .filter(|(_, s)| *s > 0.0)
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        // **The tie-break is what makes this function deterministic.** `scores` is a `HashMap`
+        // with a per-process seed, and `max_by` keeps the last maximum it sees, so without a
+        // second key a page whose containers score equally chose a different root on every run:
+        // the 6,000-deep chain in `deeply_nested_text_extracts_in_linear_time` extracted 53k,
+        // 107k, and 168k characters on three consecutive runs of the same binary. A linear chain
+        // of wrappers is exactly the shape that ties, because each one holds the same prose.
+        //
+        // The earlier node wins, which in an `ego_tree` index is the outer container. That is
+        // the one `choose_root` would rank first anyway, since it emits at least as much as
+        // anything nested inside it, so the two tie-breaks agree rather than fight. `NodeId` is
+        // an index into the tree's own vector, so this is document order and needs no key built
+        // for it.
+        .max_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.0.id().cmp(&a.0.id()))
+        })
         .map(|(el, _)| el)
 }
 
@@ -914,20 +997,27 @@ fn is_noise(el: &ElementRef, walk: &Walk<'_>) -> bool {
     if !walk.noise_hints {
         return false;
     }
-    let hint = format!("{} {}", v.id().unwrap_or(""), v.attr("class").unwrap_or(""));
     // Token match, not substring, so `navigator`, `header-image`, and `shareholder` are no
     // longer chrome. See `hint`. A token that *is* a hint on a content container (one wire
     // service names its story cards `PagePromo`) is the ratio guard's job, in
-    // `root_candidates`.
-    crate::hint::matches(&hint, NOISE_HINT)
+    // `root_candidates`. The two attributes go in as they are: this is asked of every element of
+    // every walk, and building one string to hold them was an allocation per element per walk.
+    let hinted = crate::hint::matches_in(
+        &[v.id().unwrap_or(""), v.attr("class").unwrap_or("")],
+        NOISE_HINT,
+    );
+    // Counted here and nowhere else, because this is the only line the two walks disagree on.
+    if hinted && let Some(drops) = walk.hint_drops {
+        drops.set(drops.get() + 1);
+    }
+    hinted
 }
 
 /// Is this element chrome, or inside chrome, by the same tags and hints the walker drops?
 /// The thread and card detectors read the raw tree, so a "related stories" block under a
 /// `related` container looked like four dated posts to them until they asked.
 pub(crate) fn in_chrome(el: &ElementRef) -> bool {
-    let base = Url::parse("https://x.invalid/").unwrap();
-    let walk = Walk::bare(&base);
+    let walk = Walk::bare(&DUMMY_BASE);
     std::iter::once(*el)
         .chain(el.ancestors().filter_map(ElementRef::wrap))
         .any(|e| is_noise(&e, &walk))
@@ -938,7 +1028,7 @@ pub(crate) fn in_chrome(el: &ElementRef) -> bool {
 fn inner_text(node: NodeRef<'_, Node>) -> String {
     let mut out = String::new();
     collect_text(node, &mut out);
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    crate::ir::normalize_ws(&out)
 }
 
 /// Iterative, like [`crate::reader::thread_tree`]'s traversal and for the same reason: the
@@ -992,7 +1082,7 @@ fn text_len(node: NodeRef<'_, Node>) -> usize {
 /// token count (`words`), and whether the run starts and ends on a word so an adjacent sibling
 /// knows whether to merge.
 #[derive(Clone, Copy, Default)]
-struct WsSummary {
+pub(crate) struct WsSummary {
     nonws: usize,
     words: usize,
     first_is_word: bool,
@@ -1012,7 +1102,7 @@ impl WsSummary {
         }
     }
 
-    fn text(t: &str) -> Self {
+    pub(crate) fn text(t: &str) -> Self {
         let mut nonws = 0;
         let mut words = 0;
         for w in t.split_whitespace() {
@@ -1030,7 +1120,7 @@ impl WsSummary {
 
     /// `a` then `b`. Their touching tokens merge into one word iff neither side has whitespace
     /// at the seam. The default value is the empty string and is the identity here.
-    fn concat(a: Self, b: Self) -> Self {
+    pub(crate) fn concat(a: Self, b: Self) -> Self {
         let merge = a.last_is_word && b.first_is_word;
         Self {
             nonws: a.nonws + b.nonws,
@@ -1050,7 +1140,7 @@ impl WsSummary {
     }
 
     /// Normalized length: tokens joined by single spaces, trimmed.
-    fn len(self) -> usize {
+    pub(crate) fn len(self) -> usize {
         if self.words == 0 {
             0
         } else {
@@ -1157,17 +1247,70 @@ fn build_text_metrics(html: &Html) -> TextMetrics {
 /// pathological page rather than blanking it.
 const MAX_DEPTH: usize = 256;
 
+/// The selectors this module parses from literals, parsed once.
+///
+/// `Selector::parse` is a CSS parse and several allocations, and most of these sat inside
+/// per-element code: the `li` selector ran once per list and the three in [`entry_from`] once
+/// per accepted story card, across up to thirteen block walks of one page. A selector built
+/// from a profile, a search shape, or a `meta` name is not here — those are not literals and
+/// are parsed where they are read.
+///
+/// `pub(crate)` because `cards` and `thread` parse the same three literals per group and per
+/// member; one table is the point.
+pub(crate) mod sel {
+    use scraper::Selector;
+    use std::sync::LazyLock;
+
+    /// `Selector` is `Sync` — a `servo_arc` of interned atoms, with the `nth`-index cache made
+    /// per match rather than held — but nothing in this crate proved it before these statics
+    /// existed. A failed assumption here should be a compile error, not a shared cache.
+    const _: fn() = || {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<Selector>();
+    };
+
+    macro_rules! sel {
+        ($($name:ident = $css:literal;)*) => {$(
+            pub(crate) static $name: LazyLock<Selector> =
+                LazyLock::new(|| Selector::parse($css).expect($css));
+        )*};
+    }
+
+    sel! {
+        A = "a";
+        IMG_PICTURE = "img, picture";
+        BODY = "body";
+        SCORED = "p, td, pre, blockquote, li, div, section, dd";
+        LI = "li";
+        IMG = "img";
+        FIGCAPTION = "figcaption";
+        SOURCE_SRC = "source[src]";
+        SOURCE_SRCSET = "source[srcset]";
+        A_HREF = "a[href]";
+        HEADING = "h1, h2, h3, h4, h5, h6";
+        TR = "tr";
+        CELL = "th, td";
+        TITLE = "title";
+        LINK_REL = "link[rel][href]";
+        ARTICLE = "article";
+        MAIN = "main";
+        ROLE_MAIN = "[role=main]";
+    }
+}
+
+/// The base a root candidate's blocks are measured under, and the one [`in_chrome`] walks with.
+///
+/// Neither reads it: emitted length does not depend on where a href resolves to, and chrome is a
+/// question about tags and class names. It is parsed once because it was being parsed per card
+/// parent and per sibling group.
+static DUMMY_BASE: std::sync::LazyLock<Url> =
+    std::sync::LazyLock::new(|| Url::parse("https://x.invalid/").expect("a literal URL"));
+
 /// Accepted cards inside accepted cards, past which the walk stops making entries. See
 /// `Walk::card_depth`.
 const MAX_CARD_NESTING: u8 = 3;
 
-/// Public entry point for the thread extractor, which builds blocks for one post.
-pub fn blocks_from_public(root: ElementRef<'_>, base: &Url) -> Vec<Block> {
-    blocks_from(root, &Walk::bare(base))
-}
-
-/// [`blocks_from_public`] with the class-name chrome hints off: how a feed entry's payload is
-/// read.
+/// The block walk with the class-name chrome hints off: how a feed entry's payload is read.
 ///
 /// The hints exist to drop nav, promo, and footer subtrees out of a **whole page**, where a
 /// `share`, `promo`, or `related` class names something wrapped *around* the content. A feed
@@ -1181,8 +1324,8 @@ pub fn blocks_from_public_unhinted(root: ElementRef<'_>, base: &Url) -> Vec<Bloc
     blocks_from(root, &Walk::without_hints(base))
 }
 
-/// [`blocks_from_public`] that does not enter the subtrees in `skip`: how a post's body is
-/// read when its replies nest inside it.
+/// The block walk that does not enter the subtrees in `skip`: how a post's body is read when
+/// its replies nest inside it.
 pub fn blocks_from_skipping(
     root: ElementRef<'_>,
     base: &Url,
@@ -1217,6 +1360,11 @@ pub struct Walk<'a> {
     /// Subtrees not to enter: a post's body stops at the replies nested inside it, which are
     /// posts of their own.
     skip: Option<&'a std::collections::HashSet<ego_tree::NodeId>>,
+    /// How many subtrees this walk dropped *because a hint named them*, as opposed to because
+    /// of their tag. [`blocks_guarded`] reads it to decide whether the second, unhinted walk can
+    /// tell it anything; see there. A shared `Cell` rather than a field, so `Walk` stays `Copy`
+    /// and the counter survives the `..*walk` copies the walkers make of it.
+    hint_drops: Option<&'a std::cell::Cell<usize>>,
 }
 
 impl<'a> Walk<'a> {
@@ -1227,6 +1375,13 @@ impl<'a> Walk<'a> {
             card_depth: 0,
             cards: None,
             skip: None,
+            hint_drops: None,
+        }
+    }
+    fn counting_hints(self, drops: &'a std::cell::Cell<usize>) -> Self {
+        Self {
+            hint_drops: Some(drops),
+            ..self
         }
     }
     fn without_hints(base: &'a Url) -> Self {
@@ -1357,9 +1512,9 @@ fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, d
             }
             "ul" | "ol" => {
                 let ordered = name == "ol";
-                let li = Selector::parse("li").unwrap();
+                let li = &*sel::LI;
                 let items: Vec<Vec<Block>> = el
-                    .select(&li)
+                    .select(li)
                     .filter(|l| l.parent().map(|p| p.id()) == Some(child.id()))
                     .filter(|l| !walk.skips(l.id()))
                     .map(|l| {
@@ -1423,15 +1578,15 @@ fn walk_blocks(node: NodeRef<'_, Node>, walk: &Walk<'_>, out: &mut Vec<Block>, d
                 }
             }
             "figure" => {
-                let img_sel = Selector::parse("img").unwrap();
-                let cap_sel = Selector::parse("figcaption").unwrap();
+                let img_sel = &*sel::IMG;
+                let cap_sel = &*sel::FIGCAPTION;
                 if let Some(img) = el
-                    .select(&img_sel)
+                    .select(img_sel)
                     .next()
                     .and_then(|i| image_from(&i, walk.base))
                 {
                     let caption = el
-                        .select(&cap_sel)
+                        .select(cap_sel)
                         .next()
                         .map(|c| inlines_from(*c, walk, depth + 2))
                         .filter(|c| !c.is_empty());
@@ -1547,15 +1702,11 @@ fn embed_from(el: &ElementRef, walk: &Walk<'_>) -> Option<Block> {
         "audio" => crate::ir::EmbedKind::Audio,
         _ => crate::ir::EmbedKind::Iframe,
     };
-    let source = Selector::parse("source[src]").ok()?;
+    let source = &*sel::SOURCE_SRC;
     let raw = el
         .value()
         .attr("src")
-        .or_else(|| {
-            el.select(&source)
-                .next()
-                .and_then(|s| s.value().attr("src"))
-        })
+        .or_else(|| el.select(source).next().and_then(|s| s.value().attr("src")))
         .filter(|s| !s.trim().is_empty() && !s.starts_with("data:") && !s.starts_with("about:"))?;
     let url = walk.base.join(raw).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
@@ -1572,11 +1723,11 @@ fn embed_from(el: &ElementRef, walk: &Walk<'_>) -> Option<Block> {
 /// the anchor; the summary is the rest of the card, minus the headline, the thumbnail, and
 /// anything shorter than a headline (a kicker, a read time, a date, which `published` keeps).
 fn entry_from(card: &ElementRef, walk: &Walk<'_>, depth: usize) -> Option<crate::ir::Entry> {
-    let a = Selector::parse("a[href]").unwrap();
-    let h = Selector::parse("h1, h2, h3, h4, h5, h6").unwrap();
-    let img = Selector::parse("img").unwrap();
+    let a = &*sel::A_HREF;
+    let h = &*sel::HEADING;
+    let img = &*sel::IMG;
     let longest = card
-        .select(&a)
+        .select(a)
         .map(|l| (text_len(*l), l))
         .max_by_key(|(n, _)| *n);
     let own_href = (card.value().name() == "a")
@@ -1588,7 +1739,7 @@ fn entry_from(card: &ElementRef, walk: &Walk<'_>, depth: usize) -> Option<crate:
         .and_then(|raw| walk.base.join(raw).ok())
         .map(|u| u.to_string());
     let heading = card
-        .select(&h)
+        .select(h)
         .find(|e| text_len(**e) >= crate::cards::MIN_HEADLINE);
     // A card that is itself the anchor, with no link inside it, titles itself.
     let title_el = heading
@@ -1600,7 +1751,7 @@ fn entry_from(card: &ElementRef, walk: &Walk<'_>, depth: usize) -> Option<crate:
         return None;
     }
     let published = crate::thread::find_hint(card, crate::thread::TIME_HINT);
-    let image = card.select(&img).find_map(|i| image_from(&i, walk.base));
+    let image = card.select(img).find_map(|i| image_from(&i, walk.base));
     // The card's own blocks, at this depth and not from zero: an accepted card list can sit
     // inside an accepted card (a lead package), and restarting the count at each one let a
     // page of nested triplets walk past `MAX_DEPTH` and off the end of the stack. One level
@@ -1769,10 +1920,12 @@ fn flush_pending(pending: &mut Vec<Inline>, out: &mut Vec<Block>, walk: &Walk<'_
     // A short run of links into the page itself ("Skip to content", a "close" button with
     // `href="#"`) is a control, not prose. A table of contents is a list, and list items
     // do not come through here.
-    if inlines_len(&inl) <= MIN_LOOSE_TEXT && all_same_document_links(&inl, walk.base) {
+    if crate::ir::inlines_text_len(&inl) <= MIN_LOOSE_TEXT
+        && all_same_document_links(&inl, walk.base)
+    {
         return;
     }
-    if inlines_len(&inl) > MIN_LOOSE_TEXT || inl.iter().any(has_link) {
+    if crate::ir::inlines_text_len(&inl) > MIN_LOOSE_TEXT || inl.iter().any(has_link) {
         out.push(Block::Paragraph(inl));
     }
 }
@@ -1909,17 +2062,6 @@ fn has_link(i: &Inline) -> bool {
         Inline::Emph(v) | Inline::Strong(v) => v.iter().any(has_link),
         _ => false,
     }
-}
-
-fn inlines_len(v: &[Inline]) -> usize {
-    v.iter()
-        .map(|i| match i {
-            Inline::Text(s) | Inline::Code(s) => s.len(),
-            Inline::Emph(x) | Inline::Strong(x) => inlines_len(x),
-            Inline::Link { inlines, .. } => inlines_len(inlines),
-            _ => 0,
-        })
-        .sum()
 }
 
 fn inlines_from(node: NodeRef<'_, Node>, walk: &Walk<'_>, depth: usize) -> Vec<Inline> {
@@ -2109,9 +2251,9 @@ fn image_from(el: &ElementRef, base: &Url) -> Option<Image> {
             if parent.value().name() != "picture" {
                 return None;
             }
-            let source = Selector::parse("source[srcset]").ok()?;
+            let source = &*sel::SOURCE_SRCSET;
             parent
-                .select(&source)
+                .select(source)
                 .find_map(|s| s.value().attr("srcset").and_then(first_of_srcset))
         })?;
     let src = base.join(raw).ok()?;
@@ -2165,18 +2307,15 @@ fn first_of_srcset(srcset: &str) -> Option<&str> {
 /// `Alice`, and every row after it contributed its `<td>`s and dropped its `<th>`. Cells are
 /// collected in document order with one selector so a mixed row keeps its shape.
 fn table_from(el: &ElementRef, walk: &Walk<'_>, depth: usize) -> Option<Block> {
-    let tr = Selector::parse("tr").ok()?;
-    let cell = Selector::parse("th, td").ok()?;
+    let tr = &*sel::TR;
+    let cell = &*sel::CELL;
     let mut headers: Vec<Vec<Inline>> = Vec::new();
     let mut rows: Vec<Vec<Vec<Inline>>> = Vec::new();
     // Descendant selectors reach *through* nested tables, so every cell of an inner table
     // would be emitted once for each enclosing table. Keep only cells this table owns.
-    for row in el
-        .select(&tr)
-        .filter(|r| owning_table(**r) == Some(el.id()))
-    {
+    for row in el.select(tr).filter(|r| owning_table(**r) == Some(el.id())) {
         let cells: Vec<(bool, Vec<Inline>)> = row
-            .select(&cell)
+            .select(cell)
             .filter(|c| owning_row(**c) == Some(row.id()))
             .map(|c| (c.value().name() == "th", inlines_from(*c, walk, depth + 1)))
             .collect();
@@ -2221,8 +2360,8 @@ fn nearest_ancestor(node: NodeRef<'_, Node>, names: &[&str]) -> Option<ego_tree:
 
 /// The `<title>` element's text, which is the fallback behind `og:title`.
 fn title_element(html: &Html) -> Option<String> {
-    let sel = Selector::parse("title").ok()?;
-    html.select(&sel)
+    let sel = &*sel::TITLE;
+    html.select(sel)
         .next()
         .map(|e| inner_text(*e))
         .filter(|s| !s.is_empty())
@@ -2252,11 +2391,8 @@ fn meta_attr(html: &Html, name: &str) -> Option<String> {
 /// `/favicon.ico` fallback. SVG is skipped when a raster alternative exists: this crate
 /// deliberately does not decode SVG. `data:` hrefs are skipped the same way image `src` is.
 fn favicon_of(html: &Html, base: &Url) -> (Option<String>, &'static str) {
-    let Ok(sel) = Selector::parse("link[rel][href]") else {
-        return (None, "none");
-    };
     let mut best: Option<(i32, u32, String)> = None;
-    for el in html.select(&sel) {
+    for el in html.select(&sel::LINK_REL) {
         let rel = el.value().attr("rel").unwrap_or("");
         if !is_icon_rel(rel) {
             continue;
@@ -2864,6 +3000,122 @@ mod tests {
             .join()
             .expect("extraction unwound");
         assert!(elapsed.as_secs() < 10, "extraction took {elapsed:?}");
+    }
+
+    /// The skipped second walk would have produced what the first one did.
+    ///
+    /// `blocks_guarded` returns the hinted result unread when no hint dropped anything, on the
+    /// argument that the two walks differ on one line. That is only true if the counter sees
+    /// every place that line is reached, and the walker reaches it twice: once for a block
+    /// child and once for an inline one. A page whose only hinted element sits inside a
+    /// paragraph is the case a counter wired to `walk_blocks` alone would get wrong — it would
+    /// report zero drops, take the shortcut, and hand back a document with the hinted span still
+    /// in it.
+    ///
+    /// Each fixture is compared against the two-walk answer computed here, so this pins the
+    /// equivalence rather than a remembered output.
+    #[test]
+    fn skipping_the_unhinted_walk_changes_nothing() {
+        let prose = "Twenty five plus characters of prose, enough to clear the floors that the \
+                     walkers apply to a loose run of text.";
+        let cases = [
+            // Nothing hinted: the shortcut fires.
+            format!("<div id=root><p>{prose}</p><p>{prose}</p></div>"),
+            // A hinted block child: the shortcut must not fire.
+            format!("<div id=root><p>{prose}</p><aside class=share>{prose}</aside></div>"),
+            // A hinted *inline* child, reached through the flatten rather than through
+            // `walk_blocks`. This is the one that catches a half-wired counter.
+            format!("<div id=root><p>{prose} <span class=share>skip me</span></p></div>"),
+            // A hint that eats most of the root, which is what the guard exists for.
+            format!("<div id=root><div class=promo><p>{prose}</p><p>{prose}</p></div></div>"),
+            // Chrome by tag rather than by hint: dropped in both walks, counted in neither.
+            format!("<div id=root><p>{prose}</p><nav><p>{prose}</p></nav></div>"),
+        ];
+        let base = Url::parse("https://example.com/a").unwrap();
+        let cards = crate::cards::CardMap::new();
+        for body in cases {
+            let html = Html::parse_document(&format!("<html><body>{body}</body></html>"));
+            let root = html
+                .select(&Selector::parse("#root").unwrap())
+                .next()
+                .expect("the fixture has a root");
+
+            let with = blocks_from(root, &Walk::bare(&base).cards(&cards));
+            let without = blocks_from(root, &Walk::without_hints(&base).cards(&cards));
+            let want = if block_text(&without) > 2 * block_text(&with) {
+                (without, true)
+            } else {
+                (with, false)
+            };
+
+            let got = blocks_guarded(root, &base, &cards);
+            assert_eq!(got.1, want.1, "hints_off differs on {body}");
+            assert_eq!(
+                crate::render::to_text(
+                    &Document {
+                        url: String::new(),
+                        title: None,
+                        byline: None,
+                        published: None,
+                        site_name: None,
+                        favicon: None,
+                        lang: None,
+                        blocks: got.0,
+                    },
+                    &crate::render::TextOpts::default()
+                ),
+                crate::render::to_text(
+                    &Document {
+                        url: String::new(),
+                        title: None,
+                        byline: None,
+                        published: None,
+                        site_name: None,
+                        favicon: None,
+                        lang: None,
+                        blocks: want.0,
+                    },
+                    &crate::render::TextOpts::default()
+                ),
+                "blocks differ on {body}"
+            );
+        }
+    }
+
+    /// Root selection has to answer the same way twice.
+    ///
+    /// `score_best` reads its scores out of a `HashMap`, whose iteration order is seeded per
+    /// process, and `max_by` keeps the last maximum it sees. A page whose containers score
+    /// equally therefore chose its root by hash order: the chain above extracted 53k, 107k, and
+    /// 168k characters on three consecutive runs of one binary, and a reader reloading a page
+    /// could be handed a different article each time. The tie-break in `score_best` is what
+    /// closes that, and this pins which way it goes — the outer container, which is the one
+    /// `choose_root` prefers on the emitted-text ranking that follows.
+    ///
+    /// One process cannot observe the randomness (a map with the same contents iterates the same
+    /// way all run), so this asserts the *rule* rather than trying to catch the flake.
+    #[test]
+    fn a_score_tie_is_broken_toward_the_outer_container() {
+        // A chain of wrappers each carrying its own prose, which is the shape that ties: every
+        // `<div>` is a scored element in its own right, and each credits its parent fully, its
+        // grandparent at half, and its great-grandparent at a quarter. `a`, `b`, and the chain's
+        // outermost wrapper all collect 1.75 shares; `c` collects 1.5 and `d` one.
+        let prose = "Twenty five plus characters of prose, enough that this wrapper clears the \
+                     scoring floor on its own text.";
+        let mut src = String::from("<html><body><div id=top>");
+        for id in ["a", "b", "c", "d"] {
+            src.push_str(&format!("<div id={id}>{prose}"));
+        }
+        src.push_str(&"</div>".repeat(4));
+        src.push_str("</div></body></html>");
+
+        let why = explain(&src, &Url::parse("https://example.com/a").unwrap());
+        let winner = why.winner.expect("a root was chosen");
+        assert_eq!(
+            why.candidates[winner].id.as_deref(),
+            Some("top"),
+            "the outermost of the tied containers wins: {why}"
+        );
     }
 
     /// Row-header tables (infoboxes, spec sheets) put a `<th>` and a `<td>` in the same row.

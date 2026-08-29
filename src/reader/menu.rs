@@ -318,7 +318,16 @@ pub struct Menu {
 /// Five menus rather than the conventional four. `History` earns its place because Back and
 /// Forward have no natural home among `File`, `Edit`, `View` and `Help`, and every browser with
 /// a menu bar puts them under this title.
-pub fn bar() -> Vec<Menu> {
+/// Built once. Every field in the table is a `&'static str` or a fieldless `Copy` enum, and
+/// `keyspec` is a `cfg`-selected module of constants rather than anything read at runtime, so
+/// there is nothing here that a second call could answer differently. It was six `Vec`
+/// allocations per frame the bar was drawn, which is every frame.
+pub fn bar() -> &'static [Menu] {
+    static BAR: std::sync::LazyLock<Vec<Menu>> = std::sync::LazyLock::new(build);
+    &BAR
+}
+
+fn build() -> Vec<Menu> {
     use Command as C;
     use Needs as N;
     vec![
@@ -625,8 +634,8 @@ mod tests {
     use super::*;
     use crate::reader::prefs;
 
-    fn items() -> Vec<Item> {
-        bar().into_iter().flat_map(|m| m.items).collect()
+    fn items() -> Vec<&'static Item> {
+        bar().iter().flat_map(|m| &m.items).collect()
     }
 
     fn commands() -> Vec<Command> {
@@ -820,13 +829,13 @@ mod tests {
         let mut strings: Vec<String> = vec![SUBMENU_MARKER.to_owned()];
         for m in bar() {
             strings.push(m.title.to_owned());
-            for i in m.items {
+            for i in &m.items {
                 match i {
                     Item::Run { label, keys, .. } | Item::Check { label, keys, .. } => {
-                        strings.push(label.to_owned());
-                        strings.push(keys.to_owned());
+                        strings.push((*label).to_owned());
+                        strings.push((*keys).to_owned());
                     }
-                    Item::Radio { label, .. } => strings.push(label.to_owned()),
+                    Item::Radio { label, .. } => strings.push((*label).to_owned()),
                     Item::Separator => {}
                 }
             }
@@ -854,7 +863,7 @@ mod tests {
     #[test]
     fn menu_labels_follow_the_convention() {
         for m in bar() {
-            for i in m.items {
+            for i in &m.items {
                 let label = match i {
                     Item::Run { label, .. }
                     | Item::Check { label, .. }

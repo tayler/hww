@@ -589,7 +589,8 @@ impl Archive {
     /// `article` as two different keeps and the menu's check mark goes off when the reader
     /// follows an anchor within the page they just saved.
     pub fn is_bookmarked(&self, url: &Url) -> bool {
-        self.bookmarks().any(|i| same_page(&i.url, url))
+        let target = without_fragment(url);
+        self.bookmarks().any(|i| same_page(&i.url, &target))
     }
 
     /// Whether this address is already on the reading list, fragment ignored.
@@ -600,7 +601,8 @@ impl Archive {
     /// `Shift+L` would refuse a link because the page was in the bookmarks. The kind is the whole
     /// question here, so it is in the name rather than in an argument.
     pub fn holds_next(&self, url: &Url) -> bool {
-        self.read_next().any(|i| same_page(&i.url, url))
+        let target = without_fragment(url);
+        self.read_next().any(|i| same_page(&i.url, &target))
     }
 
     /// Keep one page, if the reader's settings allow it. **The one door.**
@@ -685,10 +687,7 @@ impl Archive {
         if !settings.keep_reading_list {
             return Stored::Off;
         }
-        if !matches!(url.scheme(), "http" | "https")
-            || !url.username().is_empty()
-            || url.password().is_some()
-        {
+        if refuses(url) {
             return Stored::Refused;
         }
         self.add_next_at(url, title, now())
@@ -728,8 +727,9 @@ impl Archive {
     /// list at the same address, and taking it off the list must not un-keep it.
     pub fn forget_next(&mut self, url: &Url) -> bool {
         let before = self.items.len();
+        let target = without_fragment(url);
         self.items
-            .retain(|i| !(i.kind == Kind::ReadNext && same_page(&i.url, url)));
+            .retain(|i| !(i.kind == Kind::ReadNext && same_page(&i.url, &target)));
         self.items.len() != before
     }
 
@@ -738,8 +738,9 @@ impl Archive {
     /// something else about the same address.
     pub fn forget(&mut self, url: &Url) -> bool {
         let before = self.items.len();
+        let target = without_fragment(url);
         self.items
-            .retain(|i| !(i.kind == Kind::Bookmark && same_page(&i.url, url)));
+            .retain(|i| !(i.kind == Kind::Bookmark && same_page(&i.url, &target)));
         self.items.len() != before
     }
 
@@ -772,11 +773,7 @@ impl Archive {
         if !settings.keep_history {
             return Visited::Off;
         }
-        if !matches!(url.scheme(), "http" | "https")
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.as_str().len() > MAX_URL
-        {
+        if refuses(url) || url.as_str().len() > MAX_URL {
             return Visited::Refused;
         }
         self.visit_at(url, title, now());
@@ -787,8 +784,9 @@ impl Archive {
     fn visit_at(&mut self, url: &Url, title: Option<&str>, at: u64) {
         // The kind is part of the match: a page that is both kept and visited is two items, and
         // recording a visit must not move, restamp, or retitle the entry the reader chose.
+        let target = without_fragment(url);
         self.items
-            .retain(|i| !(i.kind == Kind::Visited && same_page(&i.url, url)));
+            .retain(|i| !(i.kind == Kind::Visited && same_page(&i.url, &target)));
         self.items.push(Item {
             url: url.to_string(),
             title: cap_title(title.unwrap_or_default()),
@@ -1121,16 +1119,46 @@ pub fn icon_address(icon: &str) -> Option<String> {
     icon_to_store(icon)
 }
 
+/// The address the two unasked-for tenants refuse: a non-web scheme, or a credential.
+///
+/// One predicate, and still asked inside each door rather than at either caller — the module doc
+/// is explicit that a door guarded at one caller is a door guarded nowhere, and this changes
+/// where the rule is *written*, not where it is applied. [`Archive::visit`] adds a length of its
+/// own on top, which is why that half is not in here.
+///
+/// Deliberately not shared with `sites::apply_in`, which spells the two halves as separate `if`s
+/// because they are separate reasons (gemini and gopher pass through untouched; a credential is
+/// an auth boundary), nor with [`icon_to_store`], which *strips* a credential rather than
+/// refusing the address. Three doors, three answers; merging them would erase two of them.
+fn refuses(url: &Url) -> bool {
+    !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+}
+
 /// Whether a stored address and a live one are the same page, fragment aside.
 ///
-/// A stored address that will not parse is compared as text. It cannot have come from
-/// [`Archive::bookmark`], which is handed a `Url`, so this is the hand-edited case, and refusing to
-/// match it at all would let the same page be kept twice.
-fn same_page(stored: &str, url: &Url) -> bool {
-    match Url::parse(stored) {
-        Ok(s) => without_fragment(&s) == without_fragment(url),
-        Err(_) => stored == url.as_str(),
-    }
+/// `target` is [`without_fragment`] of the address being asked about, computed once by the
+/// caller. **This is a byte comparison, and that is a decision rather than an oversight.**
+///
+/// It used to `Url::parse` the stored string, strip its fragment, and compare the two
+/// normalized forms — per item, and the items are all three tenants in one vector. A navigation
+/// asks it of every visited row and then of every bookmark, which at the caps is seven thousand
+/// URL parses and fourteen thousand allocations on the frame a page installs; `Ctrl+D` asked
+/// three times over. Every string this build stores came out of `Url::to_string`
+/// ([`Archive::bookmark`], [`Archive::add_next`], [`Archive::visit_at`]), and `url` percent-
+/// encodes `#` everywhere but the fragment delimiter, so the text before the first `#` *is* the
+/// normalized fragment-stripped form and comparing bytes gives the same answer.
+///
+/// What it gives a different answer for is an entry no version of hww wrote: a hand-edited
+/// `archive.json`, which `settings::archive_path` documents as the way to carry a 0.3
+/// `library.json` across the rename. `HTTP://Example.COM/a` matched under the parse and does not
+/// match here, so such a row can be bookmarked twice or gain a second history line instead of
+/// having its first moved. That is the whole cost, it is confined to a file the reader edited by
+/// hand, and `same_page_is_the_parse_it_replaced` pins the agreement for every shape hww itself
+/// writes.
+fn same_page(stored: &str, target: &str) -> bool {
+    stored.split_once('#').map_or(stored, |(head, _)| head) == target
 }
 
 fn without_fragment(url: &Url) -> String {
@@ -1139,12 +1167,28 @@ fn without_fragment(url: &Url) -> String {
     u.into()
 }
 
+/// Whether two live addresses are the same page, fragment aside.
+///
+/// The other half of [`same_page`], for a caller holding two `Url`s rather than a stored string:
+/// `ReaderApp::same_page` asks it of the address a link names and the address of the page on
+/// screen, which is a different question from what this module stores but the same comparison,
+/// and it was spelled out a second time there. No parse and no `String`, because neither side
+/// needs one — `Url` compares its own parts.
+pub fn same_page_urls(a: &Url, b: &Url) -> bool {
+    let strip = |u: &Url| {
+        let mut u = u.clone();
+        u.set_fragment(None);
+        u
+    };
+    strip(a) == strip(b)
+}
+
 /// Truncate to [`MAX_TITLE`] characters, with an ellipsis when anything was dropped.
 ///
 /// Whitespace is collapsed first: a `<title>` split over three indented lines of markup arrives
 /// carrying its newlines, and a stored title is a single line in a list.
 fn cap_title(title: &str) -> String {
-    let flat: String = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = crate::ir::normalize_ws(title);
     if flat.chars().count() <= MAX_TITLE {
         return flat;
     }
@@ -1327,6 +1371,72 @@ mod tests {
         assert_eq!(item.url, "https://example.com/a");
         assert_eq!(item.title, "A page");
         assert_eq!(item.kind, Kind::Bookmark);
+    }
+
+    /// The byte comparison answers as the parse did, for every address hww writes.
+    ///
+    /// [`same_page`] stopped parsing the stored string, which is only sound because every string
+    /// this build stores came from `Url::to_string`. So the test is the claim: for each shape,
+    /// store the address the way the doors do and check the new comparison against the old one,
+    /// both for the address itself and for the same address wearing a fragment.
+    ///
+    /// The one case they disagree on is deliberate and is asserted last: an entry hand-written
+    /// into `archive.json`, which is the only way a non-normalized string can get in.
+    #[test]
+    fn same_page_is_the_parse_it_replaced() {
+        /// What [`same_page`] used to be.
+        fn by_parse(stored: &str, url: &Url) -> bool {
+            match Url::parse(stored) {
+                Ok(s) => without_fragment(&s) == without_fragment(url),
+                Err(_) => stored == url.as_str(),
+            }
+        }
+        let shapes = [
+            "https://example.com/a",
+            "https://EXAMPLE.com/A",
+            "https://example.com:443/a",
+            "http://example.com:80/a",
+            "https://example.com",
+            "https://example.com/",
+            "https://example.com/a%20b/c",
+            "https://example.com/a?",
+            "https://example.com/a?q=1&r=2",
+            "https://example.com/a#",
+            "https://example.com/a#frag",
+            "https://example.com/%D7%A9%D7%9C%D7%95%D7%9D",
+            "https://xn--80ak6aa92e.com/a",
+            "https://example.com/a/../b",
+            "https://user@example.com/a",
+        ];
+        for shape in shapes {
+            let url = Url::parse(shape).expect("a fixture URL parses");
+            // Stored the way every door stores it.
+            let stored = url.to_string();
+            for probe in [shape.to_owned(), format!("{}#later", url.as_str())] {
+                let Ok(probe) = Url::parse(&probe) else {
+                    continue;
+                };
+                let target = without_fragment(&probe);
+                assert_eq!(
+                    same_page(&stored, &target),
+                    by_parse(&stored, &probe),
+                    "{stored} against {probe}"
+                );
+                assert!(same_page(&stored, &target), "{stored} is {probe}");
+            }
+            // And a different page is still a different page.
+            let other = Url::parse("https://example.net/z").unwrap();
+            assert!(!same_page(&stored, &without_fragment(&other)));
+        }
+
+        // The documented divergence, in the one place it can arise: a row somebody typed.
+        let hand_edited = "HTTPS://Example.COM/a";
+        let live = Url::parse("https://example.com/a").unwrap();
+        assert!(by_parse(hand_edited, &live), "the parse matched it");
+        assert!(
+            !same_page(hand_edited, &without_fragment(&live)),
+            "and the byte comparison does not; see `same_page`"
+        );
     }
 
     /// The `settings::load` contract, one file over: never fatal, always a reason.

@@ -16,6 +16,7 @@ mod prefs_ui;
 pub mod theme;
 mod thread_ui;
 
+use crate::reader::inline::{self, Run};
 use crate::reader::opts::ReadOpts;
 use crate::reader::settings::Settings;
 use crate::reader::thread_tree::CommentKey;
@@ -132,8 +133,19 @@ pub struct RenderCtx<'a> {
     /// The window the reading column may skip outside of, or `None` when this block is laid
     /// out whole. Consulted by `thread_ui`, which skips comment by comment inside one block.
     pub band: Option<crate::reader::measure::Band>,
-    /// Which top-level block is being drawn, the first half of a comment-height key.
-    pub block: usize,
+    /// Which top-level block is being drawn, the first half of a comment- or entry-height key,
+    /// and the key `RenderCtx::threads` is looked up by.
+    ///
+    /// **`None` means "not a top-level block", and every consumer has to say what it does with
+    /// that.** `blocks_ui` clears it for the length of a nested run, because the three things
+    /// keyed by it are all keyed by *document position* and a nested run has none: `Block::List`
+    /// items, `Block::Quote` bodies, `Entry::summary` and a comment's own blocks all recurse
+    /// through it, and `html::summary_of` really does pass a `Block::Entries` into an
+    /// `Entry::summary`. Left set, a nested run of entries would restart at `row = 0` and
+    /// overwrite the outer run's heights under the outer run's key — which `remember` reads as a
+    /// relayout and answers by throwing the whole table away, every frame. A nested thread would
+    /// be handed the containing block's tree, or no tree at all.
+    pub block: Option<usize>,
     /// Where `ImagePolicy::Auto` may fetch, or `None` under every other policy.
     ///
     /// Deliberately not [`RenderCtx::band`], which is `None` whenever a block is laid out
@@ -159,6 +171,11 @@ pub struct RenderCtx<'a> {
     pub icon_srcs: Vec<String>,
     /// The comment heights for the frame, lent by `measure::Heights`.
     pub comment_heights: HashMap<(usize, usize), f32>,
+    /// The entry-row heights for the frame, lent the same way.
+    pub entry_heights: HashMap<(usize, usize), f32>,
+    /// The comment tree of each `ir::Block::Thread`, by top-level block index, built once with
+    /// the page. Borrowed rather than lent: unlike the height tables nothing writes it.
+    pub threads: &'a HashMap<usize, crate::reader::thread_tree::ThreadTree>,
 }
 
 impl RenderCtx<'_> {
@@ -168,6 +185,7 @@ impl RenderCtx<'_> {
         base: Url,
         images: &'a mut images::ImageStore,
         collapsed: &'a HashSet<CommentKey>,
+        threads: &'a HashMap<usize, crate::reader::thread_tree::ThreadTree>,
     ) -> RenderCtx<'a> {
         RenderCtx {
             pal,
@@ -175,6 +193,7 @@ impl RenderCtx<'_> {
             base,
             images,
             collapsed,
+            threads,
             find: String::new(),
             find_current: 0,
             find_seen: 0,
@@ -194,12 +213,13 @@ impl RenderCtx<'_> {
             focus_other: false,
             reading_list: false,
             band: None,
-            block: 0,
+            block: None,
             autoload_band: None,
             autoload_srcs: Vec::new(),
             icon_band: None,
             icon_srcs: Vec::new(),
             comment_heights: HashMap::new(),
+            entry_heights: HashMap::new(),
         }
     }
 
@@ -267,6 +287,37 @@ impl RenderCtx<'_> {
         if self.find.is_empty() {
             return;
         }
+        self.scan(plain);
+    }
+
+    /// [`Self::begin_list`] for a run list whose plain text has not been built yet.
+    ///
+    /// Which is the point: `inline::plain_of` is a `String` per run plus the concatenation, and
+    /// the caller was paying it on every run list of every page on every frame to hand it to a
+    /// function that returns immediately unless the find bar is open. The bookkeeping above the
+    /// early return still has to happen either way — `find_base` is what makes the
+    /// current-match index in `split_by_matches` mean anything — so this is the same two lines
+    /// and a build that is skipped, not a call that is.
+    pub fn begin_runs(&mut self, runs: &[Run]) {
+        self.find_ranges.clear();
+        self.find_base = self.find_seen;
+        if self.find.is_empty() {
+            return;
+        }
+        self.scan(&inline::plain_of(runs));
+    }
+
+    /// Whether the run list `begin_list`/`begin_runs` last looked at holds any match.
+    ///
+    /// Asked before `split_by_matches`, which answers "no matches" with a `Vec` holding the
+    /// whole text — an allocation per text run per frame for a page nobody is searching. Keyed
+    /// on the ranges and not on the query: a live search that hit nothing in *this* list is the
+    /// same single-section case.
+    pub fn has_matches(&self) -> bool {
+        !self.find_ranges.is_empty()
+    }
+
+    fn scan(&mut self, plain: &str) {
         let hay = plain.to_lowercase();
         // `to_lowercase` can change byte length, so a case-insensitive search over the folded
         // string cannot be trusted to give offsets into the original. When the fold is

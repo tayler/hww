@@ -21,18 +21,28 @@ use eframe::egui::{self, RichText, Ui};
 
 /// Render a block list. `first_block` is the index of `blocks[0]` in the document, so outline
 /// jumps and fragment scrolls can name a target; nested lists pass `None`.
+///
+/// **Every call to this is a nested run**, and clearing [`RenderCtx::block`] for the length of
+/// it is what says so: the reading column draws a top-level block by calling [`block_ui`]
+/// itself, and the four ways one block gets inside another — a list item, a quotation, an
+/// entry's summary, a comment's own body — all arrive here. See the field's own doc for what
+/// the three tables keyed by it would do with a nested run's rows.
 pub fn blocks_ui(
     ui: &mut Ui,
     blocks: &[ir::Block],
     ctx: &mut RenderCtx<'_>,
     scroll_to: Option<usize>,
 ) {
+    // Restored rather than left cleared: a run of blocks inside one top-level block is followed
+    // by the rest of that block, and `Block::Quote` puts one in the middle of a page.
+    let outer = ctx.block.take();
     for (i, b) in blocks.iter().enumerate() {
         let resp = ui.scope(|ui| block_ui(ui, b, ctx)).response;
         if scroll_to == Some(i) {
             resp.scroll_to_me(Some(egui::Align::TOP));
         }
     }
+    ctx.block = outer;
 }
 
 pub fn block_ui(ui: &mut Ui, b: &ir::Block, ctx: &mut RenderCtx<'_>) {
@@ -156,50 +166,135 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
         .iter()
         .any(|e| e.icon.is_some())
         .then(|| theme::snap(ctx.opts.base_size_pt * 1.25));
-    for e in entries {
+    // `None` inside a card's summary or a list item, and the window rule is off for the whole
+    // run when it is: the heights are keyed by top-level block, a nested run has no such index,
+    // and borrowing the containing block's would have the two runs overwriting each other's
+    // rows. Nothing is lost by laying a nested run out whole — it is a card's own body, held to
+    // `budget::lead_in` and to `html::MAX_CARD_NESTING`, not the five thousand rows of
+    // `hww:history` this rule exists for.
+    let keyed = ctx.block;
+    for (row, e) in entries.iter().enumerate() {
         ui.add_space(gap);
         ui.separator();
         ui.add_space(gap);
-        let Some(box_size) = icon else {
-            entry_ui(ui, e, ctx);
+        // The window rule, at the row: `hww:history` is one `Block::Entries` of up to five
+        // thousand rows, so the block-level skip in `ready_screen` can never fire for it — the
+        // block *is* the page. Without this, every row was laid out on every frame, each one a
+        // galley for its timestamp and a handful of allocations for its headline, and scrolling
+        // a full history did that work five thousand times over.
+        //
+        // The rule is `thread_ui`'s, with the same shape and the same three guards: the gaps and
+        // the hairline above are laid out either way so the rows sit where they sat, `ctx.band`
+        // is `None` whenever the page is being laid out whole (find, Tab, selection, AccessKit),
+        // and a row with no remembered height is drawn. `note_icon` reads the cursor, so a
+        // skipped row has to claim its space rather than collapse — `allocate_space`, not
+        // `add_space`.
+        let y = ui.next_widget_position().y;
+        let skip = keyed
+            .zip(ctx.band)
+            .and_then(|(block, band)| {
+                ctx.entry_heights
+                    .get(&(block, row))
+                    .copied()
+                    .map(|h| (band, h))
+            })
+            .and_then(|(band, h)| band.skips(y, h).then_some(h));
+        // What is allocated back is the row's own height, which is not the same number as its
+        // rect: see [`remember`], which is where that is measured and argued.
+        if let Some(h) = skip {
+            ui.allocate_space(egui::vec2(0.0, h));
             continue;
-        };
-        // Two columns: the mark, then everything the row says. The gutter is the mark plus the
-        // same space the time is given at the other end of the headline, and the right-hand
-        // column is a `Ui` of its own so the headline, the address, and the dek wrap and align
-        // to it rather than to the page — which is what keeps them in the relationship to each
-        // other they have in a list with no marks in it.
-        let pad = theme::snap(ctx.opts.base_size_pt * 0.8);
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            let avail = ui.available_width();
-            ui.allocate_ui_with_layout(
-                egui::vec2(box_size, box_size),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| match &e.icon {
-                    Some(src) => super::images::site_icon(ui, src, box_size, ctx),
-                    // A row in a marked run that has no mark of its own — a page kept before
-                    // this column existed, or one whose site named an icon hww will not
-                    // request. The space is claimed anyway, because
-                    // `allocate_ui_with_layout` advances the cursor by what its contents
-                    // *used*: a closure that draws nothing is zero wide, and that row's
-                    // headline would start where the marks are.
-                    None => {
-                        ui.allocate_space(egui::vec2(box_size, box_size));
-                    }
-                },
-            );
-            // `add_space` and not a wider allocation: `allocate_ui_with_layout` hands back the
-            // space its contents *used*, so a gutter padded from the inside collapses onto the
-            // mark and the two columns touch.
-            ui.add_space(pad);
-            ui.allocate_ui_with_layout(
-                egui::vec2((avail - box_size - pad).max(avail * 0.5), 0.0),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| entry_ui(ui, e, ctx),
-            );
-        });
+        }
+        {
+            let Some(box_size) = icon else {
+                entry_ui(ui, e, ctx);
+                remember(ui, ctx, keyed, row, y);
+                continue;
+            };
+            // Two columns: the mark, then everything the row says. The gutter is the mark
+            // plus the same space the time is given at the other end of the headline, and
+            // the right-hand column is a `Ui` of its own so the headline, the address, and
+            // the dek wrap and align to it rather than to the page — which is what keeps
+            // them in the relationship to each other they have in a list with no marks in
+            // it.
+            let pad = theme::snap(ctx.opts.base_size_pt * 0.8);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let avail = ui.available_width();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(box_size, box_size),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| match &e.icon {
+                        Some(src) => super::images::site_icon(ui, src, box_size, ctx),
+                        // A row in a marked run that has no mark of its own — a page kept before
+                        // this column existed, or one whose site named an icon hww will not
+                        // request. The space is claimed anyway, because
+                        // `allocate_ui_with_layout` advances the cursor by what its contents
+                        // *used*: a closure that draws nothing is zero wide, and that row's
+                        // headline would start where the marks are.
+                        None => {
+                            ui.allocate_space(egui::vec2(box_size, box_size));
+                        }
+                    },
+                );
+                // `add_space` and not a wider allocation: `allocate_ui_with_layout` hands back the
+                // space its contents *used*, so a gutter padded from the inside collapses onto the
+                // mark and the two columns touch.
+                ui.add_space(pad);
+                ui.allocate_ui_with_layout(
+                    egui::vec2((avail - box_size - pad).max(avail * 0.5), 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| entry_ui(ui, e, ctx),
+                );
+            });
+        }
+        remember(ui, ctx, keyed, row, y);
     }
+}
+
+/// Record how far a drawn row moved the cursor, and throw the run's whole table away if that
+/// disagrees with what was remembered.
+///
+/// **The disagreement is the point.** A row is measured on the first frame the page is drawn,
+/// which is the only frame every row is laid out — and on that frame the chrome font's metrics
+/// are not ready, so `entry_ui` measures a zero-width timestamp, gives the headline the whole
+/// column, and the row comes out a line shorter than it will ever be again. Rows still near the
+/// window are re-measured on the next frame and correct themselves; rows the reader has not
+/// scrolled to would keep that first wrong height for as long as the page is open, and a long
+/// list would end short of its last row.
+///
+/// So a drawn row that measures differently invalidates the run rather than just itself: the
+/// rows it cannot see are wrong for the same reason it was, and they are only re-measurable by
+/// being drawn. One frame of laying the run out whole, and the table is right from then on.
+/// Costs one `f32` comparison per drawn row, and says nothing about a row whose height really
+/// did change — an arriving thumbnail already goes through `measure::Heights::forget`.
+fn remember(ui: &Ui, ctx: &mut RenderCtx<'_>, keyed: Option<usize>, row: usize, y: f32) {
+    // Nothing recorded for a nested run, matching the skip that was not offered it. A height
+    // filed under the containing block's index is worse than no height: it is the outer run's
+    // row `row`, and the next frame reads it back as one.
+    let Some(block) = keyed else {
+        return;
+    };
+    // **How far the cursor moved, not how tall the row's rect was.** The two are different
+    // numbers: a `Ui`'s rect is the union of what it drew, and the trailing space `blocks_ui`
+    // leaves under the last paragraph of a dek is cursor movement with nothing in it. Recording
+    // the rect and allocating it back lost a couple of points a row, which over sixty rows is a
+    // page that ends early, with `Shift+G` landing above the last story rather than on it.
+    //
+    // And the gap comes off, because `allocate_space` adds it back: the cursor after a row is
+    // the row plus one item spacing, and the spacing is the layout's to put there. Counting it
+    // in the stored height counts it twice, which is the same bug in the other direction.
+    let used = (ui.next_widget_position().y - y - ui.spacing().item_spacing.y).max(0.0);
+    let key = (block, row);
+    // Sub-pixel drift is rounding, not a relayout. A line of text is twenty-odd points.
+    if ctx
+        .entry_heights
+        .get(&key)
+        .is_some_and(|had| (had - used).abs() > 0.5)
+    {
+        ctx.entry_heights.retain(|(b, _), _| *b != block);
+    }
+    ctx.entry_heights.insert(key, used);
 }
 
 /// One entry's own column: the thumbnail, the headline with its time, the address, the dek.
@@ -212,13 +307,9 @@ fn entry_ui(ui: &mut Ui, e: &ir::Entry, ctx: &mut RenderCtx<'_>) {
     if let Some(img) = &e.image {
         super::images::thumbnail(ui, img, ctx);
     }
-    let title = match &e.href {
-        Some(href) => vec![ir::Inline::Link {
-            href: href.clone(),
-            inlines: e.title.clone(),
-        }],
-        None => e.title.clone(),
-    };
+    // Flattened straight under the href rather than cloned into an `ir::Inline::Link` to be
+    // flattened after: this is drawn per row per frame, and `hww:history` is five thousand rows.
+    let title = inline::flatten_linked(&e.title, e.href.as_deref());
     let set = Setting::headline(ctx.opts, &ctx.pal);
     // Through `short_date`, as the masthead's dateline is: a feed writes RFC 822, which is
     // 31 characters of mostly zone offset, and the headline below gets whatever width this
@@ -264,7 +355,7 @@ fn entry_ui(ui: &mut Ui, e: &ir::Entry, ctx: &mut RenderCtx<'_>) {
                     0.0,
                 ),
                 egui::Layout::top_down(egui::Align::Min),
-                |ui| runs(ui, &title, &set, ctx),
+                |ui| runs_flat(ui, &title, &set, ctx),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                 ui.spacing_mut().item_spacing.x = theme::snap(ctx.opts.base_size_pt * 0.5);
@@ -288,7 +379,7 @@ fn entry_ui(ui: &mut Ui, e: &ir::Entry, ctx: &mut RenderCtx<'_>) {
             });
         });
     } else {
-        runs(ui, &title, &set, ctx);
+        runs_flat(ui, &title, &set, ctx);
     }
     // Under the headline and above the dek, in the same dim as the date across from it.
     // `small_font` and not `chrome_font`: the address belongs to the page the row points at,
@@ -310,7 +401,17 @@ fn entry_ui(ui: &mut Ui, e: &ir::Entry, ctx: &mut RenderCtx<'_>) {
             role: ctx.opts.family,
             underline: false,
         };
-        runs(ui, &[ir::Inline::Text(addr.clone())], &set, ctx);
+        // One copy of the address rather than two: this was an `ir::Inline::Text` holding a
+        // clone, which `flatten` then copied again into the `Run::Text` it produced.
+        runs_flat(
+            ui,
+            &[inline::Run::Text {
+                text: addr.clone(),
+                style: inline::Style::default(),
+            }],
+            &set,
+            ctx,
+        );
     }
     // Through `budget::lead_in`, not a loop here: `app::walk_blocks` reads the same
     // function, so the pictures `I` offers to load are exactly the pictures on screen.
@@ -344,9 +445,14 @@ fn remove_control(ui: &mut Ui, href: &str, ctx: &mut RenderCtx<'_>) {
 
 /// Flatten, register the run list with find-in-page, then set it.
 fn runs(ui: &mut Ui, inlines: &[ir::Inline], set: &Setting, ctx: &mut RenderCtx<'_>) {
-    let flat = inline::flatten(inlines);
-    ctx.begin_list(&inline::plain_of(&flat));
-    inline_ui::runs_ui(ui, &flat, set, ctx);
+    runs_flat(ui, &inline::flatten(inlines), set, ctx);
+}
+
+/// [`runs`] for a run list that is already flat, so a caller that had to build one anyway does
+/// not build it twice. See `blocks::entry_ui`.
+fn runs_flat(ui: &mut Ui, flat: &[inline::Run], set: &Setting, ctx: &mut RenderCtx<'_>) {
+    ctx.begin_runs(flat);
+    inline_ui::runs_ui(ui, flat, set, ctx);
 }
 
 fn code_ui(ui: &mut Ui, lang: Option<&str>, text: &str, ctx: &mut RenderCtx<'_>) {

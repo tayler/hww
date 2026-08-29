@@ -191,7 +191,12 @@ fn append(
     let pal = ctx.pal;
     let base = format_for(style, set, &pal, ctx.opts);
     // Find highlighting splits a run into background-carrying pieces; with no query, this is
-    // one piece and one section.
+    // one piece and one section — and asking for it as a `Vec` was an allocation per text run
+    // per frame for the pages nobody is searching, which is all of them almost all of the time.
+    if !ctx.has_matches() {
+        job.append(text, 0.0, base);
+        return;
+    }
     for (piece, hit) in ctx.split_by_matches(text, offset) {
         let mut fmt = base.clone();
         if let Some(is_current) = hit {
@@ -542,7 +547,9 @@ mod tests {
                 }
             }
             let mut images = ImageStore::default();
-            let mut rctx = RenderCtx::new(pal, &opts, base.clone(), &mut images, &collapsed);
+            let threads = std::collections::HashMap::new();
+            let mut rctx =
+                RenderCtx::new(pal, &opts, base.clone(), &mut images, &collapsed, &threads);
             let mut out = ctx.run_ui(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {

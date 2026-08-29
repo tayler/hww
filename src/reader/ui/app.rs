@@ -56,7 +56,7 @@ use crate::reader::pagecache::{PageCache, stash_under};
 use crate::reader::pageinfo;
 use crate::reader::prefs;
 use crate::reader::settings::{self, Settings};
-use crate::reader::thread_tree::CommentKey;
+use crate::reader::thread_tree::{self, CommentKey};
 use crate::reader::title;
 use crate::reader::ui::images::{Failure, ImageStore, Source};
 use crate::reader::ui::{
@@ -222,6 +222,31 @@ struct Ready {
     outline: Vec<OutlineEntry>,
     /// Which leading blocks the masthead already says, and so are skipped.
     masthead: title::Masthead,
+    /// Everything below this line is the document read once, where `outline` and `masthead`
+    /// already are. Each was being recomputed on every frame from a document that cannot change
+    /// while it is on screen: an image landing writes `ReaderApp::images`, collapsing a reply
+    /// writes `ReaderApp::collapsed`, and find writes `ReaderApp::chrome`. None of them touches
+    /// `loaded.doc`, and a page put away in `reader::pagecache` carries these back with it.
+    ///
+    /// `ir::Document::text_len`, for `notice::about_page`. **Not `prov.chars`**, which holds the
+    /// same number for a fetched page and zero for a built one: `session::Provenance::built` is
+    /// an address and zeros, and reading it here would put a zero one guard away from telling a
+    /// reader that their own bookmarks list may need JavaScript to show its content.
+    text_len: usize,
+    /// Whether any of the page is right-to-left, for `notice::rtl` and the page-info panel.
+    /// `notice::carries_rtl` walks every block and stops at the first hit, so it is the ordinary
+    /// left-to-right page — every page, almost always — that pays for the whole walk.
+    rtl: bool,
+    /// The comment tree of each `ir::Block::Thread`, by top-level block index.
+    ///
+    /// `thread_tree::build` is a `CommentKey` allocation per comment and an
+    /// `ir::blocks_text_len` walk of the whole thread for the auto-collapse measure, and it ran
+    /// at the top of `thread_ui` — before the band was consulted, so a two-thousand-comment
+    /// discussion rebuilt its tree on every frame it was on screen whether or not a single
+    /// comment was drawn. Built here rather than in `ReaderApp` so `ReaderApp::collapse_all`,
+    /// which was building its own, reads the same trees: two builds of one tree is two places
+    /// for a `CommentKey` to be derived differently.
+    threads: HashMap<usize, thread_tree::ThreadTree>,
     /// The navigation this page arrived on, and the id every image request made *from* it
     /// carries.
     ///
@@ -264,6 +289,23 @@ struct Ready {
     /// satisfied on the bookmarks view itself and would otherwise offer to save the bookmarks into the
     /// bookmarks.
     built: bool,
+}
+
+/// The three page-derived values [`Ready`] carries beside `outline` and `masthead`.
+///
+/// One function so the two places a page is installed — a fetch settling and a view hww built —
+/// cannot come to different conclusions about the same document.
+fn derived(doc: &ir::Document) -> (usize, bool, HashMap<usize, thread_tree::ThreadTree>) {
+    let threads = doc
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| match b {
+            ir::Block::Thread(comments) => Some((i, thread_tree::build(comments))),
+            _ => None,
+        })
+        .collect();
+    (doc.text_len(), notice::carries_rtl(doc), threads)
 }
 
 impl Ready {
@@ -394,6 +436,8 @@ pub struct ReaderApp {
     /// How tall each block was the last time it was laid out, so the blocks off the window can
     /// be skipped. See `reader::measure` for why, and `ready_screen` for when it is ignored.
     heights: Heights,
+    /// What `theme::apply` last installed, so it installs again only when it would differ.
+    style_installed: Option<theme::StyleKey>,
     /// Toggles against the auto-collapse default (see `thread_ui::is_collapsed`).
     collapsed: HashSet<CommentKey>,
     /// Bumped on every change to `collapsed`, for `measure::Layout`: a thread is one block and
@@ -672,6 +716,7 @@ impl ReaderApp {
                 &archive_icons.iter().cloned().collect(),
             ),
             heights: Heights::default(),
+            style_installed: None,
             collapsed: HashSet::new(),
             collapsed_changes: 0,
             find_current: 0,
@@ -830,6 +875,7 @@ impl ReaderApp {
         };
         let outline = outline::build(&doc.blocks);
         let masthead = title::masthead(&doc);
+        let (text_len, rtl, threads) = derived(&doc);
         self.install(Box::new(Ready {
             loaded: Loaded {
                 // An address and zeros. `Arrival::Built` is what guarantees the zeros are never
@@ -839,6 +885,9 @@ impl ReaderApp {
             },
             outline,
             masthead,
+            text_len,
+            rtl,
+            threads,
             req,
             opts,
             fetched: Instant::now(),
@@ -1275,11 +1324,7 @@ impl ReaderApp {
         let Some(ready) = self.shown() else {
             return false;
         };
-        let mut a = url.clone();
-        a.set_fragment(None);
-        let mut b = ready.loaded.prov.final_url.clone();
-        b.set_fragment(None);
-        a == b
+        archive::same_page_urls(url, &ready.loaded.prov.final_url)
     }
 
     fn jump_to_fragment(&mut self, fragment: &str) {
@@ -1511,8 +1556,10 @@ impl ReaderApp {
 
     /// The one place an icon's request size is chosen, so the masthead's mark and a bookmarks list
     /// row's are decoded to the same 64 px and cannot drift apart.
-    fn load_favicon_job(&mut self, src: &str, automatic: bool, mark: Mark) {
-        self.request_image(src, ICON_PX, false, automatic, mark);
+    ///
+    /// Answers [`Self::request_image`]'s "did a request leave", which only `load_site_icons` reads.
+    fn load_favicon_job(&mut self, src: &str, automatic: bool, mark: Mark) -> bool {
+        self.request_image(src, ICON_PX, false, automatic, mark)
     }
 
     /// Draw a mark from `reader::iconcache` if it is there, and say whether that settled it.
@@ -1588,10 +1635,18 @@ impl ReaderApp {
     /// switch over it. What it may still do is draw a bookmarked site's own mark from the file
     /// the bookmarks list already wrote. See `reader::iconcache`.
     fn ensure_favicon(&mut self) {
-        let Some(src) = self.shown().and_then(|r| r.loaded.doc.favicon.clone()) else {
+        // Asked before it is owned. The clone exists only to end the borrow of `self.page`
+        // before `kept_mark` takes `&mut self`, and on every frame but the first the answer
+        // below is "already have it" — so the page that declares a favicon was cloning its
+        // address sixty times a second to throw it away.
+        let Some(src) = self.shown().and_then(|r| r.loaded.doc.favicon.as_deref()) else {
             return;
         };
-        if self.images.state(&src).is_some() || self.kept_mark(&src) {
+        if self.images.state(src).is_some() {
+            return;
+        }
+        let src = src.to_owned();
+        if self.kept_mark(&src) {
             return;
         }
         if !self.settings.read.images.allows_any_request() {
@@ -1632,6 +1687,12 @@ impl ReaderApp {
             return;
         }
         let may_fetch = self.settings.read.images.allows_any_request();
+        // Counted once and kept: `Images::pending` walks the whole state map, and asking it per
+        // candidate made the loop quadratic in a list whose marks are still arriving. It counts
+        // network requests alone, so the marks `kept_mark` settles off the disk are outside it
+        // in both builds, and `load_favicon_job` reports whether a request actually left — so
+        // the running figure is the same figure `pending()` would answer with.
+        let mut pending = self.images.pending();
         for src in srcs {
             // Asked once per page, and this is the line that stops the LRU from becoming a
             // request loop: an in-band mark evicted by a later one drops back to no state at
@@ -1659,14 +1720,29 @@ impl ReaderApp {
             // window-heights of rows, so a tall window on a long bookmarks would otherwise open
             // thirty connections in one frame. What is left over is recorded again next frame,
             // so the rest arrive as a drip rather than being dropped.
-            if self.images.pending() >= autoload::MAX_OUTSTANDING {
+            if pending >= autoload::MAX_OUTSTANDING {
                 break;
             }
             self.icons_asked.insert(src.clone());
-            self.load_favicon_job(src, true, Mark::Kept);
+            // `+= 1` on the answer and not on the call: `request_image` declines an address it
+            // cannot join and a format it will not decode, and neither of those is a connection.
+            // Counted regardless, a band holding a handful of SVG marks reached
+            // `MAX_OUTSTANDING` having contacted nobody and left the rows under them undrawn
+            // for the frame.
+            if self.load_favicon_job(src, true, Mark::Kept) {
+                pending += 1;
+            }
         }
     }
 
+    /// Ask for one picture, and say whether that put a request on the network.
+    ///
+    /// **False is not failure.** Every early return below is a request that did not leave — the
+    /// answer is already known, the address will not join, the format is declined — and each one
+    /// is a decision this function makes rather than one its callers can make for it.
+    /// `load_site_icons` throttles on a running count of requests in flight, and a caller that
+    /// assumed the call it just made was one of them counted an SVG mark it had refused to fetch
+    /// against a ceiling that bounds open connections.
     fn request_image(
         &mut self,
         src: &str,
@@ -1674,27 +1750,27 @@ impl ReaderApp {
         announce: bool,
         automatic: bool,
         mark: Mark,
-    ) {
+    ) -> bool {
         // The visible page, and *its* request id rather than `self.current`: see `Ready::req`.
         let Some(ready) = self.shown() else {
-            return;
+            return false;
         };
         let page_req = ready.req;
         if self.images.is_pending(src) {
-            return;
+            return false;
         }
         // Beside `is_pending`, and for the same reason: this is the one door, and the paths
         // that reach it without drawing a control — "load all", and a click on a placeholder
         // the LRU evicted and redrew as an offer — would otherwise re-issue a request whose
         // answer is already known.
         if self.images.refuses_retry(src) {
-            return;
+            return false;
         }
         let base = ready.loaded.prov.final_url.clone();
         let Ok(url) = base.join(src) else {
             self.images
                 .fail(src, Failure::permanent("unusable image address".to_owned()));
-            return;
+            return false;
         };
         // Ahead of the host, the disclosure, and the job. A format this reader declines was
         // being fetched in full and then refused from its bytes, which cost a third-party
@@ -1708,7 +1784,7 @@ impl ReaderApp {
         if let Some(name) = image_decode::declined_by_url(&url) {
             let why = image_decode::DecodeError::Unsupported(name).to_string();
             self.images.fail(src, Failure::permanent(why));
-            return;
+            return false;
         }
         let host = url.host_str().unwrap_or("?").to_owned();
         // Where these bytes may be kept, decided here and carried to the worker. A worker sees
@@ -1751,6 +1827,7 @@ impl ReaderApp {
         if announce {
             self.flash(format!("loading one image from {host}"));
         }
+        true
     }
 
     fn load_all_images(&mut self, ctx: &egui::Context) {
@@ -1994,11 +2071,15 @@ impl ReaderApp {
         // "this may not be the page you asked for" is not a thing to say once and withdraw.
         let outline = outline::build(&loaded.doc.blocks);
         let masthead = title::masthead(&loaded.doc);
+        let (text_len, rtl, threads) = derived(&loaded.doc);
         let req = self.current.unwrap_or_else(|| self.net.mint_page());
         self.install(Box::new(Ready {
             loaded,
             outline,
             masthead,
+            text_len,
+            rtl,
+            threads,
             req,
             // Sound here and nowhere later: `drain` reaches `settle` only when
             // `self.current == Some(req)`, and `navigate` writes `current` and `last_opts`
@@ -2506,14 +2587,14 @@ impl ReaderApp {
         let Some(ready) = self.shown() else {
             return;
         };
+        // The trees the renderer draws, not a second set built here: two builds of one tree
+        // are two places for a `CommentKey` to be derived, and a key that does not match the one
+        // `thread_ui` asks about collapses nothing while reporting that it did.
         let mut keys = Vec::new();
-        for block in &ready.loaded.doc.blocks {
-            if let ir::Block::Thread(comments) = block {
-                let tree = crate::reader::thread_tree::build(comments);
-                for (i, node) in tree.nodes.iter().enumerate() {
-                    if !node.children.is_empty() && !tree.starts_collapsed(i) {
-                        keys.push(node.key.clone());
-                    }
+        for tree in ready.threads.values() {
+            for (i, node) in tree.nodes.iter().enumerate() {
+                if !node.children.is_empty() && !tree.starts_collapsed(i) {
+                    keys.push(node.key.clone());
                 }
             }
         }
@@ -2636,7 +2717,7 @@ fn collect_image_srcs(doc: &ir::Document, budget: u16) -> Vec<String> {
 impl eframe::App for ReaderApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let pal = theme::apply(&ctx, &self.settings.read);
+        let pal = theme::apply(&ctx, &self.settings.read, &mut self.style_installed);
         // Cheap, and the body size it is derived from can change under `[`/`]` and a settings
         // reload, so it is re-derived rather than trusted from startup.
         apply_scroll_speed(&ctx, &self.settings);
@@ -3468,7 +3549,7 @@ impl ReaderApp {
             Some(r) => pageinfo::rows(
                 &r.loaded.prov,
                 &self.images.counts(),
-                notice::carries_rtl(&r.loaded.doc),
+                r.rtl,
                 r.arrival(),
                 self.kept_state(),
             ),
@@ -3617,7 +3698,7 @@ impl ReaderApp {
                                 ui.add_space(theme::snap(
                                     theme::line_height_px(&self.settings.read) * 1.5,
                                 ));
-                                self.ready_screen(ui);
+                                self.ready_screen(ui, pal);
                             });
                         });
                     }
@@ -3669,12 +3750,8 @@ impl ReaderApp {
         let notices: Vec<Notice> = match self.shown() {
             Some(r) => {
                 let mut n: Vec<Notice> = notice::rewrite(&r.loaded.prov).into_iter().collect();
-                n.extend(notice::about_page(
-                    &r.loaded.prov,
-                    r.loaded.doc.text_len(),
-                    r.arrival(),
-                ));
-                n.extend(notice::rtl(&r.loaded.doc));
+                n.extend(notice::about_page(&r.loaded.prov, r.text_len, r.arrival()));
+                n.extend(r.rtl.then(notice::rtl_notice));
                 n
             }
             None => Vec::new(),
@@ -3797,7 +3874,7 @@ impl ReaderApp {
 
     /// Draw the page the reading column is showing, which during a navigation is the outgoing
     /// one rather than the one being fetched.
-    fn ready_screen(&mut self, ui: &mut Ui) {
+    fn ready_screen(&mut self, ui: &mut Ui, pal: &theme::Palette) {
         // The page is behind `&mut self`, and rendering needs both it and the image store, so
         // take it for the duration and put it back. Cheaper than cloning a document.
         let Some(ready) = self.page.take_shown() else {
@@ -3846,11 +3923,16 @@ impl ReaderApp {
         // page may be drawn holding them.
         let reading_list = builtin_view(&base) == Some(View::ReadingList);
         let mut ctx = RenderCtx::new(
-            theme::palette(self.settings.read.theme, theme::system_is_dark(ui.ctx())),
+            // The palette `theme::apply` returned at the top of the frame and every other panel
+            // was handed. Building a second one here asked the desktop for its appearance twice
+            // a frame and filled in a second copy of twenty-odd colours to reach the same
+            // answer.
+            *pal,
             &self.settings.read,
             base,
             &mut self.images,
             &self.collapsed,
+            &ready.threads,
         );
         ctx.find = self
             .chrome
@@ -3863,6 +3945,7 @@ impl ReaderApp {
         ctx.pending = self.pending_link;
         ctx.pending_href = self.pending_href.clone();
         ctx.comment_heights = self.heights.take_comments();
+        ctx.entry_heights = self.heights.take_entries();
         ctx.reading_list = reading_list;
 
         let doc = &ready.loaded.doc;
@@ -3900,7 +3983,7 @@ impl ReaderApp {
                 ui.allocate_space(egui::vec2(0.0, h));
                 continue;
             }
-            ctx.block = i;
+            ctx.block = Some(i);
             ctx.band = may_skip.then_some(band);
             let had_focus = ctx.focus_href.is_some()
                 || ctx.focus_image.is_some()
@@ -3927,6 +4010,8 @@ impl ReaderApp {
 
         self.heights
             .restore_comments(std::mem::take(&mut ctx.comment_heights));
+        self.heights
+            .restore_entries(std::mem::take(&mut ctx.entry_heights));
         // Gathered where each picture drew, at every nesting depth, so a feed card or a comment
         // is judged by where *it* landed and not by the one block that holds the lot.
         let in_band = std::mem::take(&mut ctx.autoload_srcs);
@@ -4145,9 +4230,13 @@ mod tests {
         // Through the real extractor rather than hand-built, so this cannot drift into a page
         // shape the pipeline could not produce.
         let doc = crate::html::extract("<article><h1>Title</h1><p>Words.</p></article>", &url);
+        let (text_len, rtl, threads) = derived(&doc);
         Box::new(Ready {
             masthead: title::masthead(&doc),
             outline: outline::build(&doc.blocks),
+            text_len,
+            rtl,
+            threads,
             loaded: Loaded {
                 doc,
                 prov: crate::session::Provenance::fixture(url.as_str()),

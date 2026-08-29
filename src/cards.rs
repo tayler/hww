@@ -95,6 +95,11 @@ impl Verdict {
 }
 
 /// Weigh every sibling group on the page as a possible list of cards.
+///
+/// Reached from the tests rather than from the pipeline, which goes through [`detect`] and keeps
+/// the map as well as the verdict. It stays because it is the shape a caller that wants only the
+/// account should use, and because deleting it would leave the tests calling `detect` and
+/// throwing half the answer away.
 pub fn explain(html: &Html) -> Verdict {
     detect(html).1
 }
@@ -102,19 +107,30 @@ pub fn explain(html: &Html) -> Verdict {
 /// Find the card lists on a page: which children of which containers are cards, and the
 /// account of every group weighed.
 pub fn detect(html: &Html) -> (CardMap, Verdict) {
-    let a = Selector::parse("a[href]").unwrap();
-    let img = Selector::parse("img, picture").unwrap();
+    detect_in(&crate::thread::sibling_groups(html))
+}
+
+/// [`detect`] over a census the caller already took. See `thread::extract_thread_in` for why
+/// the sibling-group walk is taken once and lent to both detectors.
+pub(crate) fn detect_in(groups: &[crate::thread::Group<'_>]) -> (CardMap, Verdict) {
+    let a = &*crate::html::sel::A_HREF;
+    let img = &*crate::html::sel::IMG_PICTURE;
     let mut map = CardMap::new();
-    let groups = crate::thread::sibling_groups(html);
     let mut reports: Vec<GroupReport> = groups
         .iter()
-        .map(|g| {
+        .map(|group| {
+            let g = &group.members;
             let mut lens: Vec<usize> = g.iter().map(|e| crate::thread::text_len(**e)).collect();
             lens.sort_unstable();
             let median_text = lens[lens.len() / 2];
             let total_text = lens.iter().sum();
-            let cards = g.iter().filter(|e| is_card(e, &a)).count();
-            let with_image = g.iter().filter(|e| e.select(&img).next().is_some()).count();
+            // Asked once per member and read twice: the count below and, for an accepted
+            // group, the membership. `is_card` runs `thread::text_len` over the member and over
+            // every anchor in it, so the second ask was the most expensive repeated question in
+            // the detector. `is_card` is pure, so the flags are the same answer.
+            let card: Vec<bool> = g.iter().map(|e| is_card(e, a)).collect();
+            let cards = card.iter().filter(|c| **c).count();
+            let with_image = g.iter().filter(|e| e.select(img).next().is_some()).count();
             let with_time = g
                 .iter()
                 .filter(|e| crate::thread::find_hint(e, crate::thread::TIME_HINT).is_some())
@@ -132,12 +148,15 @@ pub fn detect(html: &Html) -> (CardMap, Verdict) {
                 && let Some(parent) = g[0].parent()
             {
                 // Extend, not insert: a section holds several card lists under one parent.
-                map.entry(parent.id())
-                    .or_default()
-                    .extend(g.iter().filter(|e| is_card(e, &a)).map(|e| e.id()));
+                map.entry(parent.id()).or_default().extend(
+                    g.iter()
+                        .zip(&card)
+                        .filter(|(_, is)| **is)
+                        .map(|(e, _)| e.id()),
+                );
             }
             GroupReport {
-                signature: crate::thread::signature(&g[0]),
+                signature: group.signature.clone(),
                 count: g.len(),
                 cards,
                 with_image,
@@ -155,7 +174,8 @@ pub fn detect(html: &Html) -> (CardMap, Verdict) {
     // nothing in common with the cards either side of it, it was a story card titled
     // "Subscribe to the newsletter". Joined before the reports are ranked, and counted in
     // the report of the list it joined, so `--why` reports the membership the walker emits.
-    for (g, report) in groups.iter().zip(reports.iter_mut()) {
+    for (group, report) in groups.iter().zip(reports.iter_mut()) {
+        let g = &group.members;
         if report.rejected.is_some() {
             continue;
         }
@@ -175,14 +195,18 @@ pub fn detect(html: &Html) -> (CardMap, Verdict) {
                     let own = crate::thread::signature_classes(&e);
                     shared.iter().all(|k| own.contains(k))
                 }
-                && is_card(&e, &a)
-                && crate::thread::text_len(*e) >= MIN_MEDIAN_TEXT
+                && is_card(&e, a)
             {
+                // Measured once. It is the join's own threshold and the text the report adds.
+                let len = crate::thread::text_len(*e);
+                if len < MIN_MEDIAN_TEXT {
+                    continue;
+                }
                 members.push(e.id());
                 report.count += 1;
                 report.cards += 1;
-                report.total_text += crate::thread::text_len(*e);
-                report.with_image += usize::from(e.select(&img).next().is_some());
+                report.total_text += len;
+                report.with_image += usize::from(e.select(img).next().is_some());
                 report.with_time +=
                     usize::from(crate::thread::find_hint(&e, crate::thread::TIME_HINT).is_some());
             }

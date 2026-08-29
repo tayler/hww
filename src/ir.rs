@@ -159,6 +159,25 @@ pub fn blocks_text_len(blocks: &[Block]) -> usize {
     blocks.iter().map(block_text_len).sum()
 }
 
+/// Collapse every run of whitespace to one space, with the ends trimmed.
+///
+/// One implementation for the seven places that wanted it. The shape it replaces —
+/// `split_whitespace().collect::<Vec<_>>().join(" ")` — allocates a vector of borrows before the
+/// string it actually wanted; this writes the words straight into the output. It lives here
+/// beside [`plain_text`] for the same reason that does: title de-duplication, the outline, a
+/// stored title, a feed's title, and both extractors have to agree on what the words are, and
+/// whitespace is not styling.
+pub fn normalize_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for word in s.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
 /// Inlines as plain text, with no renderer's sigils, indentation, or link decoration.
 ///
 /// Presentation-neutral by construction, which is why it belongs here beside [`text_len`]
@@ -206,7 +225,10 @@ fn block_text_len(b: &Block) -> usize {
     }
 }
 
-fn inlines_text_len(inlines: &[Inline]) -> usize {
+/// Visible text length of an inline run. The inline half of [`blocks_text_len`], and the same
+/// currency: reuse this rather than measuring `plain_text(..).len()`, which is a different
+/// number (it counts an image's alt text and a break's newline, and this counts neither).
+pub fn inlines_text_len(inlines: &[Inline]) -> usize {
     inlines
         .iter()
         .map(|i| match i {

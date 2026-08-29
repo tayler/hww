@@ -59,6 +59,13 @@ pub struct Heights {
     /// renderer for the frame (`take_comments`/`restore_comments`), because the block table
     /// and the comment table are read and written on opposite sides of one borrow.
     comments: HashMap<(usize, usize), f32>,
+    /// `(block, row)` -> height, for the rows of a `Block::Entries`, on the same terms as
+    /// [`Self::comments`] and for the same reason.
+    ///
+    /// A separate table rather than a shared one keyed by a tagged index: a block is a thread or
+    /// a run of entries and never both, so nothing needs them merged, and two tables cannot
+    /// collide on a key that means different things.
+    entries: HashMap<(usize, usize), f32>,
 }
 
 impl Heights {
@@ -67,6 +74,7 @@ impl Heights {
         self.layout = None;
         self.h.clear();
         self.comments.clear();
+        self.entries.clear();
     }
 
     /// Point the table at the layout this frame is drawing under, clearing it if that differs
@@ -76,6 +84,7 @@ impl Heights {
             self.layout = Some(layout.clone());
             self.h.clear();
             self.comments.clear();
+            self.entries.clear();
         }
     }
 
@@ -85,6 +94,14 @@ impl Heights {
 
     pub fn restore_comments(&mut self, comments: HashMap<(usize, usize), f32>) {
         self.comments = comments;
+    }
+
+    pub fn take_entries(&mut self) -> HashMap<(usize, usize), f32> {
+        std::mem::take(&mut self.entries)
+    }
+
+    pub fn restore_entries(&mut self, entries: HashMap<(usize, usize), f32>) {
+        self.entries = entries;
     }
 
     /// Forget one block's height, and the comment heights inside it.
@@ -105,6 +122,9 @@ impl Heights {
         // one is not worth tracking: a comment height is cheap to re-measure and the block
         // above it is being re-measured anyway.
         self.comments.retain(|(block, _), _| *block != i);
+        // And the rows of a run of entries, for the same reason: a card's thumbnail arriving
+        // re-sizes the row it is in.
+        self.entries.retain(|(block, _), _| *block != i);
     }
 
     /// What block `i` measured last time it was laid out, if it has been.
