@@ -29,7 +29,7 @@ use url::Url;
 #[derive(Debug, Clone)]
 pub enum Action {
     Follow(String),
-    /// The context menu's second item, and `R`'s per-link equivalent.
+    /// The context menu's second item, and the bare reload's per-link equivalent.
     /// Follow with neither table applied: the page as the host sends it.
     FollowBare(String),
     Copy(String),
@@ -71,7 +71,7 @@ pub struct RenderCtx<'a> {
 
     /// Lowercased find query, empty when find is closed.
     pub find: String,
-    /// Which match `n`/`N` is on, page-wide.
+    /// Which match Enter and Shift+Enter step through, page-wide.
     ///
     /// Matches are counted in render order, so a collapsed subtree contributes none; find
     /// looks for what the reader is actually showing, which is also the only definition that
@@ -84,7 +84,7 @@ pub struct RenderCtx<'a> {
     find_ranges: Vec<(usize, usize)>,
     find_base: usize,
     /// Set when the current match lands in the job being built; consumed by the flush that
-    /// emits it, which is the widget `n`/`N` scrolls to.
+    /// emits it, which is the widget the find bar scrolls to.
     pub job_has_current_match: bool,
     /// Whether this frame should bring the current match into view. True only on the frame
     /// after the match moved; the highlight itself never steers the scroll.

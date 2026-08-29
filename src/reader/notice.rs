@@ -126,7 +126,7 @@ pub const IMAGES_ARE_DECLINED_OR_FAILED: &str =
 /// other bar should not be asking them to learn a new phrasing for it.
 pub const URL_BAR_HINT: &str = "Search or type a URL";
 
-/// What a bare reload turns off, named after `Shift+R` has done it.
+/// What a bare reload turns off, named after the key has done it.
 ///
 /// Everything that reads a response as other than prose, in the order `session::load` consults
 /// them, because a reader diagnosing a page needs to know which of them was in play. Search
@@ -176,7 +176,8 @@ pub const READING_LIST_TITLE: &str = "Read next";
 /// meet a blank page that looks like a bug.
 ///
 /// The first arm has a job the library's and the history's do not, and it is why this is the
-/// longest of the three. `Ctrl+D` and `h` act on the page in front of the reader, so their empty
+/// longest of the three. Keeping a page and opening the history act on the page in front of the
+/// reader, so their empty
 /// states can assume the reader already knows what to press. This list is filled from a *link*,
 /// which is a thing the reader has to be told how to aim at — so the sentence names both routes,
 /// the key and the right-click, and a list that can only be filled by a gesture nobody mentioned
@@ -328,7 +329,10 @@ pub fn history_forgotten(n: usize) -> String {
 /// It names the page rather than saying "kept", because `Ctrl+D` is one keystroke away from
 /// `Ctrl+F` and a reader who hit the wrong one deserves to see which page just went in.
 pub fn kept(title: &str) -> String {
-    format!("hww kept {title} in your library; b opens it")
+    format!(
+        "hww kept {title} in your library; {} opens it",
+        crate::reader::menu::LIBRARY
+    )
 }
 
 /// The store's answer when the page is already there. Not a failure: the item is in the library,
@@ -1336,6 +1340,15 @@ mod tests {
         assert!(
             empty.contains("never keeps"),
             "the empty library states the doctrine, not just the key: {empty}"
+        );
+        // A toast that names a key has to name one the reader can press. This is the cheap half
+        // of the gap `menu`'s agreement test leaves open: nothing can check `handle_keys` from
+        // here, but a hardcoded letter left behind by a rebinding is catchable, and this one was
+        // written as a bare `b` for as long as `b` opened the library.
+        let toast = kept("A page");
+        assert!(
+            toast.contains(crate::reader::menu::LIBRARY),
+            "the key is named for this platform: {toast}"
         );
         // Every string this module can put on screen about the library names hww or the reader,
         // never a passive.

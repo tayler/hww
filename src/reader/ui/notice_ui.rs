@@ -533,10 +533,11 @@ pub fn keycap(ui: &mut Ui, pal: &Palette, opts: &ReadOpts, key: &str) {
         });
 }
 
-/// A key spec from `HELP` or the splash, as caps and separators: `Ctrl+L or o` is two caps
-/// joined by `+`, the word `or` dim, and a third cap. Whitespace separates alternatives; `/`,
-/// `or`, and `then` are separators when they are not the first token, and `/` *is* the key
-/// when it is (`/ then n / N`).
+/// A key spec from `HELP` or the splash, as caps and separators: `Ctrl+R / Ctrl+Shift+R` is two
+/// specs with a dim `/` between them, each split into caps on its own `+`. Whitespace separates
+/// alternatives; `/`, `or`, `then` and `·` are separators when they are not the first token, and
+/// a leading one is a key instead. No spec in `HELP` begins with one today; the guard stays
+/// because the tables are wording, and wording that starts with a slash costs nothing to survive.
 pub fn keycaps(ui: &mut Ui, pal: &Palette, opts: &ReadOpts, spec: &str) {
     ui.spacing_mut().item_spacing.x = 4.0;
     let dim = |ui: &mut Ui, t: &str| {

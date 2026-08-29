@@ -70,7 +70,8 @@ pub fn icon(ui: &mut Ui, pal: &Palette, opts: &ReadOpts) -> egui::Response {
         .on_hover_text("Page info (p)")
 }
 
-/// The panel itself. `open` is `Chrome::info_open`, so `Esc`, `p`, and the window's own close
+/// The panel itself. `open` is `Chrome::info_open`, so `Esc`, the page-info key, and the
+/// window's own close
 /// button all reach the same bit.
 ///
 /// `rows` is empty when no page has loaded, which is a state worth saying out loud: an empty
@@ -109,7 +110,7 @@ pub fn panel(
                     ui.style_mut().override_font_id = Some(font.clone());
                     ui.horizontal(|ui| {
                         ui.label(theme::label_job("Page info", opts, pal.dim));
-                        // Opened by a pointer, so it must be closable by one. `Esc` and `p` still work;
+                        // Opened by a pointer, so it must be closable by one. `Esc` and the key still work;
                         // this is what a mouse-only reader has.
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("close").clicked() {

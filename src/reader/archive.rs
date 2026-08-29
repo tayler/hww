@@ -28,7 +28,8 @@
 //! look for it, switchable off in one click, and forgettable in one more.
 //! [`Settings::keep_history`] sits in a settings group of its own with this file's path printed
 //! under it, beside the button that empties it; the pages it holds are a page the reader can
-//! open (`h`) rather than a file they have to find. A default that could not be seen or undone
+//! open, with the key every browser opens its history with, rather than a file they have to
+//! find. A default that could not be seen or undone
 //! would be the quiet lie this project's whole notice system exists to refuse.
 //!
 //! Seven consequences, each settled here rather than left to the call site:
@@ -97,7 +98,7 @@
 //! No page content, and no favicon. `ir::Entry::image` is drawn by `ui::blocks::entries_ui` as an
 //! article thumbnail under the reader's image policy, so a library of twenty sites carrying
 //! twenty favicon URLs would offer twenty third-party requests on one screen — which is not what
-//! anybody asked for by pressing `b`. A stored URL that nothing renders would be mechanism with
+//! anybody asked for by opening the library. A stored URL that nothing renders would be mechanism with
 //! no reader, which is the standard that removed `force_thread`. Both lists are names and
 //! addresses.
 //!
@@ -775,7 +776,7 @@ pub fn opens_on_launch(settings: &Settings, archive: &Archive) -> bool {
 /// an error page, and that is right there: an engine that answered with nothing is a dead end.
 /// An empty library is a new reader, and an error page would be the application scolding them for
 /// not having used it yet. `entries_ui` over an empty slice draws literally nothing, so the
-/// one-line paragraph is what stops `b` from opening a blank screen.
+/// one-line paragraph is what stops the library key from opening a blank screen.
 pub fn document(archive: &Archive) -> ir::Document {
     view(
         LIBRARY,
@@ -1340,7 +1341,8 @@ mod tests {
         assert!(entries.iter().all(|e| e.image.is_none()));
     }
 
-    /// An empty library is a new reader, not a failure, so `b` opens a page that says what to
+    /// An empty library is a new reader, not a failure, so the library key opens a page that
+    /// says what to
     /// do rather than a blank screen or an error.
     #[test]
     fn an_empty_library_is_a_page_that_says_so() {
