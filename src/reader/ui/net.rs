@@ -126,7 +126,7 @@ pub enum Job {
         /// names. A worker that decided for itself would cache page content, and would write a
         /// favicon for every host the masthead ever asked — a trail of everywhere the reader has
         /// been, outliving *forget history*. See `reader::iconcache`.
-        cache_as: Option<PathBuf>,
+        cache_as: Option<CacheAs>,
     },
     /// A site mark read from `reader::iconcache` instead of from a host.
     ///
@@ -150,6 +150,24 @@ pub enum Job {
         path: PathBuf,
         max_width: u32,
     },
+}
+
+/// Permission to keep one fetched mark: where the file goes, and the address it is *for*.
+///
+/// Two fields rather than a path, and the second is the one that matters. The filename in `path`
+/// is a hash of `key`, [`iconcache::read`] checks the header against `key`, and
+/// `iconcache::Cache::open` deletes any file whose name is not the hash of the address its own
+/// header names. Writing the header from a `Job::Image`'s raw `src` would agree with all three
+/// only while `src` happens to be `archive::icon_address`'s output already — true today, because
+/// the only caller granting this permission is the marked-list column, and silently false the
+/// day another caller is granted it. The mismatch would not fail loudly: the entry would be
+/// rejected in-session and swept at every launch, so the address would be refetched for ever with
+/// nothing said. Carrying the normalised address is what makes that impossible rather than
+/// merely unlikely. See [`Job::KeptIcon::key`], which is the same field for the read path.
+#[derive(Debug, Clone)]
+pub struct CacheAs {
+    pub path: PathBuf,
+    pub key: String,
 }
 
 impl Job {
@@ -559,7 +577,12 @@ fn run_job(session: &Session, job: Job, tx: &mpsc::Sender<Msg>, ctx: &egui::Cont
             automatic: _,
             cache_as,
         } => {
-            let keep = cache_as.as_deref().map(|path| Keep { path, src: &src });
+            // The header, the filename, and the index key all come from the one normalised
+            // address the UI thread resolved; see [`CacheAs`] for what disagreeing would cost.
+            let keep = cache_as.as_ref().map(|c| Keep {
+                path: &c.path,
+                src: &c.key,
+            });
             let (cookies, result, kept) =
                 load_image(session, &url, &referrer, max_width, send_referer, keep);
             let _ = tx.send(Msg::Image {
@@ -580,13 +603,13 @@ fn run_job(session: &Session, job: Job, tx: &mpsc::Sender<Msg>, ctx: &egui::Cont
             max_width,
         } => {
             let msg = match read_kept_icon(&path, &key, max_width) {
-                Some(result) => Msg::Image {
+                Some(decoded) => Msg::Image {
                     req,
                     page,
                     src,
                     // A file on this machine set no cookie and answered no request.
                     cookies: 0,
-                    result,
+                    result: Ok(decoded),
                     kept: Kept::Read,
                 },
                 None => Msg::IconMissed { page, src },
@@ -599,15 +622,17 @@ fn run_job(session: &Session, job: Job, tx: &mpsc::Sender<Msg>, ctx: &egui::Cont
 
 /// Decode the bytes kept for `src`, or `None` when this file is not them.
 ///
-/// `None` covers the file having been deleted, truncated, or written for another address between
-/// the UI consulting its index and this worker opening it — and an empty body, which records that
-/// the address served nothing and is a state the UI answers without ever queuing a job. All three
-/// are the same instruction to the caller: the index is wrong, go and ask properly.
-fn read_kept_icon(
-    path: &std::path::Path,
-    src: &str,
-    max_width: u32,
-) -> Option<Result<Decoded, ImageError>> {
+/// **A decode failure is a `None` like every other**, which is why this answers a `Decoded` and
+/// not a `Result`: there is no error here worth showing a reader. Every other way of getting one
+/// of these files back is already a miss — deleted, truncated, or written for another address
+/// between the UI consulting its index and this worker opening it, and an empty body, which
+/// records that the address served nothing and is a state the UI answers without ever queuing a
+/// job. Bytes that will not decode say the same thing about the same file, and the caller has one
+/// answer for it: drop the index entry and ask properly. Reporting it instead would leave the
+/// entry standing and the failure drawn, so a file corrupted on disk or left by another build
+/// would make that one mark undrawable for the whole of [`iconcache::TTL`] with no refetch —
+/// permanent, on every page that draws it, for the one class of failure that heals itself.
+fn read_kept_icon(path: &std::path::Path, src: &str, max_width: u32) -> Option<Decoded> {
     let bytes = iconcache::read(path, src)?;
     if bytes.is_empty() {
         return None;
@@ -620,10 +645,7 @@ fn read_kept_icon(
     // The same decoder the fetch path uses, on the same untrusted bytes. A store is not a
     // source of trust: these bytes came off a disk a reader can write to, and the last program
     // to write them was a network fetch.
-    Some(
-        image_decode::decode(&bytes, &crate::fetch::Truncation::Complete, &limits)
-            .map_err(ImageError::from),
-    )
+    image_decode::decode(&bytes, &crate::fetch::Truncation::Complete, &limits).ok()
 }
 
 /// Permission to keep one fetched mark, and where.
@@ -747,9 +769,7 @@ mod tests {
         let path = dir.join("mark.icon");
         iconcache::write(&path, MARK, iconcache::now(), &png(32, 32)).unwrap();
 
-        let decoded = read_kept_icon(&path, MARK, 64)
-            .expect("the file is there")
-            .expect("and it decodes");
+        let decoded = read_kept_icon(&path, MARK, 64).expect("the file is there and it decodes");
         assert_eq!((decoded.source_width, decoded.source_height), (32, 32));
 
         // Written for another address: the filename is a non-cryptographic hash, so this is what
@@ -758,6 +778,17 @@ mod tests {
         // The refusal record. The UI answers this from its own index and never queues a job for
         // it, so reaching here means the index is stale — which is a miss like any other.
         iconcache::write(&path, MARK, iconcache::now(), b"").unwrap();
+        assert!(read_kept_icon(&path, MARK, 64).is_none());
+        // Bytes that will not decode. A miss and not a failure to draw: reporting it would
+        // leave the index entry standing, so a file corrupted on disk would make this one mark
+        // undrawable for the whole of `iconcache::TTL` with no refetch.
+        iconcache::write(
+            &path,
+            MARK,
+            iconcache::now(),
+            b"not a picture in any format",
+        )
+        .unwrap();
         assert!(read_kept_icon(&path, MARK, 64).is_none());
         // And gone entirely, which is the race the whole message exists for.
         std::fs::remove_file(&path).unwrap();

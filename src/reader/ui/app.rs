@@ -1061,6 +1061,12 @@ impl ReaderApp {
             return;
         };
         if self.archive.forget_next(&url) {
+            // Before the write and whatever it answers, exactly as the two toggles do it: this
+            // is the fourth way a marked address leaves the file, and a mark kept for a row hww
+            // has stopped remembering is a file with no reason to exist. Another row may still
+            // name the same address, which is why this asks the archive rather than deleting one
+            // file.
+            self.prune_icons();
             if self.save_archive() {
                 self.flash(notice::READ_LATER_REMOVED.to_owned());
             }
@@ -1095,9 +1101,10 @@ impl ReaderApp {
 
     /// Drop every kept site mark no marked row still names.
     ///
-    /// Called wherever a marked address goes: un-bookmarking with the bookmark key, either
-    /// forget button for the two chosen lists, and the reading list's own per-row `remove`.
-    /// Those four are not the only ways an entry becomes an orphan — re-bookmarking a page whose
+    /// Called wherever a marked address goes: un-bookmarking with the bookmark key, taking a
+    /// link back off the reading list with `Shift+L`, the reading list's own per-row `remove`,
+    /// and either forget button for the two chosen lists.
+    /// Those five are not the only ways an entry becomes an orphan — re-bookmarking a page whose
     /// `<link rel=icon>` changed leaves the old one, and a hand-edited `archive.json` orphans
     /// whatever it likes — which is why `iconcache::Cache::open` sweeps the directory at every
     /// launch as well. This is the immediate half, so a reader who forgets a page does not have
@@ -1106,9 +1113,18 @@ impl ReaderApp {
     /// By "no marked row still names this address" and never per tenant, because one icon serves
     /// rows on both lists: the same site can be bookmarked and queued to read again, and asking
     /// which of the two a file belongs to is a question with no answer.
+    ///
+    /// Emptied entirely rather than pruned when the two lists between them name nothing, which
+    /// is both forget buttons pressed and the last row of the last list taken off. `prune` would
+    /// leave the directory standing with nothing in it; `forget_all` takes that too, so a reader
+    /// who has asked for all of it to go finds nothing left to wonder about.
     fn prune_icons(&mut self) {
-        let keep = self.archive.marked_icons().collect();
-        self.icons.prune(&keep);
+        let keep: HashSet<String> = self.archive.marked_icons().collect();
+        if keep.is_empty() {
+            self.icons.forget_all();
+        } else {
+            self.icons.prune(&keep);
+        }
     }
 
     /// Write the bookmarks now, and say so if it could not be written.
@@ -1699,7 +1715,13 @@ impl ReaderApp {
         // one kind of image job and cannot see the archive, so it can neither tell a mark from a
         // picture nor tell a marked address from a merely visited one. See `reader::iconcache`.
         let cache_as = (mark == Mark::Kept)
-            .then(|| archive::icon_address(src).and_then(|k| self.icons.place_for(&k)))
+            .then(|| {
+                archive::icon_address(src).and_then(|key| {
+                    self.icons
+                        .place_for(&key)
+                        .map(|path| net::CacheAs { path, key })
+                })
+            })
             .flatten();
         self.images.begin(src, Source::Network);
         // Recorded here, where the host is known and where the reader is told it, and taken
@@ -1856,10 +1878,24 @@ impl ReaderApp {
                     // page that asked for it, and an index that did not learn about it would
                     // have the second open of a list in one session refetch every mark the
                     // first open had just kept.
+                    //
+                    // The archive is asked *again* here, and not because the permission was in
+                    // doubt when it was granted. It was granted when the job was submitted, and
+                    // between then and now the reader may have pressed `Ctrl+D`, a row's
+                    // `remove`, or either forget button — `prune_icons` runs on all four, while
+                    // this fetch is still in flight and its worker still about to call
+                    // `iconcache::write`, which creates the directory again on its way past.
+                    // Taking the file back is the only place that can be answered: the worker
+                    // cannot see the archive, and the prune could not see a file that did not
+                    // exist yet.
                     if let Kept::Written(at) = kept
                         && let Some(key) = archive::icon_address(&src)
                     {
-                        self.icons.note(&key, at, result.is_err());
+                        if self.archive.marks_icon(&key) {
+                            self.icons.note(&key, at, result.is_err());
+                        } else {
+                            self.icons.forget(&key);
+                        }
                     }
                     // Against the page the request was made *from*, not the navigation in
                     // flight: see `Ready::req`. A picture whose page has been replaced is

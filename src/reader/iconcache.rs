@@ -104,6 +104,18 @@ pub const MISS_TTL: u64 = 7 * 24 * 60 * 60;
 /// still work and only the keeping does not.
 pub const MAX_BYTES: usize = 256 * 1024;
 
+/// The largest *file* [`read`] and [`header`] will open.
+///
+/// Derived from [`MAX_BYTES`] rather than guessed at, because the two ceilings have to agree:
+/// a file this refuses is one [`Cache::open`] deletes and [`read`] misses, so a body [`write`]
+/// accepted while this refused the file around it would be fetched again on every open of the
+/// list, for ever, with nothing said. The header is `MAGIC`, the address, the second, and the
+/// length, each on its own line; the address is the only part that is not a handful of bytes,
+/// and [`crate::reader::archive::MAX_URL`] is what caps it — the same cap `archive::icon_address`
+/// applies before any of these addresses reaches this module. Sixty-four is the rest of it, with
+/// room to spare.
+const MAX_FILE_BYTES: usize = MAX_BYTES + crate::reader::archive::MAX_URL + 64;
+
 /// How many entries the directory may hold.
 ///
 /// Only addresses a marked list names are ever written, so `archive::MAX_ITEMS` plus
@@ -173,7 +185,7 @@ pub struct Cache {
 impl Cache {
     /// Read the directory, drop what no marked row still names, and index the rest.
     ///
-    /// The sweep is here rather than only at the three call sites that forget things, because
+    /// The sweep is here rather than only at the call sites that forget things, because
     /// those cannot cover every way an entry becomes an orphan: re-bookmarking a page whose
     /// `<link rel=icon>` changed leaves the old one behind, a failed write leaves a forget
     /// half-done, and a hand-edited `archive.json` orphans whatever it likes. One pass over a
@@ -271,10 +283,15 @@ impl Cache {
     }
 
     /// Drop one entry and its file: what a worker found unreadable, or what a read raced.
+    ///
+    /// The file goes whether or not the index knew about it, and that is the case this is
+    /// written for rather than an accident of ordering: a mark can be fetched and written by a
+    /// worker *after* the row that named it was forgotten, because the permission was decided
+    /// when the job was submitted. What the caller has then is a file on disk for an address
+    /// nothing names, and no index entry to find it by.
     pub fn forget(&mut self, url: &str) {
-        if self.index.remove(url).is_some()
-            && let Some(dir) = &self.dir
-        {
+        self.index.remove(url);
+        if let Some(dir) = &self.dir {
             let _ = std::fs::remove_file(dir.join(format!("{}.{EXT}", key(url))));
         }
     }
@@ -324,7 +341,7 @@ pub fn read(path: &Path, url: &str) -> Option<Vec<u8>> {
     // Asked before the read, not after: this file is on a disk a reader can write to, and
     // `read` on a path someone has pointed at a huge file should not become the allocation.
     let len = std::fs::metadata(path).ok()?.len();
-    if len > (MAX_BYTES + 4 * 1024) as u64 {
+    if len > MAX_FILE_BYTES as u64 {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
@@ -354,6 +371,16 @@ pub fn write(path: &Path, url: &str, at: u64, bytes: &[u8]) -> std::io::Result<(
             "an icon address cannot contain a newline",
         ));
     }
+    // The other half of [`MAX_FILE_BYTES`], checked here for the reason the newline is: every
+    // address that reaches this has been through `archive::icon_address` and is already inside
+    // the cap, and a file whose header pushed it past what [`read`] will open would be written,
+    // refused, deleted at the next launch, and fetched again on every open of the list.
+    if url.len() > crate::reader::archive::MAX_URL {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} bytes is past the icon address ceiling", url.len()),
+        ));
+    }
     let mut out = format!("{MAGIC}\n{url}\n{at}\n{}\n", bytes.len()).into_bytes();
     out.extend_from_slice(bytes);
     crate::reader::settings::write_bytes_atomically(path, &out)
@@ -362,7 +389,7 @@ pub fn write(path: &Path, url: &str, at: u64, bytes: &[u8]) -> std::io::Result<(
 /// The header of the file at `path`: its address, when it was fetched, and whether it is empty.
 fn header(path: &Path) -> Option<(String, u64, bool)> {
     let len = std::fs::metadata(path).ok()?.len();
-    if len > (MAX_BYTES + 4 * 1024) as u64 {
+    if len > MAX_FILE_BYTES as u64 {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
@@ -610,6 +637,65 @@ mod tests {
         assert!(full.place_for("https://example.org/one-more.ico").is_none());
         // An address already kept may still be refreshed when the store is full.
         assert!(full.place_for("https://example.org/0.ico").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Everything [`write`] accepts, [`read`] and [`Cache::open`] must accept back.
+    ///
+    /// The two ceilings are one ceiling seen from either end, and a gap between them is a hole
+    /// with no bottom: a file the write took and the read refuses is fetched again on every open
+    /// of the list, deleted at every launch, and rewritten every time, with nothing said about
+    /// any of it. The address is the part that moves — it may be as long as
+    /// `archive::MAX_URL` — so the largest legal file is the largest body under the longest
+    /// address, and that is what this writes.
+    #[test]
+    fn the_largest_file_a_write_accepts_is_one_a_read_accepts() {
+        let dir = scratch("ceiling");
+        let long = format!(
+            "https://example.org/{}",
+            "a".repeat(crate::reader::archive::MAX_URL - "https://example.org/".len())
+        );
+        assert_eq!(long.len(), crate::reader::archive::MAX_URL);
+        let mut c = Cache::open(Some(dir.clone()), &keep(&[&long]));
+        let path = c.place_for(&long).unwrap();
+        let body = vec![7u8; MAX_BYTES];
+        write(&path, &long, now(), &body).unwrap();
+        assert!(
+            std::fs::metadata(&path).unwrap().len() <= MAX_FILE_BYTES as u64,
+            "the write may not produce a file the read will not open"
+        );
+        assert_eq!(read(&path, &long).map(|b| b.len()), Some(MAX_BYTES));
+        c.note(&long, now(), false);
+        assert!(
+            matches!(
+                Cache::open(Some(dir.clone()), &keep(&[&long])).known(&long),
+                Known::Kept(_)
+            ),
+            "and the launch sweep keeps it rather than deleting it"
+        );
+
+        // The other end of the same cap: an address past it is refused at the write, so no file
+        // can exist that only one of the two ends will have.
+        let over = format!("{long}a");
+        assert!(write(&dir.join("over.icon"), &over, now(), b"x").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file written for an address the index never learned about is still deleted.
+    ///
+    /// The race `ReaderApp` has to answer: a mark's job is submitted while its row is on a
+    /// marked list and the bytes come back after the row was forgotten, so the prune ran before
+    /// the file existed and the index has never held it. A `forget` that deleted only what it
+    /// had indexed would leave a mark on disk for an address nothing names.
+    #[test]
+    fn forget_deletes_a_file_the_index_never_held() {
+        let dir = scratch("forget-unindexed");
+        let mut c = Cache::open(Some(dir.clone()), &keep(&[A]));
+        let path = c.place_for(A).unwrap();
+        write(&path, A, now(), b"late").unwrap();
+        assert!(c.is_empty(), "nothing noted it");
+        c.forget(A);
+        assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

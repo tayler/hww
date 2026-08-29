@@ -573,6 +573,16 @@ impl Archive {
             .filter_map(|i| mark_beside(i, Mark::Shown))
     }
 
+    /// Whether any marked row still names this icon address.
+    ///
+    /// [`Archive::marked_icons`] asked about one address, and its own method because the caller
+    /// that needs it is not the one that prunes: a worker's write lands on the UI thread after
+    /// the permission for it was granted, and the row that granted it may have been forgotten in
+    /// between. That caller has an address and needs a yes or a no, not a set to build.
+    pub fn marks_icon(&self, icon: &str) -> bool {
+        self.marked_icons().any(|m| m == icon)
+    }
+
     /// Whether this page is already kept, fragment ignored.
     ///
     /// `Url` equality includes the fragment, so a raw comparison files `article#comments` and
@@ -2266,6 +2276,15 @@ mod tests {
             rows[0].icon.as_deref(),
             Some("https://next.example/favicon.ico")
         );
+
+        // The same question asked about one address, which is what a worker's write has to be
+        // checked against: the permission was granted when the job was submitted and the row
+        // may have been forgotten since.
+        assert!(a.marks_icon("https://kept.example/mark.png"));
+        assert!(a.marks_icon("https://next.example/favicon.ico"));
+        assert!(!a.marks_icon("https://watched.example/favicon.ico"));
+        a.forget(&u("https://kept.example/page"));
+        assert!(!a.marks_icon("https://kept.example/mark.png"));
     }
 
     /// The row's own address may hold one — `Archive::bookmark` allows it, because a keypress
