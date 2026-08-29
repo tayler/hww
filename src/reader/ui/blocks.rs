@@ -21,18 +21,28 @@ use eframe::egui::{self, RichText, Ui};
 
 /// Render a block list. `first_block` is the index of `blocks[0]` in the document, so outline
 /// jumps and fragment scrolls can name a target; nested lists pass `None`.
+///
+/// **Every call to this is a nested run**, and clearing [`RenderCtx::block`] for the length of
+/// it is what says so: the reading column draws a top-level block by calling [`block_ui`]
+/// itself, and the four ways one block gets inside another — a list item, a quotation, an
+/// entry's summary, a comment's own body — all arrive here. See the field's own doc for what
+/// the three tables keyed by it would do with a nested run's rows.
 pub fn blocks_ui(
     ui: &mut Ui,
     blocks: &[ir::Block],
     ctx: &mut RenderCtx<'_>,
     scroll_to: Option<usize>,
 ) {
+    // Restored rather than left cleared: a run of blocks inside one top-level block is followed
+    // by the rest of that block, and `Block::Quote` puts one in the middle of a page.
+    let outer = ctx.block.take();
     for (i, b) in blocks.iter().enumerate() {
         let resp = ui.scope(|ui| block_ui(ui, b, ctx)).response;
         if scroll_to == Some(i) {
             resp.scroll_to_me(Some(egui::Align::TOP));
         }
     }
+    ctx.block = outer;
 }
 
 pub fn block_ui(ui: &mut Ui, b: &ir::Block, ctx: &mut RenderCtx<'_>) {
@@ -156,6 +166,13 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
         .iter()
         .any(|e| e.icon.is_some())
         .then(|| theme::snap(ctx.opts.base_size_pt * 1.25));
+    // `None` inside a card's summary or a list item, and the window rule is off for the whole
+    // run when it is: the heights are keyed by top-level block, a nested run has no such index,
+    // and borrowing the containing block's would have the two runs overwriting each other's
+    // rows. Nothing is lost by laying a nested run out whole — it is a card's own body, held to
+    // `budget::lead_in` and to `html::MAX_CARD_NESTING`, not the five thousand rows of
+    // `hww:history` this rule exists for.
+    let keyed = ctx.block;
     for (row, e) in entries.iter().enumerate() {
         ui.add_space(gap);
         ui.separator();
@@ -173,9 +190,14 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
         // skipped row has to claim its space rather than collapse — `allocate_space`, not
         // `add_space`.
         let y = ui.next_widget_position().y;
-        let skip = ctx
-            .band
-            .zip(ctx.entry_heights.get(&(ctx.block, row)).copied())
+        let skip = keyed
+            .zip(ctx.band)
+            .and_then(|(block, band)| {
+                ctx.entry_heights
+                    .get(&(block, row))
+                    .copied()
+                    .map(|h| (band, h))
+            })
             .and_then(|(band, h)| band.skips(y, h).then_some(h));
         // What is allocated back is the row's own height, which is not the same number as its
         // rect: see [`remember`], which is where that is measured and argued.
@@ -186,7 +208,7 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
         {
             let Some(box_size) = icon else {
                 entry_ui(ui, e, ctx);
-                remember(ui, ctx, row, y);
+                remember(ui, ctx, keyed, row, y);
                 continue;
             };
             // Two columns: the mark, then everything the row says. The gutter is the mark
@@ -226,7 +248,7 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
                 );
             });
         }
-        remember(ui, ctx, row, y);
+        remember(ui, ctx, keyed, row, y);
     }
 }
 
@@ -246,7 +268,13 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
 /// being drawn. One frame of laying the run out whole, and the table is right from then on.
 /// Costs one `f32` comparison per drawn row, and says nothing about a row whose height really
 /// did change — an arriving thumbnail already goes through `measure::Heights::forget`.
-fn remember(ui: &Ui, ctx: &mut RenderCtx<'_>, row: usize, y: f32) {
+fn remember(ui: &Ui, ctx: &mut RenderCtx<'_>, keyed: Option<usize>, row: usize, y: f32) {
+    // Nothing recorded for a nested run, matching the skip that was not offered it. A height
+    // filed under the containing block's index is worse than no height: it is the outer run's
+    // row `row`, and the next frame reads it back as one.
+    let Some(block) = keyed else {
+        return;
+    };
     // **How far the cursor moved, not how tall the row's rect was.** The two are different
     // numbers: a `Ui`'s rect is the union of what it drew, and the trailing space `blocks_ui`
     // leaves under the last paragraph of a dek is cursor movement with nothing in it. Recording
@@ -257,15 +285,14 @@ fn remember(ui: &Ui, ctx: &mut RenderCtx<'_>, row: usize, y: f32) {
     // the row plus one item spacing, and the spacing is the layout's to put there. Counting it
     // in the stored height counts it twice, which is the same bug in the other direction.
     let used = (ui.next_widget_position().y - y - ui.spacing().item_spacing.y).max(0.0);
-    let key = (ctx.block, row);
+    let key = (block, row);
     // Sub-pixel drift is rounding, not a relayout. A line of text is twenty-odd points.
     if ctx
         .entry_heights
         .get(&key)
         .is_some_and(|had| (had - used).abs() > 0.5)
     {
-        ctx.entry_heights
-            .retain(|(block, _), _| *block != ctx.block);
+        ctx.entry_heights.retain(|(b, _), _| *b != block);
     }
     ctx.entry_heights.insert(key, used);
 }

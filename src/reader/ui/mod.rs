@@ -133,8 +133,19 @@ pub struct RenderCtx<'a> {
     /// The window the reading column may skip outside of, or `None` when this block is laid
     /// out whole. Consulted by `thread_ui`, which skips comment by comment inside one block.
     pub band: Option<crate::reader::measure::Band>,
-    /// Which top-level block is being drawn, the first half of a comment-height key.
-    pub block: usize,
+    /// Which top-level block is being drawn, the first half of a comment- or entry-height key,
+    /// and the key `RenderCtx::threads` is looked up by.
+    ///
+    /// **`None` means "not a top-level block", and every consumer has to say what it does with
+    /// that.** `blocks_ui` clears it for the length of a nested run, because the three things
+    /// keyed by it are all keyed by *document position* and a nested run has none: `Block::List`
+    /// items, `Block::Quote` bodies, `Entry::summary` and a comment's own blocks all recurse
+    /// through it, and `html::summary_of` really does pass a `Block::Entries` into an
+    /// `Entry::summary`. Left set, a nested run of entries would restart at `row = 0` and
+    /// overwrite the outer run's heights under the outer run's key — which `remember` reads as a
+    /// relayout and answers by throwing the whole table away, every frame. A nested thread would
+    /// be handed the containing block's tree, or no tree at all.
+    pub block: Option<usize>,
     /// Where `ImagePolicy::Auto` may fetch, or `None` under every other policy.
     ///
     /// Deliberately not [`RenderCtx::band`], which is `None` whenever a block is laid out
@@ -202,7 +213,7 @@ impl RenderCtx<'_> {
             focus_other: false,
             reading_list: false,
             band: None,
-            block: 0,
+            block: None,
             autoload_band: None,
             autoload_srcs: Vec::new(),
             icon_band: None,

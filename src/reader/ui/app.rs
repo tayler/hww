@@ -1556,8 +1556,10 @@ impl ReaderApp {
 
     /// The one place an icon's request size is chosen, so the masthead's mark and a bookmarks list
     /// row's are decoded to the same 64 px and cannot drift apart.
-    fn load_favicon_job(&mut self, src: &str, automatic: bool, mark: Mark) {
-        self.request_image(src, ICON_PX, false, automatic, mark);
+    ///
+    /// Answers [`Self::request_image`]'s "did a request leave", which only `load_site_icons` reads.
+    fn load_favicon_job(&mut self, src: &str, automatic: bool, mark: Mark) -> bool {
+        self.request_image(src, ICON_PX, false, automatic, mark)
     }
 
     /// Draw a mark from `reader::iconcache` if it is there, and say whether that settled it.
@@ -1688,8 +1690,8 @@ impl ReaderApp {
         // Counted once and kept: `Images::pending` walks the whole state map, and asking it per
         // candidate made the loop quadratic in a list whose marks are still arriving. It counts
         // network requests alone, so the marks `kept_mark` settles off the disk are outside it
-        // in both builds. Every path below that starts one adds one, so the running figure is
-        // the same figure.
+        // in both builds, and `load_favicon_job` reports whether a request actually left — so
+        // the running figure is the same figure `pending()` would answer with.
         let mut pending = self.images.pending();
         for src in srcs {
             // Asked once per page, and this is the line that stops the LRU from becoming a
@@ -1722,11 +1724,25 @@ impl ReaderApp {
                 break;
             }
             self.icons_asked.insert(src.clone());
-            self.load_favicon_job(src, true, Mark::Kept);
-            pending += 1;
+            // `+= 1` on the answer and not on the call: `request_image` declines an address it
+            // cannot join and a format it will not decode, and neither of those is a connection.
+            // Counted regardless, a band holding a handful of SVG marks reached
+            // `MAX_OUTSTANDING` having contacted nobody and left the rows under them undrawn
+            // for the frame.
+            if self.load_favicon_job(src, true, Mark::Kept) {
+                pending += 1;
+            }
         }
     }
 
+    /// Ask for one picture, and say whether that put a request on the network.
+    ///
+    /// **False is not failure.** Every early return below is a request that did not leave — the
+    /// answer is already known, the address will not join, the format is declined — and each one
+    /// is a decision this function makes rather than one its callers can make for it.
+    /// `load_site_icons` throttles on a running count of requests in flight, and a caller that
+    /// assumed the call it just made was one of them counted an SVG mark it had refused to fetch
+    /// against a ceiling that bounds open connections.
     fn request_image(
         &mut self,
         src: &str,
@@ -1734,27 +1750,27 @@ impl ReaderApp {
         announce: bool,
         automatic: bool,
         mark: Mark,
-    ) {
+    ) -> bool {
         // The visible page, and *its* request id rather than `self.current`: see `Ready::req`.
         let Some(ready) = self.shown() else {
-            return;
+            return false;
         };
         let page_req = ready.req;
         if self.images.is_pending(src) {
-            return;
+            return false;
         }
         // Beside `is_pending`, and for the same reason: this is the one door, and the paths
         // that reach it without drawing a control — "load all", and a click on a placeholder
         // the LRU evicted and redrew as an offer — would otherwise re-issue a request whose
         // answer is already known.
         if self.images.refuses_retry(src) {
-            return;
+            return false;
         }
         let base = ready.loaded.prov.final_url.clone();
         let Ok(url) = base.join(src) else {
             self.images
                 .fail(src, Failure::permanent("unusable image address".to_owned()));
-            return;
+            return false;
         };
         // Ahead of the host, the disclosure, and the job. A format this reader declines was
         // being fetched in full and then refused from its bytes, which cost a third-party
@@ -1768,7 +1784,7 @@ impl ReaderApp {
         if let Some(name) = image_decode::declined_by_url(&url) {
             let why = image_decode::DecodeError::Unsupported(name).to_string();
             self.images.fail(src, Failure::permanent(why));
-            return;
+            return false;
         }
         let host = url.host_str().unwrap_or("?").to_owned();
         // Where these bytes may be kept, decided here and carried to the worker. A worker sees
@@ -1811,6 +1827,7 @@ impl ReaderApp {
         if announce {
             self.flash(format!("loading one image from {host}"));
         }
+        true
     }
 
     fn load_all_images(&mut self, ctx: &egui::Context) {
@@ -3966,7 +3983,7 @@ impl ReaderApp {
                 ui.allocate_space(egui::vec2(0.0, h));
                 continue;
             }
-            ctx.block = i;
+            ctx.block = Some(i);
             ctx.band = may_skip.then_some(band);
             let had_focus = ctx.focus_href.is_some()
                 || ctx.focus_image.is_some()

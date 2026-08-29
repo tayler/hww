@@ -191,9 +191,9 @@ still talking. What was agreed, and what was left for the autumn.</p><span class
 ///
 /// `FRONT` has seven cards and fits in about two screens, so every row of it is inside the band
 /// and the skip never fires. This one is sixty, which at 900x800 leaves the great majority of
-/// them clear of the window in either direction once the page is scrolled — so the `front-long`
-/// scene photographs rows drawn *below* a run of skipped ones, which is where an error in the
-/// remembered heights shows up as text in the wrong place.
+/// them clear of the window in either direction once the page is scrolled — so the
+/// `entries-scrolled` scene photographs rows drawn *below* a run of skipped ones, which is where
+/// an error in the remembered heights shows up as text in the wrong place.
 fn front_long() -> String {
     let mut s = String::from(
         "<html lang=\"en\"><head><title>The Example Times - Every Story</title>\n\

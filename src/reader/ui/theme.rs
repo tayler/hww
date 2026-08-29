@@ -500,8 +500,6 @@ pub fn bar_pad(opts: &ReadOpts) -> i8 {
     (opts.base_size_pt * 0.5).round().clamp(6.0, 24.0) as i8
 }
 
-/// Install the palette and metrics. Called every frame; cheap, and it means a theme or
-/// measure change takes effect on the frame it happens rather than on the next navigation.
 /// What the installed [`egui::Style`] was built from. See [`apply`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct StyleKey {
@@ -509,6 +507,13 @@ pub struct StyleKey {
     dark: bool,
 }
 
+/// Install the palette and metrics, and return the palette.
+///
+/// Called every frame, and the palette it answers with is built every frame; the `Style` behind
+/// it is written only when `installed` says this frame would install something different. A
+/// theme or measure change still takes effect on the frame it happens rather than on the next
+/// navigation, because the key holding the install back is derived from exactly the two inputs
+/// that can change — see the comment below for why those two are the whole of it.
 pub fn apply(ctx: &egui::Context, opts: &ReadOpts, installed: &mut Option<StyleKey>) -> Palette {
     let dark = system_is_dark(ctx);
     let pal = palette(opts.theme, dark);
