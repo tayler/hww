@@ -182,7 +182,7 @@ fn matches(a: &str, b: &str) -> bool {
 
 /// Collapse whitespace and drop a trailing ` — Site` / ` | Site` suffix when it names the site.
 fn strip_site(s: &str, site_name: Option<&str>) -> String {
-    let mut t: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut t = crate::ir::normalize_ws(s);
     if let Some(site) = site_name {
         let site = site.trim().to_lowercase();
         if !site.is_empty() {

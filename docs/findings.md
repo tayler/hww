@@ -520,3 +520,95 @@ width, so every feed headline in a card was clamped to that floor. `reader::titl
 now reformats it to `2026-08-27`, which changes that function's contract from truncating to
 reformatting and gives dates one shape everywhere in the reader. `render.rs` is left verbatim:
 the text renderer has no width pressure and no reason to restate what the page said.
+
+# Phase 6: the hot paths
+
+Two paths were read end to end and measured: extraction, which runs once per navigation over
+untrusted DOM, and the draw loop, which runs while the reader scrolls. Everything below holds
+what hww extracts, draws, remembers, and requests identical except where it says otherwise.
+
+Measured 2026-08-29 on the crate's own fixtures, since there is no benchmark harness and no
+corpus on disk. Two figures, both `cargo test --release --lib -- --test-threads=1`, which is the
+build that ships:
+
+| suite | before | after |
+|---|---|---|
+| `html::` — extraction over every fixture | 0.32 s | 0.27 s |
+| `reader::archive` — filling all three caps | 2.03 s | 0.09 s |
+
+The archive figure is the headline and it is not about tests. `Archive::same_page` parsed the
+stored string with `Url::parse` per item, and the three tenants share one vector: a navigation
+scanned every visited row and then every bookmark, so a reader at the caps paid up to seven
+thousand URL parses on the frame a page installed, and `Ctrl+D` paid three times over. Every
+string this build stores came out of `Url::to_string`, so the text before the first `#` is
+already the normalized fragment-stripped form and a byte comparison answers the same question.
+It answers differently for exactly one input — a row hand-written into `archive.json`, which
+`settings::archive_path` documents as the way to carry a 0.3 `library.json` across the rename —
+and that trade is argued at the function and pinned by
+`same_page_is_the_parse_it_replaced`.
+
+**Root selection was not deterministic.** `html::score_best` reads its scores out of a `HashMap`
+and `max_by` keeps the last maximum, so a page whose containers score equally chose its root by
+the process's hash seed. The 6,000-deep chain in `deeply_nested_text_extracts_in_linear_time`
+extracted 53k, 107k, and 168k characters on three consecutive runs of one binary — the same page,
+the same build, three different documents, and a reader reloading such a page could be handed a
+different article each time. A linear chain of wrappers is exactly the shape that ties, because
+each one holds the same prose. The tie now goes to the earlier node, which in an `ego_tree` index
+is the outer container: that is the one `choose_root` prefers on the emitted-text ranking that
+follows, so the two tie-breaks agree rather than fight.
+
+**A debug build measures this backwards.** `nested_story_cards_do_not_walk_off_the_stack` runs
+40% *slower* after the change under `cargo test` and 11% faster under `cargo test --release`.
+`thread::text_len` stopped materializing a subtree's text to take its length and counts
+non-whitespace bytes and words instead (`html::WsSummary`, which already did that arithmetic for
+the scoring pass); the counting walk is iterator-shaped where the old one was a `push_str`, and
+an unoptimized build does not inline it. Read release numbers for anything in this phase.
+
+**The list views laid out every row, every frame.** `blocks::entries_ui` had no viewport check,
+and `hww:history` holds up to `MAX_VISITS` rows — so the block-level window rule in `ready_screen`
+could never help it, because the whole page is one `Block::Entries`. The row-level rule is
+`thread_ui`'s, and getting it right needed two corrections that are worth recording because
+both are invisible in a screenshot of a short list: a row's remembered height is **how far the
+cursor moved, not how tall its rect was** (a `Ui`'s rect excludes the trailing space under its
+last paragraph), and `allocate_space` adds the layout's item spacing back, so the gap comes off
+before the height is stored. Each error is a couple of points per row and neither shows on a page
+that fits the window; on sixty rows they are a page that ends ten rows early, with `Shift+G`
+landing above the last story.
+
+**A long list is measured wrong on the frame it arrives.** The chrome font's metrics are not
+ready on the first frame a page is drawn, so `entry_ui` measures a narrower timestamp, gives the
+headline more width, and the row comes out a line shorter than it will ever be again — and the
+first frame is the only one on which every row is laid out. Rows near the window correct
+themselves; rows the reader has not scrolled to would keep that height for as long as the page is
+open. So a drawn row that measures differently from what was remembered throws away the whole
+run's table rather than just its own entry: the rows it cannot see are wrong for the same reason
+it was, and being drawn is the only way they can be re-measured.
+
+## Recorded, not changed
+
+- **`thread::link_density` and `html::TextMetrics::link_density` compute the same quantity and
+  disagree.** Different text semantics (`thread::text_of` skips only `script|style|svg` and
+  inserts no block spacing; `WsSummary` reproduces `inner_text`, which skips the whole `NOISE`
+  list and spaces every block element), and `thread`'s early `1.0` for an element that *is* an
+  anchor, which `select("a")` cannot see. That case is pinned by
+  `a_list_of_bylined_cards_is_not_a_thread` and `cards::a_card_that_is_itself_the_anchor_counts`.
+  Unifying them would move `MAX_LINK_DENSITY`, which Phase 3 measured. A question for the next
+  triage, not for a change that claims to move nothing.
+- **`thread::depth_of`'s indent search walks the whole subtree**, which under `with_nested`
+  includes nested posts, so a nested reply's `indent` can answer for its parent. `body_of` and
+  `find_hint_skipping` use `descendants_skipping` for exactly this reason. Fixing it needs a
+  fixture that nests *and* carries `indent` — no existing one does both — and a decision about
+  which answer is right.
+- **Candidate roots are scored under a dummy base** (`root_candidates` uses `https://x.invalid/`)
+  while the winner is walked under the real one, and the walk is base-dependent through
+  `all_same_document_links`. Passing the real base in would let the winner's blocks be reused
+  instead of rebuilt, saving a full walk, and would also move `emitted` and therefore candidate
+  ranking on pages with absolute self-links. There is no version of this that is free.
+- **`cards::detect`'s `"fewer than 3 members"` rejection is unreachable.** `sibling_groups`
+  already filters `g.len() >= MIN_SIBLINGS`, and both constants are 3, so that string can never
+  appear in a `--why` report. Either the branch is dead or the two constants are meant to be able
+  to differ and silently cannot.
+- **`settings_round_trip_and_survive_a_corrupt_file` is flaky.** It `set_var`s `HWW_CONFIG_DIR`,
+  which is process-global, while the rest of the suite runs in parallel threads; its `SAFETY`
+  comment argues single-threadedness *within the test*, which is not the condition that matters.
+  Observed failing once in about a dozen runs, on a tree that does not touch settings.

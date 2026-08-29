@@ -502,8 +502,40 @@ pub fn bar_pad(opts: &ReadOpts) -> i8 {
 
 /// Install the palette and metrics. Called every frame; cheap, and it means a theme or
 /// measure change takes effect on the frame it happens rather than on the next navigation.
-pub fn apply(ctx: &egui::Context, opts: &ReadOpts) -> Palette {
-    let pal = palette(opts.theme, system_is_dark(ctx));
+/// What the installed [`egui::Style`] was built from. See [`apply`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyleKey {
+    opts: ReadOpts,
+    dark: bool,
+}
+
+pub fn apply(ctx: &egui::Context, opts: &ReadOpts, installed: &mut Option<StyleKey>) -> Palette {
+    let dark = system_is_dark(ctx);
+    let pal = palette(opts.theme, dark);
+    // **The palette is per-frame; the style is not.** `palette` is a `match` over constants
+    // returning a `Copy` struct, and every panel wants it. Building the `Style` is a
+    // `Style::default`, a `Visuals`, a five-entry map of `FontId`s, and then a clone of the
+    // whole thing into both of egui's theme slots — from two inputs that change on a keypress at
+    // most, redone sixty times a second while the reader scrolled.
+    //
+    // The key is those two inputs and nothing else. Fonts are installed once in `ReaderApp::new`
+    // and `set_fonts` writes `FontDefinitions`, not `Style`. Zoom is applied at paint time
+    // through `pixels_per_point`, and `Style` is in points. And nothing else in the crate writes
+    // the context style: every other `style_mut` under `ui/` is `Ui::style_mut`, which copies on
+    // write and dies with its `Ui`. Compared before the early return, so the frame the desktop
+    // appearance flips does not leave one slot dressed for the other theme.
+    //
+    // Held by the caller rather than in a static: `hww-shot` builds a `Context` per scene in one
+    // process, and a key that outlived the context it described would skip the install for every
+    // scene after the first and photograph egui's own default dress.
+    let key = StyleKey {
+        opts: opts.clone(),
+        dark,
+    };
+    if installed.as_ref() == Some(&key) {
+        return pal;
+    }
+    *installed = Some(key);
     let mut style = egui::Style::default();
 
     let mut visuals = if pal.dark_mode {

@@ -486,11 +486,7 @@ fn last_segment(href: &str) -> Option<String> {
 /// A headline, whitespace collapsed. Empty for an item that carried no title element, or one
 /// holding only markup.
 fn payload_title(p: Option<&Payload<'_, '_>>) -> String {
-    p.map(plain_of)
-        .unwrap_or_default()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    crate::ir::normalize_ws(&p.map(plain_of).unwrap_or_default())
 }
 
 /// A feed as a document.

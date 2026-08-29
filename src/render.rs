@@ -61,6 +61,11 @@ pub fn sanitize_for_terminal(s: &str) -> String {
         .collect()
 }
 
+/// Reached from the tests rather than from either binary: `--why` prints an
+/// [`crate::html::Explanation`] and the GUI draws the IR. It stays because it is the oracle a
+/// large share of `html`'s tests are written against — a rendering of the document that can be
+/// compared against the markup — and because a text renderer is half of what this crate claims
+/// to be.
 pub fn to_text(doc: &Document, opts: &TextOpts) -> String {
     let mut out = String::new();
     if let Some(t) = crate::reader::title::display(doc) {

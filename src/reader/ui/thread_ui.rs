@@ -9,7 +9,7 @@
 
 use crate::ir;
 use crate::reader::face::Face;
-use crate::reader::thread_tree::{self, ThreadTree};
+use crate::reader::thread_tree::ThreadTree;
 use crate::reader::ui::blocks::blocks_ui;
 use crate::reader::ui::{Action, RenderCtx, fonts, theme};
 use eframe::egui::{self, RichText, Ui};
@@ -19,16 +19,20 @@ use eframe::egui::{self, RichText, Ui};
 const GUIDE: f32 = 2.0;
 
 pub fn thread_ui(ui: &mut Ui, comments: &[ir::Comment], ctx: &mut RenderCtx<'_>) {
-    let tree = thread_tree::build(comments);
-    if tree.is_empty() {
+    // Built with the page and read here, rather than rebuilt at the top of every frame this
+    // block is anywhere near the window. See `ReaderApp::Ready::threads`: the build is a
+    // `CommentKey` per comment and a text walk of the whole discussion, and it used to run
+    // before the band was consulted, so a thread whose every comment was off-screen still paid
+    // for all of it. Absent means no thread at this index, which is what an empty tree meant.
+    let Some(tree) = ctx.threads.get(&ctx.block).filter(|t| !t.is_empty()) else {
         return;
-    }
+    };
     // Iterative, with an explicit stack: `(node, needs_no_further_children)`.
     let mut stack: Vec<usize> = tree.roots.iter().rev().copied().collect();
     while let Some(n) = stack.pop() {
         let node = &tree.nodes[n];
         let comment = &comments[node.comment];
-        let collapsed = is_collapsed(&tree, n, ctx);
+        let collapsed = is_collapsed(tree, n, ctx);
 
         // The window rule, one level down: a comment clear of the band is empty space of the
         // height it measured last time. Its children are still walked, so the ones that reach
@@ -60,7 +64,7 @@ pub fn thread_ui(ui: &mut Ui, comments: &[ir::Comment], ctx: &mut RenderCtx<'_>)
             });
             let reply = ui
                 .vertical(|ui| {
-                    header(ui, comment, &tree, n, collapsed, ctx);
+                    header(ui, comment, tree, n, collapsed, ctx);
                     if !collapsed {
                         blocks_ui(ui, &comment.blocks, ctx, None);
                     }

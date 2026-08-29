@@ -28,10 +28,7 @@ pub fn build(blocks: &[ir::Block]) -> Vec<OutlineEntry> {
         .enumerate()
         .filter_map(|(i, b)| match b {
             ir::Block::Heading { level, inlines } => {
-                let text = ir::plain_text(inlines)
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let text = ir::normalize_ws(&ir::plain_text(inlines));
                 (!text.is_empty()).then_some((i, *level, text))
             }
             _ => None,

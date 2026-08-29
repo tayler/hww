@@ -116,7 +116,7 @@ pub fn bar(ui: &mut Ui, pal: &Palette, settings: &Settings, enable: Enable, chec
             // label. `status_strip` does the same and for the same reason.
             ui.style_mut().override_font_id = Some(font.clone());
             egui::MenuBar::new().ui(ui, |ui| {
-                for (i, m) in menu::bar().into_iter().enumerate() {
+                for (i, m) in menu::bar().iter().enumerate() {
                     let button = egui::containers::menu::MenuButton::new(
                         RichText::new(m.title).color(pal.fg).font(font.clone()),
                     );
