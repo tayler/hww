@@ -98,7 +98,7 @@
 //! No page content, and no favicon. `ir::Entry::image` is drawn by `ui::blocks::entries_ui` as an
 //! article thumbnail under the reader's image policy, so a library of twenty sites carrying
 //! twenty favicon URLs would offer twenty third-party requests on one screen — which is not what
-//! anybody asked for by pressing `b`. A stored URL that nothing renders would be mechanism with
+//! anybody asked for by opening the library. A stored URL that nothing renders would be mechanism with
 //! no reader, which is the standard that removed `force_thread`. Both lists are names and
 //! addresses.
 //!
@@ -776,7 +776,7 @@ pub fn opens_on_launch(settings: &Settings, archive: &Archive) -> bool {
 /// an error page, and that is right there: an engine that answered with nothing is a dead end.
 /// An empty library is a new reader, and an error page would be the application scolding them for
 /// not having used it yet. `entries_ui` over an empty slice draws literally nothing, so the
-/// one-line paragraph is what stops `b` from opening a blank screen.
+/// one-line paragraph is what stops the library key from opening a blank screen.
 pub fn document(archive: &Archive) -> ir::Document {
     view(
         LIBRARY,

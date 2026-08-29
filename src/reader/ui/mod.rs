@@ -29,7 +29,7 @@ use url::Url;
 #[derive(Debug, Clone)]
 pub enum Action {
     Follow(String),
-    /// The context menu's second item, and `R`'s per-link equivalent.
+    /// The context menu's second item, and the bare reload's per-link equivalent.
     /// Follow with neither table applied: the page as the host sends it.
     FollowBare(String),
     Copy(String),
