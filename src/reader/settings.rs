@@ -261,6 +261,18 @@ pub fn archive_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("archive.json"))
 }
 
+/// Where the kept site icons live: a directory beside the two files, in the same config
+/// directory for the same reason they are.
+///
+/// A directory rather than a third file, and bytes rather than JSON: see
+/// `reader::archive::icons_path`, which is the door the rest of the program uses and where the
+/// argument is. What matters here is only that it is under [`config_dir`], so `HWW_CONFIG_DIR`
+/// still names everything hww writes and README's uninstall commands still delete all of it with
+/// one path.
+pub fn icons_dir() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("icons"))
+}
+
 /// Load, or fall back to defaults with a reason.
 ///
 /// A parse failure returns the defaults *and* the complaint rather than refusing to start.
@@ -312,21 +324,39 @@ pub fn save(settings: &Settings) -> std::io::Result<()> {
 /// diverges: a second copy that forgot `sync_dir` would be indistinguishable from this one until
 /// a machine lost power.
 pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // The newline is added here rather than inside the durability steps, so the one thing that
+    // is *about JSON* is not applied to bytes that are not. `write_bytes_atomically` used to be
+    // this function, and a caller keeping binary through it got a stray `\n` on the end of every
+    // file it wrote — invisible in an editor, fatal to a length-checked header.
+    let mut text = Vec::with_capacity(bytes.len() + 1);
+    text.extend_from_slice(bytes);
+    text.push(b'\n');
+    put(path, &path.with_extension("json.tmp"), &text)
+}
+
+/// Put exactly `bytes` at `path`, through the same temporary file and rename.
+///
+/// The half of [`write_atomically`] that adds nothing. `reader::iconcache` keeps fetched image
+/// bytes behind a length-counted header, so a trailing newline it did not write is a file that
+/// will not parse. Same durability, same litter rule, one byte less opinion.
+pub fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    put(path, &path.with_extension("tmp"), bytes)
+}
+
+fn put(path: &Path, tmp: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let Some(dir) = path.parent() else {
         return Ok(());
     };
     std::fs::create_dir_all(dir)?;
-    let tmp = path.with_extension("json.tmp");
-    write_then_rename(&tmp, path, dir, bytes).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
+    write_then_rename(tmp, path, dir, bytes).inspect_err(|_| {
+        let _ = std::fs::remove_file(tmp);
     })
 }
 
-fn write_then_rename(tmp: &Path, path: &Path, dir: &Path, json: &[u8]) -> std::io::Result<()> {
+fn write_then_rename(tmp: &Path, path: &Path, dir: &Path, bytes: &[u8]) -> std::io::Result<()> {
     {
         let mut f = std::fs::File::create(tmp)?;
-        f.write_all(json)?;
-        f.write_all(b"\n")?;
+        f.write_all(bytes)?;
         // The rename is only atomic with respect to a crash if the bytes are actually down.
         f.sync_all()?;
     }

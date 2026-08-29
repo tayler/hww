@@ -95,6 +95,21 @@ pub struct Counts {
     pub hosts: Vec<String>,
     pub cookie_attempts: usize,
     pub referer_requests: usize,
+    /// Site marks drawn from `reader::iconcache` — read off this machine, contacting nobody.
+    ///
+    /// Its own field rather than a share of [`Counts::images`], and that is the disclosure: a
+    /// cached mark must never reach `ImageStore::record_request`, so it moves no host tally and
+    /// no Referer count, and folding it into `images` would print "12 images loaded, from 0
+    /// hosts". The panel's whole job is that the numbers agree with what left the machine.
+    pub icons_from_cache: usize,
+    /// Site marks this page asked a host for, whether or not the bytes arrived.
+    ///
+    /// The masthead's own and every row's in one number, because they are one request through
+    /// one door. Paired with [`Counts::icons_from_cache`] so the row can print both: a mark that
+    /// was fetched and a mark that was not are the two answers the reader is owed, and printing
+    /// only the cached half would leave the fetched half to be inferred from a row about
+    /// pictures.
+    pub icons_requested: usize,
 }
 
 /// How the page in the column got there.
@@ -200,9 +215,11 @@ pub fn rows(
     // A reader who is about to read `Downloaded 82 kB` has to have been told first that those
     // bytes did not move for this visit.
     //
-    // "the document", precisely: `ensure_favicon` does re-request the site icon on a restored
-    // page, because `clear_page` dropped it. "Nothing was requested" would be a lie of exactly
-    // the kind this panel exists not to tell.
+    // "the document", precisely: `clear_page` dropped the site icon, so `ensure_favicon` asks
+    // for it again on a restored page — off the disk when the page is one the reader bookmarked
+    // and `reader::iconcache` has its mark, and off the host otherwise. Either way something
+    // happens that "nothing was requested" would be a lie about, of exactly the kind this panel
+    // exists not to tell. The Site icons row below is what says which of the two it was.
     if let Arrival::FromMemory { age } = arrival {
         out.push(
             Row::new(
@@ -315,6 +332,31 @@ pub fn rows(
 fn third_parties(counts: &Counts, document_cookies: usize) -> Vec<Row> {
     use Group::*;
     let mut out = Vec::new();
+    // First of the third-party rows, and ahead of the ones that count requests, on the same
+    // argument the `Restored` row is placed on: a reader about to read how many hosts were
+    // contacted has to be told first that some of these marks contacted none. It appears
+    // whenever the page drew a mark at all, zeros included — a row that showed up only on a hit
+    // would say nothing about a miss, and "0 from disk" is how a reader learns the store exists
+    // and is empty for this page.
+    let marks = counts.icons_from_cache + counts.icons_requested;
+    if marks > 0 {
+        out.push(
+            Row::new(
+                ThirdParties,
+                "Site icons",
+                format!(
+                    "{} from disk, {} fetched",
+                    counts.icons_from_cache, counts.icons_requested
+                ),
+            )
+            .with_note(
+                "The little mark beside a site's name: this page's own, and one for each row of \
+                 your bookmarks or reading list. hww keeps those bytes on this machine for \
+                 addresses those two lists already name, so opening a list again draws them \
+                 without contacting anybody. Emptying either list deletes the ones it named.",
+            ),
+        );
+    }
     let cookies = document_cookies + counts.cookie_attempts;
     if cookies > 0 {
         out.push(
@@ -543,6 +585,8 @@ mod tests {
             // no disclosure that never left. A built page reporting `Referer sent` would be
             // this module's own failure mode.
             referer_requests: 0,
+            icons_from_cache: 0,
+            icons_requested: 2,
         };
         let rows = rows(&p, &counts, false, Arrival::Built, Bookmarked::No);
         let loaded = find(&rows, "Images loaded").expect("the marks are reported");
@@ -633,6 +677,8 @@ mod tests {
             hosts: vec!["cdn.example.net".to_owned(), "img.example.org".to_owned()],
             cookie_attempts: 0,
             referer_requests: 2,
+            icons_from_cache: 0,
+            icons_requested: 0,
         };
         let rows = rows(&prov(), &counts, false, Arrival::Fetched, Bookmarked::No);
         let images = find(&rows, "Images loaded").unwrap();
@@ -722,6 +768,8 @@ mod tests {
             hosts: vec!["cdn.example.net".to_owned()],
             cookie_attempts: 1,
             referer_requests: 1,
+            icons_from_cache: 0,
+            icons_requested: 0,
         };
         for row in rows(&p, &counts, false, memory(), Bookmarked::No) {
             assert!(!row.value.contains('→'), "arrow in {:?}", row.value);
@@ -747,6 +795,8 @@ mod tests {
             hosts: vec!["cdn.example.net".to_owned()],
             cookie_attempts: 0,
             referer_requests: 1,
+            icons_from_cache: 0,
+            icons_requested: 0,
         };
         let order = [
             Group::Address,
@@ -768,6 +818,55 @@ mod tests {
                 assert!(!g.title().is_empty());
             }
         }
+    }
+
+    /// The row exists to say what did *not* leave the machine, so it has to appear on the page
+    /// where nothing did — and print both halves, because "3 from disk" alone leaves the reader
+    /// to infer the fetched count from a row about pictures.
+    #[test]
+    fn a_page_whose_marks_came_off_the_disk_says_so_and_names_no_host() {
+        let counts = Counts {
+            icons_from_cache: 12,
+            ..Counts::default()
+        };
+        let all_kept = rows(&prov(), &counts, false, Arrival::Fetched, Bookmarked::Yes);
+        let row = all_kept
+            .iter()
+            .find(|r| r.label == "Site icons")
+            .expect("a page that drew marks reports them");
+        assert_eq!(row.value, "12 from disk, 0 fetched");
+        assert!(
+            !all_kept.iter().any(|r| r.label == "Images loaded"),
+            "nothing was loaded from a host, so nothing claims to have been"
+        );
+        // And the zero is printed rather than hidden: a row that appeared only on a hit would
+        // say nothing about a miss.
+        let missed = Counts {
+            icons_requested: 4,
+            ..Counts::default()
+        };
+        let after_a_miss = rows(&prov(), &missed, false, Arrival::Fetched, Bookmarked::No);
+        assert_eq!(
+            after_a_miss
+                .iter()
+                .find(|r| r.label == "Site icons")
+                .map(|r| r.value.as_str()),
+            Some("0 from disk, 4 fetched")
+        );
+    }
+
+    /// An article page draws no mark of its own and no column, and a row of two zeros under
+    /// Third parties would be a heading about nothing.
+    #[test]
+    fn a_page_that_drew_no_mark_reports_no_icon_row() {
+        let article = rows(
+            &prov(),
+            &Counts::default(),
+            false,
+            Arrival::Fetched,
+            Bookmarked::No,
+        );
+        assert!(!article.iter().any(|r| r.label == "Site icons"));
     }
 
     #[test]
@@ -804,8 +903,9 @@ mod tests {
         assert!(at < first_response, "the qualifier comes after the numbers");
     }
 
-    /// The note must not claim more than it can. `ensure_favicon` re-requests the site icon on
-    /// a restored page, so "nothing was requested" would be false.
+    /// The note must not claim more than it can. `ensure_favicon` asks for the site icon again on
+    /// a restored page — from `reader::iconcache` if the mark is kept, from the host if it is not
+    /// — so "nothing was requested" would be false.
     #[test]
     fn the_restored_note_is_about_the_document_and_not_the_page() {
         let rows = rows(&prov(), &Counts::default(), false, memory(), Bookmarked::No);

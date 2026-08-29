@@ -89,6 +89,16 @@ pub const PENDING: &str = "[loading]";
 /// lives out here with the rest of the wording so the fast job tests it.
 pub const IMAGES_ARE_OFF: &str = "hww is set not to load images; change Images in Settings.";
 
+/// Why a site mark is not drawn, when hww asked once and the site served nothing.
+///
+/// Never on screen as a sentence: neither `images::site_icon` nor `images::favicon` draws
+/// anything but a ready texture, so a mark that is not there is a gap in a column and no words at
+/// all. It is written here anyway rather than as a literal at the call site, because it is the
+/// *reason* a `Failure` carries, every other one of those is the reader's words, and a string
+/// that becomes visible the day either of those two grows a placeholder must not be the day
+/// somebody notices it was never written for a reader.
+pub const NO_SITE_ICON: &str = "this site served no icon at that address.";
+
 /// What the reader says when a key asks for pictures the page has, but in a format this
 /// renderer declines.
 ///
@@ -387,6 +397,14 @@ pub const UNREADABLE_FILE_REPLACED: &str =
 /// nothing is being written; `archive::save` refuses in that state and says so on the keypress,
 /// and this is the standing half of the same disclosure.
 pub const NO_ARCHIVE_PATH: &str = "Not saved: hww has no configuration directory to write to.";
+
+/// The same sentence for the site marks, under the two groups whose lists draw a column.
+///
+/// Its own string rather than [`NO_ARCHIVE_PATH`] repeated, because the two say different things
+/// about what is lost: with no directory the archive stops remembering pages the reader chose,
+/// while the marks merely go on being fetched every time a list opens, which is what hww did
+/// before this store existed and is a smaller thing to be told.
+pub const NO_ICON_PATH: &str = "Site icons are fetched each time: there is nowhere to keep them.";
 
 /// A keep was asked for on a page whose address is longer than `archive::MAX_URL`.
 ///

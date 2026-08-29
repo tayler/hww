@@ -278,6 +278,26 @@ fn group_footer(
             .color(pal.dim)
             .font(theme::chrome_font(opts)),
     );
+    // The second thing these two tenants write, under the two groups that write it and under
+    // neither of the others. The history is not here because it keeps no marks and draws no
+    // column, and the reader is owed the difference: a store that persists is a store whose path
+    // is printed, and one that does not exist for a tenant should not be named under it.
+    //
+    // No button of its own beside it, deliberately, and `reader::iconcache` carries the
+    // argument: this store persists nothing the archive does not already persist, the two
+    // buttons above empty it along with the lists that filled it, and `ImagePolicy::NoRequests`
+    // already governs whether anything is fetched. What it owes is this line.
+    if matches!(group, Group::Bookmarks | Group::ReadingList) {
+        let icons = match crate::reader::archive::icons_path() {
+            Some(path) => format!("Site icons in {}", path.display()),
+            None => crate::reader::notice::NO_ICON_PATH.to_owned(),
+        };
+        ui.label(
+            RichText::new(icons)
+                .color(pal.dim)
+                .font(theme::chrome_font(opts)),
+        );
+    }
 }
 
 /// One setting: its label, the key that already does it, its control, and its sentence.

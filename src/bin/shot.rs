@@ -231,6 +231,44 @@ page-info panel names the hosts it came from even here, where nothing else was r
 </article></body></html>
 "#;
 
+/// The two pages the `bookmarks-kept` scene keeps, served at `/marked-three` and `/marked-four`.
+///
+/// **Its own two pages and not the other scene's**, and that is the whole reason they exist.
+/// `Command::BookmarkPage` is a toggle, the catalog runs every scene against one `ReaderApp` and
+/// one `archive.json`, and the `bookmarks` scene has already kept `/marked-one` and
+/// `/marked-two` by the time this one runs. Keeping the same two again would take them *off* —
+/// emptying the list, pruning the very marks this scene exists to photograph coming back off the
+/// disk, and passing on a picture of nothing. It only ever behaved as written when run as a
+/// single named scene against an empty scratch directory.
+///
+/// Two more icons for the same reason the first pair have two: a column that tells one site from
+/// another cannot be photographed with one mark repeated.
+const MARKED_THREE: &str = r#"
+<html lang="en"><head><title>Kept once and drawn twice</title>
+<link rel="icon" href="/mark-c.png"></head><body>
+<article>
+<h1>Kept once and drawn twice</h1>
+<p>The mark beside this row is fetched the first time the bookmarks is drawn and written beside
+the file that already holds this address. The second time the list opens, the bytes come off the
+disk and the host is not asked again.</p>
+<p>That is the whole of the store: no page content, no picture from any article, and nothing for
+an address the reader has not written down by hand.</p>
+</article></body></html>
+"#;
+
+const MARKED_FOUR: &str = r#"
+<html lang="en"><head><title>The second row off the disk</title>
+<link rel="icon" href="/mark-d.png"></head><body>
+<article>
+<h1>The second row off the disk</h1>
+<p>Two rows rather than one, because a store that answered for a single address would prove
+nothing about a list. Both marks are read back in the same open, and the page-info panel counts
+them apart from anything fetched.</p>
+<p>Deleting the directory these came from loses nothing: the next open asks both hosts again and
+the column looks exactly as it does here.</p>
+</article></body></html>
+"#;
+
 const KEPT_ONE: &str = r#"
 <html lang="en"><head><title>The page you came back to</title></head><body>
 <article>
@@ -468,6 +506,60 @@ fn catalog(port: u16) -> Vec<Scene> {
                     Step::Run(Command::BookmarkPage),
                     Step::Run(Command::OpenBookmarks),
                     Step::Wait(30),
+                ],
+            )
+        },
+        Scene {
+            settle_ms: 400,
+            volatile: true,
+            ..scene(
+                "bookmarks-kept",
+                "the bookmarks opened a second time: every mark off the disk, no host asked",
+                // The one scene that photographs `reader::iconcache` doing its job, and the only
+                // way to do it: the store is filled by the first open and read by the second, in
+                // one process, so both halves have to be in one scene. A second open is not a
+                // repeat of the `bookmarks` scene — `ImageStore::clear_page` drops every texture
+                // and every counter when the page in between commits, so without the store on
+                // disk this would be two full rounds of requests to both hosts, which is the
+                // shape this whole feature exists to remove.
+                //
+                // Page info rather than the column, because the column looks identical either
+                // way — the bytes are the same bytes. What differs is the row: `Site icons — n
+                // from disk, 0 fetched`, over no `Images loaded` row at all, because nothing was.
+                // A picture of the marks would pass with the store deleted.
+                //
+                // `n` and not a number, because the catalog shares one archive: run alone this
+                // keeps two pages and the row counts two, and run after the `bookmarks` scene it
+                // finds that scene's two rows still in the list and counts four. Both are the
+                // same claim — every mark drawn came off the disk and no host was asked — which
+                // is the only thing this scene is photographing, and why the varying count costs
+                // nothing.
+                //
+                // **Its own two pages**, `/marked-three` and `/marked-four`, and that is not
+                // tidiness. `Command::BookmarkPage` is a toggle: keeping the `bookmarks` scene's
+                // two again would take them off, prune the marks kept for them, and photograph
+                // an empty list. See `MARKED_THREE`.
+                //
+                // The page in between is deliberate and not a detour. It is what commits, and
+                // committing is what clears `icons_asked` and the textures; going straight from
+                // the list to the list would re-draw the same page and prove nothing.
+                //
+                // Volatile for the `bookmarks` scene's two reasons: an entry says the day it was
+                // kept, and the fixture server's port is ephemeral.
+                vec![
+                    Step::Nav(format!("http://127.0.0.1:{port}/marked-three")),
+                    Step::Wait(30),
+                    Step::Run(Command::BookmarkPage),
+                    Step::Nav(format!("http://127.0.0.1:{port}/marked-four")),
+                    Step::Wait(30),
+                    Step::Run(Command::BookmarkPage),
+                    Step::Run(Command::OpenBookmarks),
+                    Step::Wait(40),
+                    Step::Nav(format!("http://127.0.0.1:{port}/marked-three")),
+                    Step::Wait(30),
+                    Step::Run(Command::OpenBookmarks),
+                    Step::Wait(20),
+                    Step::Run(Command::TogglePageInfo),
                 ],
             )
         },
@@ -1423,11 +1515,15 @@ fn serve() -> std::io::Result<u16> {
     let photo = Arc::new(gradient_png());
     let mark_a = Arc::new(mark_png([206, 86, 66]));
     let mark_b = Arc::new(mark_png([54, 108, 168]));
+    let mark_c = Arc::new(mark_png([92, 140, 74]));
+    let mark_d = Arc::new(mark_png([146, 96, 168]));
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let photo = Arc::clone(&photo);
             let mark_a = Arc::clone(&mark_a);
             let mark_b = Arc::clone(&mark_b);
+            let mark_c = Arc::clone(&mark_c);
+            let mark_d = Arc::clone(&mark_d);
             std::thread::spawn(move || {
                 let mut stream = stream;
                 let mut buf = [0u8; 2048];
@@ -1446,6 +1542,10 @@ fn serve() -> std::io::Result<u16> {
                     // real request rather than an empty column. See `archive::well_known_icon`.
                     "/favicon.ico" => ok(&mut stream, "image/png", &mark_a),
                     "/mark-b.png" => ok(&mut stream, "image/png", &mark_b),
+                    // The `bookmarks-kept` scene's own pair, which it must have rather than
+                    // share: keeping a page twice un-keeps it. See `MARKED_THREE`.
+                    "/mark-c.png" => ok(&mut stream, "image/png", &mark_c),
+                    "/mark-d.png" => ok(&mut stream, "image/png", &mark_d),
                     "/marked-one" => ok(
                         &mut stream,
                         "text/html; charset=utf-8",
@@ -1455,6 +1555,16 @@ fn serve() -> std::io::Result<u16> {
                         &mut stream,
                         "text/html; charset=utf-8",
                         MARKED_TWO.as_bytes(),
+                    ),
+                    "/marked-three" => ok(
+                        &mut stream,
+                        "text/html; charset=utf-8",
+                        MARKED_THREE.as_bytes(),
+                    ),
+                    "/marked-four" => ok(
+                        &mut stream,
+                        "text/html; charset=utf-8",
+                        MARKED_FOUR.as_bytes(),
                     ),
                     // Two ordinary documents, for the one scene that needs two *real*
                     // navigations rather than injected pages: `present` resets the history to a
@@ -1896,6 +2006,20 @@ fn main() -> ExitCode {
     // through `Command::BookmarkPage`, so a file left behind by the previous run would leave the
     // bookmarks scene showing a list that grows every time the catalog is run.
     let _ = std::fs::remove_file(scratch.join("archive.json"));
+    // And the marks kept for it, for the sharper version of the same reason. A run that started
+    // with yesterday's icons would draw a column without making the requests that fill it, so a
+    // scene could pass while the fetch it exists to photograph was broken. `iconcache::Cache`
+    // sweeps whatever the archive no longer names at launch and would take these anyway; doing
+    // it here says so, and covers the launch where the archive is not yet empty.
+    //
+    // **Scenes still share the store inside one run**, which they must: it is one process and
+    // one `ReaderApp`. So the `bookmarks` scene fills it and a later scene on the same fixture
+    // origin may draw its masthead mark from disk rather than from the server — visually the
+    // same picture, since the bytes are the same, but a different page-info row. Both scenes
+    // that photograph that panel over a fixture page are `volatile`, which is why this is a note
+    // and not a defect; a new scene that photographs page info over the fixture server has to
+    // read this paragraph first.
+    let _ = std::fs::remove_dir_all(scratch.join("icons"));
     // Safety: before any thread that reads the environment exists.
     unsafe { std::env::set_var("HWW_CONFIG_DIR", &scratch) };
 

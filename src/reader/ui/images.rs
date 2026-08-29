@@ -2,9 +2,12 @@
 //! `reader::image_decode`, deliberately outside this directory so it is tested rather than
 //! merely compiled.
 //!
-//! Nothing in this module touches disk. The texture cache is the only thing a revisit hits and
-//! it dies with the process; a content-addressed on-disk cache is the archive's problem and
-//! arrives with it.
+//! Nothing in this module touches disk, and that line is still exact now that something does.
+//! The store is `reader::iconcache`, outside `ui/` where the fast CI job tests it, and this
+//! module has no idea it exists: `ImageStore` still holds textures that die with the process,
+//! `ReaderApp` decides what may be drawn from a file and what may be written to one, and a
+//! worker does the reading. What arrived with the archive is the *rule* about which bytes may be
+//! kept, and it is kept in one place rather than spread across a texture cache.
 //!
 //! # The placeholder is the whole privacy argument
 //!
@@ -25,6 +28,13 @@
 //! `NoRequests`: that is chrome identity, fetched as soon as the document names a URL (or the
 //! well-known `/favicon.ico` fallback), counted the same way, and omitted from the column until
 //! the bytes decode.
+//!
+//! It is also the one picture in the program that may come off the disk rather than off a host,
+//! for a site the archive already names — see `reader::iconcache`, which argues why that is the
+//! opposite of a privacy cost. A mark read from there reaches [`ImageStore::insert`] with
+//! `from_cache` set, so it moves `icons_from_cache` and never `loaded`: the panel prints
+//! `loaded` beside a list of hosts, and a picture that contacted nobody counted there would have
+//! it report images loaded from no host at all.
 //!
 //! The bookmarks' left column is the same exception with the same policy, one page over
 //! ([`site_icon`]): each row's mark is the identity of the site that row leads to, stored when
@@ -70,9 +80,22 @@ const DECLINES_KEPT: usize = LRU_CAPACITY;
 
 pub enum State {
     Offered,
-    Loading,
+    Loading(Source),
     Ready(Ready),
     Failed(Failure),
+}
+
+/// Where the bytes of a pending image are coming from.
+///
+/// The distinction exists for one number: `autoload::MAX_OUTSTANDING` bounds how many *hosts*
+/// may be mid-request at once, and a site mark being read out of `reader::iconcache` contacts
+/// none. Counting a disk read against that ceiling made a bookmarks list of thirty rows draw
+/// itself eight rows a frame for no reason at all — the throttle is about connections, and a
+/// read from this machine is not one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Network,
+    Disk,
 }
 
 /// Why a picture is not on screen, and whether asking again could change that.
@@ -117,6 +140,10 @@ impl Failure {
 struct Disclosed {
     host: String,
     referer: bool,
+    /// A site mark rather than a picture in the page, so [`ImageStore::forget`] knows which
+    /// counter to take back. Without it a dropped mark would leave `icons_requested` claiming a
+    /// host was asked for an icon that was never asked for.
+    icon: bool,
 }
 
 pub struct Ready {
@@ -162,6 +189,13 @@ pub struct ImageStore {
     changed: Vec<String>,
     pub cookie_attempts: usize,
     pub referer_requests: usize,
+    /// Site marks drawn from `reader::iconcache`, counted when the texture lands rather than
+    /// when the read is queued: a read that finds the file gone becomes an ordinary request, and
+    /// counting it here first would need taking back at the other end.
+    pub icons_from_cache: usize,
+    /// Site marks asked of a host, counted beside `hosts` in `record_request`'s own call — where
+    /// the request is disclosed — so the two can never disagree about whether one went out.
+    pub icons_requested: usize,
 }
 
 impl ImageStore {
@@ -182,8 +216,8 @@ impl ImageStore {
         std::mem::take(&mut self.changed)
     }
 
-    pub fn begin(&mut self, src: &str) {
-        self.set(src, State::Loading);
+    pub fn begin(&mut self, src: &str, source: Source) {
+        self.set(src, State::Loading(source));
         self.touch(src);
         self.evict();
     }
@@ -211,6 +245,9 @@ impl ImageStore {
             if was.referer {
                 self.referer_requests = self.referer_requests.saturating_sub(1);
             }
+            if was.icon {
+                self.icons_requested = self.icons_requested.saturating_sub(1);
+            }
             if let Some(n) = self.hosts.get_mut(&was.host) {
                 *n = n.saturating_sub(1);
                 if *n == 0 {
@@ -225,25 +262,37 @@ impl ImageStore {
     }
 
     pub fn is_pending(&self, src: &str) -> bool {
-        matches!(self.entries.get(src), Some(State::Loading))
+        matches!(self.entries.get(src), Some(State::Loading(_)))
     }
 
+    /// Anything at all outstanding, for the repaint floor. Both sources: a disk read still ends
+    /// in a texture, and a frame that never comes is a mark that never appears.
     pub fn any_pending(&self) -> bool {
-        self.entries.values().any(|s| matches!(s, State::Loading))
+        self.entries
+            .values()
+            .any(|s| matches!(s, State::Loading(_)))
     }
 
-    /// How many requests are outstanding, for `autoload::MAX_OUTSTANDING`. Counted rather than
+    /// How many *requests* are outstanding, for `autoload::MAX_OUTSTANDING`. Counted rather than
     /// tracked alongside, because the count has to fall when a reply arrives, when a job is
     /// dropped, and when a page commits, and a separate counter would have to be told about
     /// all three.
+    ///
+    /// [`Source::Disk`] is not one. See that variant.
     pub fn pending(&self) -> usize {
         self.entries
             .values()
-            .filter(|s| matches!(s, State::Loading))
+            .filter(|s| matches!(s, State::Loading(Source::Network)))
             .count()
     }
 
-    pub fn insert(&mut self, ctx: &egui::Context, src: &str, decoded: Decoded) {
+    /// A decoded picture is ready. `from_cache` says the bytes came off this machine.
+    ///
+    /// The flag decides which counter moves, and that is the whole of it: `loaded` is what the
+    /// panel prints beside a host list, so a mark read from `reader::iconcache` counting there
+    /// would report images loaded from no host at all. This is the one place either number
+    /// changes, so the two cannot drift.
+    pub fn insert(&mut self, ctx: &egui::Context, src: &str, decoded: Decoded, from_cache: bool) {
         let image = egui::ColorImage::from_rgba_unmultiplied(
             [decoded.width as usize, decoded.height as usize],
             &decoded.rgba,
@@ -266,7 +315,11 @@ impl ImageStore {
                 partial: decoded.partial,
             }),
         );
-        self.loaded += 1;
+        if from_cache {
+            self.icons_from_cache += 1;
+        } else {
+            self.loaded += 1;
+        }
         self.settle_request(src);
         self.touch(src);
         self.evict();
@@ -285,6 +338,8 @@ impl ImageStore {
             hosts,
             cookie_attempts: self.cookie_attempts,
             referer_requests: self.referer_requests,
+            icons_from_cache: self.icons_from_cache,
+            icons_requested: self.icons_requested,
         }
     }
 
@@ -294,16 +349,20 @@ impl ImageStore {
     /// Ahead of the fetch, because the host is named to the reader before the bytes and the
     /// account has to agree with what they were told. [`Self::forget`] is the one thing that
     /// takes it back.
-    pub fn record_request(&mut self, src: &str, host: &str, referer: bool) {
+    pub fn record_request(&mut self, src: &str, host: &str, referer: bool, icon: bool) {
         *self.hosts.entry(host.to_owned()).or_default() += 1;
         if referer {
             self.referer_requests += 1;
+        }
+        if icon {
+            self.icons_requested += 1;
         }
         self.in_flight.insert(
             src.to_owned(),
             Disclosed {
                 host: host.to_owned(),
                 referer,
+                icon,
             },
         );
     }
@@ -346,6 +405,8 @@ impl ImageStore {
         self.loaded = 0;
         self.cookie_attempts = 0;
         self.referer_requests = 0;
+        self.icons_from_cache = 0;
+        self.icons_requested = 0;
         // Cleared, not undone: subtracting these back out of counters that are themselves being
         // reset is the same nothing, and the page they belonged to is gone.
         self.in_flight.clear();
@@ -459,7 +520,7 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     // Read the state out before drawing: the closures below need `ctx` mutably, and holding a
     // borrow of the store across them would be a second one.
     let state = match ctx.images.state(&img.src) {
-        Some(State::Loading) => Snapshot::Loading,
+        Some(State::Loading(_)) => Snapshot::Loading,
         Some(State::Failed(f)) => Snapshot::Failed(f.why.clone(), f.offers_retry()),
         Some(State::Ready(_)) => Snapshot::Ready,
         None | Some(State::Offered) => Snapshot::Offered,
@@ -735,8 +796,8 @@ mod tests {
             cookie_attempts: 2,
             ..ImageStore::default()
         };
-        store.record_request("/a.png", "img.example.org", true);
-        store.record_request("/b.png", "cdn.example.net", false);
+        store.record_request("/a.png", "img.example.org", true, false);
+        store.record_request("/b.png", "cdn.example.net", false, false);
 
         // The decode failed. Nothing about what the request disclosed is undone by that.
         store.fail("/a.png", Failure::transient("not an image".to_owned()));
@@ -762,9 +823,9 @@ mod tests {
     #[test]
     fn a_dropped_request_takes_its_disclosure_back() {
         let mut store = ImageStore::default();
-        store.record_request("/a.png", "cdn.example.net", true);
-        store.record_request("/b.png", "cdn.example.net", true);
-        store.record_request("/c.png", "img.example.org", false);
+        store.record_request("/a.png", "cdn.example.net", true, false);
+        store.record_request("/b.png", "cdn.example.net", true, false);
+        store.record_request("/c.png", "img.example.org", false, false);
         assert_eq!(store.counts().referer_requests, 2);
 
         store.forget("/a.png");
@@ -783,6 +844,36 @@ mod tests {
             "nothing left that contacted it"
         );
         assert_eq!(store.counts().referer_requests, 0);
+    }
+
+    /// A mark counts as a mark and never as a picture, and a mark that was never sent takes its
+    /// own number back with the host and the Referer.
+    ///
+    /// The panel prints these two side by side — "Site icons: 0 from disk, 2 fetched" over
+    /// "Images loaded: 2, from 1 host" — so a mark counted in the wrong one is the panel giving
+    /// two different answers to the same question about the same request.
+    #[test]
+    fn a_site_mark_is_counted_as_one_and_is_taken_back_like_one() {
+        let mut store = ImageStore::default();
+        store.record_request("/mark.png", "kept.example", false, true);
+        store.record_request("/photo.jpg", "cdn.example.net", true, false);
+        let counts = store.counts();
+        assert_eq!(counts.icons_requested, 1, "one of the two was a mark");
+        assert_eq!(counts.icons_from_cache, 0, "and it was not on this machine");
+        assert_eq!(counts.images, 0, "neither has decoded yet");
+
+        store.forget("/mark.png");
+        let counts = store.counts();
+        assert_eq!(counts.icons_requested, 0, "that request never went out");
+        assert_eq!(counts.hosts, vec!["cdn.example.net"]);
+
+        // And a page commit clears both, like every other per-page counter: the panel answers
+        // how the page on screen arrived, and a session total under that heading is a different
+        // quantity wearing the same label.
+        store.icons_from_cache = 3;
+        store.clear_page();
+        let counts = store.counts();
+        assert_eq!((counts.icons_from_cache, counts.icons_requested), (0, 0));
     }
 
     /// The retry control is drawn from this, and so is the guard that stops "load all" from
@@ -812,7 +903,7 @@ mod tests {
             ..ImageStore::default()
         };
         store.dims.insert("/a.png".to_owned(), (800, 600));
-        store.record_request("/a.png", "cdn.example.net", true);
+        store.record_request("/a.png", "cdn.example.net", true, false);
         store.fail("/a.png", Failure::transient("connection reset".to_owned()));
 
         store.clear_page();
@@ -893,7 +984,7 @@ mod tests {
     #[test]
     fn forgetting_a_resolved_request_leaves_the_disclosure_standing() {
         let mut store = ImageStore::default();
-        store.record_request("/a.png", "cdn.example.net", true);
+        store.record_request("/a.png", "cdn.example.net", true, false);
         store.fail("/a.png", Failure::transient("not an image".to_owned()));
         store.forget("/a.png");
         let counts = store.counts();
