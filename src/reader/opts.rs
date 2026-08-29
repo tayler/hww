@@ -177,14 +177,16 @@ pub enum ImagePolicy {
     /// silently dropping content is how a reader lies about a page.
     ///
     /// This does **not** stop the page favicon, which `ui::app::ensure_favicon` fetches as
-    /// chrome identity. That was true before this variant had a neighbour and it is kept true
-    /// deliberately: renaming or re-scoping `Never` would change what existing `settings.json`
-    /// files mean, and the failure mode is silent. A reader who wants no image request at all
-    /// wants [`ImagePolicy::NoRequests`].
+    /// chrome identity, nor the site marks in the left column of hww's own lists, which
+    /// `ui::app::load_site_icons` fetches for the same reason one page over. That was true of
+    /// the favicon before this variant had a neighbour and it is kept true deliberately:
+    /// renaming or re-scoping `Never` would change what existing `settings.json` files mean,
+    /// and the failure mode is silent. A reader who wants no image request at all wants
+    /// [`ImagePolicy::NoRequests`].
     Never,
-    /// No image request at all, the favicon included.
+    /// No image request at all, the favicon and the site marks in hww's own lists included.
     ///
-    /// The distinction `Never` cannot make: one third-party request per page still leaves, and
+    /// The distinction `Never` cannot make: a third-party request per page still leaves, and
     /// it carries the origin `Referer` when that is on, so "no article images" and "nothing
     /// contacted" are two different choices and now say so.
     NoRequests,
@@ -223,7 +225,8 @@ impl ImagePolicy {
         matches!(self, ImagePolicy::Auto)
     }
 
-    /// Whether hww may request any image at all, the page favicon included.
+    /// Whether hww may request any image at all: the page favicon and the site marks in
+    /// hww's own lists included, which are the two hww fetches without being asked.
     pub fn allows_any_request(self) -> bool {
         !matches!(self, ImagePolicy::NoRequests)
     }

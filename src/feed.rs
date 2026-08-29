@@ -464,6 +464,10 @@ fn entry(
         published: published.filter(|p| !p.trim().is_empty()),
         // A feed row is a headline and a date; there is no second address to print under it.
         address: None,
+        // Nor a site mark: every row in one feed leads to the same site, so a column of one
+        // identical mark per row would be a request per row to say one thing. See
+        // `ir::Entry::icon`.
+        icon: None,
         // v1. A payload's own `<img>` already arrives as a `Block::Figure` inside the summary,
         // and enclosures can be added later without rework. `search::parse` carries `None` too,
         // for a different reason: there the picture would be the engine's, here there is not one.

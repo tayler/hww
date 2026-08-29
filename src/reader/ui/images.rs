@@ -26,6 +26,14 @@
 //! well-known `/favicon.ico` fallback), counted the same way, and omitted from the column until
 //! the bytes decode.
 //!
+//! The bookmarks' left column is the same exception with the same policy, one page over
+//! ([`site_icon`]): each row's mark is the identity of the site that row leads to, stored when
+//! the reader kept the page and fetched when the row is drawn. It is the one automatic request
+//! that is *not* about the page on screen, which is why it is bounded twice — only the bookmarks
+//! draws the column (`archive::Mark`), and only the rows inside the layout band are asked for
+//! (`RenderCtx::note_icon`). Page info reports the hosts, on a page that otherwise reports no
+//! request at all.
+//!
 //! # Which heights an image invalidates
 //!
 //! Every state transition here re-sizes the block the picture sits in, so [`ImageStore`] keeps
@@ -605,6 +613,35 @@ pub fn favicon(ui: &mut Ui, src: &str, ctx: &mut RenderCtx<'_>) {
             .fit_to_exact_size(egui::vec2(w, h))
             .corner_radius(egui::CornerRadius::same(theme::RADIUS)),
     );
+}
+
+/// One list row's site mark, in the column left of its headline.
+///
+/// The masthead favicon's sibling and not a thumbnail: `box_size` square whatever the file's
+/// proportions, no placeholder, no control, and no widget — the headline beside it is the row's
+/// only affordance and its only Tab stop. The space is allocated whether or not the bytes are
+/// here, because a column that closed up around a missing icon would re-align every row under
+/// it as the marks arrived one by one.
+///
+/// Requesting is `ctx.note_icon`'s business and, past it, `ReaderApp::load_site_icons`. This
+/// function neither asks the network for anything nor decides whether it may.
+pub fn site_icon(ui: &mut Ui, src: &str, box_size: f32, ctx: &mut RenderCtx<'_>) {
+    if let Some(State::Ready(ready)) = ctx.images.state(src) {
+        // Fitted inside the box rather than stretched to it: a mark that is not square is a
+        // wide wordmark often enough, and a stretched one is worse than a small one.
+        let scale =
+            (box_size / ready.width.max(1) as f32).min(box_size / ready.height.max(1) as f32);
+        let size = egui::vec2(ready.width as f32 * scale, ready.height as f32 * scale);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(box_size, box_size), egui::Sense::hover());
+        let at = egui::Rect::from_center_size(rect.center(), size);
+        egui::Image::new(&ready.texture)
+            .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+            .paint_at(ui, at);
+        return;
+    }
+    ctx.note_icon(ui.next_widget_position().y, src);
+    ui.allocate_space(egui::vec2(box_size, box_size));
 }
 
 /// The one control an entry's thumbnail gets: a small dim `[image]` beside the time, which

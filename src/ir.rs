@@ -90,6 +90,16 @@ pub struct Entry {
     /// history view is the one thing that sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
+    /// The mark of the site this row leads to: an absolute URL, drawn small in a column to the
+    /// left of the headline. `None` on every entry a page produced, as `address` is — a front
+    /// page's cards all lead to the same site, so a column of one identical mark per row would
+    /// be twenty requests to say one thing. `reader::archive`'s bookmarks view is what sets it.
+    ///
+    /// Separate from `image`, which is the card's own picture and is drawn as a thumbnail under
+    /// the reader's image policy. These are different objects: one is what the row is *about*,
+    /// the other is whose page it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     pub image: Option<Image>,
 }
 

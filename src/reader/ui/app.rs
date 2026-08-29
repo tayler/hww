@@ -37,8 +37,9 @@
 //! elsewhere. Back and forward are the one place the platforms genuinely disagree, so both
 //! `Alt`+arrows and `Cmd`+`[`/`]` are bound rather than picking a winner.
 
+use crate::fetch;
 use crate::ir;
-use crate::reader::archive::{self, Archive, Kept, Visited};
+use crate::reader::archive::{self, Archive, Stored, Visited};
 use crate::reader::autoload;
 use crate::reader::desktop;
 use crate::reader::history::{EntryId, History};
@@ -233,8 +234,8 @@ struct Ready {
     /// page-info panel draws no Response rows over a provenance that is all zeros; `commit`
     /// refuses to file it in the page cache, so Back rebuilds it and sees what has been kept
     /// since; and "keep this page" is gated on it being false, because `Needs::Page` is
-    /// satisfied on the library itself and would otherwise offer to save the library into the
-    /// library.
+    /// satisfied on the bookmarks view itself and would otherwise offer to save the bookmarks into the
+    /// bookmarks.
     built: bool,
 }
 
@@ -302,13 +303,13 @@ pub struct ReaderApp {
     /// `SAVE_DEBOUNCE`, and a single navigation gets one that lands after the page is up rather
     /// than on the frame it appears. See [`ReaderApp::record_visit`].
     visits_dirty: Option<Instant>,
-    /// Whether the page on screen is in the library.
+    /// Whether the page on screen is in the bookmarks.
     ///
-    /// Cached rather than asked, and the cost is why: `Archive::holds` parses every stored
+    /// Cached rather than asked, and the cost is why: `Archive::is_bookmarked` parses every stored
     /// address, the menu bar wants the answer on every frame it draws, and the page-info panel
     /// wants it again. Two places can change it — the page, and the store — and
     /// [`ReaderApp::refresh_shown_kept`] is called from both.
-    shown_kept: bool,
+    shown_bookmarked: bool,
     /// The documents Back and Forward can open without asking the site again, keyed by the
     /// entry each belongs to. Filled by [`ReaderApp::commit`] as a page leaves the column and
     /// emptied by [`ReaderApp::restore`] as one comes back; see `reader::pagecache`.
@@ -351,6 +352,11 @@ pub struct ReaderApp {
     /// one refill is right and an unbounded number is a request loop. `autoload::MAX_ATTEMPTS`
     /// holds the reasoning, and `autoload::plan` the other half of the pair.
     auto_attempts: HashMap<String, u32>,
+    /// The site marks already asked for on the page in the column, so an eviction from the
+    /// texture LRU cannot become a second request. Cleared with `auto_attempts`, which the same
+    /// sentence describes: an attempt spent on the page going away must not count against the
+    /// page arriving.
+    icons_asked: HashSet<String>,
     /// How tall each block was the last time it was laid out, so the blocks off the window can
     /// be skipped. See `reader::measure` for why, and `ready_screen` for when it is ignored.
     heights: Heights,
@@ -546,7 +552,7 @@ fn centred_card(
 /// [`ReaderApp::show_builtin`], from the reader's own state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
-    Library,
+    Bookmarks,
     ReadingList,
     History,
 }
@@ -560,7 +566,7 @@ enum View {
 /// so only a command the reader gave can name one of these.
 fn builtin_view(url: &Url) -> Option<View> {
     match url.as_str() {
-        archive::LIBRARY => Some(View::Library),
+        archive::BOOKMARKS => Some(View::Bookmarks),
         archive::READING_LIST => Some(View::ReadingList),
         archive::HISTORY => Some(View::History),
         _ => None,
@@ -608,7 +614,7 @@ impl ReaderApp {
             archive,
             archive_write_failed: false,
             visits_dirty: None,
-            shown_kept: false,
+            shown_bookmarked: false,
             pages: PageCache::new(),
             page: Page::Idle,
             current: None,
@@ -622,6 +628,7 @@ impl ReaderApp {
             image_blocks: HashMap::new(),
             image_blocks_budget: 0,
             auto_attempts: HashMap::new(),
+            icons_asked: HashSet::new(),
             heights: Heights::default(),
             collapsed: HashSet::new(),
             collapsed_changes: 0,
@@ -658,22 +665,22 @@ impl ReaderApp {
         match launch.start {
             Some(url) => app.navigate(url, app.opts, true),
             None => {
-                // The home screen, and it is no new surface: opening on the library is literally
-                // "hww opened with the library", one extra branch in the match that was already
+                // The home screen, and it is no new surface: opening on the bookmarks is literally
+                // "hww opened with the bookmarks", one extra branch in the match that was already
                 // here. A real `Page::Ready` inherits find, the outline, scrolling, Tab focus,
                 // and correct menu gating; a fourth empty state drawn into `empty_states` would
                 // have inherited none of them and had to fake each in turn.
                 //
-                // An empty library still opens on the splash whatever the setting says. Nothing
+                // An empty bookmarks list still opens on the splash whatever the setting says. Nothing
                 // has happened yet, which is `notice::idle`'s whole argument for not being a
                 // notice, and it means first run is unchanged.
                 if archive::opens_on_launch(&app.settings, &app.archive) {
-                    app.open_library(true);
+                    app.open_bookmarks(true);
                 } else {
                     // Only on the splash. With nothing to read, the URL bar is the only sensible
                     // thing on screen and so the only sensible thing to be typing into — but
                     // `handle_keys` returns early while the bar has focus, so doing this over the
-                    // library would hand the reader a page they cannot scroll, Tab into, find in,
+                    // bookmarks would hand the reader a page they cannot scroll, Tab into, find in,
                     // or press `b` on until they think to press Esc. A page in the column is a
                     // page to read; the bar is one keystroke away when it is not.
                     app.chrome.url_bar = Some(String::new());
@@ -700,9 +707,9 @@ impl ReaderApp {
         // **The chokepoint**, and it has to be here rather than at any caller. `navigate` is
         // reached by `reload`, by `follow`, and — the case that actually bites — by `arrive`,
         // which falls through to it whenever a history entry is not in the page cache. A built
-        // view is deliberately never cached, so without this check, leaving the library and
-        // pressing Back would hand `hww:library` to reqwest and land the reader on an error
-        // page; `r` on the library is the same path, one caller over.
+        // view is deliberately never cached, so without this check, leaving the bookmarks and
+        // pressing Back would hand `hww:bookmarks` to reqwest and land the reader on an error
+        // page; `r` on the bookmarks is the same path, one caller over.
         if let Some(view) = builtin_view(&url) {
             self.show_builtin(view, url, opts, push);
             return;
@@ -747,13 +754,13 @@ impl ReaderApp {
     /// `Page` variant, which would have left find, Tab, and the outline to special-case it.
     ///
     /// The view is **rebuilt on every arrival**, which is why it is not cached, and that is the
-    /// behaviour rather than a workaround for a missing cache entry: the library has to reflect
+    /// behaviour rather than a workaround for a missing cache entry: the bookmarks has to reflect
     /// what has been kept or forgotten since it was last drawn, so Back onto it shows a current
     /// list instead of a stale one.
     fn show_builtin(&mut self, view: View, url: Url, opts: LoadOptions, push: bool) {
         // `begin`, and so `Net::mint_page`, for the reason its own doc gives: a second place
         // that starts a navigation cannot forget the second half. A built view is the third
-        // place. The library has no article images of its own, so the symptom is not the one
+        // place. The bookmarks has no article images of its own, so the symptom is not the one
         // that doc describes — it is that the pool's current-page id would still name the page
         // the reader just left, and images in flight for that page would go on being accepted
         // onto this one.
@@ -767,13 +774,13 @@ impl ReaderApp {
                 self.history.replace(url.clone());
             } else {
                 // `History::push` treats a re-push of the current URL as a reload that keeps the
-                // entry's id and offset, so `b` pressed on the library rebuilds it in place with
+                // entry's id and offset, so `b` pressed on the bookmarks rebuilds it in place with
                 // the reading position intact rather than stacking a second entry.
                 self.history.push(url.clone());
             }
         }
         let doc = match view {
-            View::Library => archive::document(&self.archive),
+            View::Bookmarks => archive::bookmarks_document(&self.archive),
             View::ReadingList => archive::reading_list_document(&self.archive, &self.settings),
             View::History => archive::history_document(&self.archive, &self.settings),
         };
@@ -796,9 +803,9 @@ impl ReaderApp {
         }));
     }
 
-    /// Open the library, as `b` and the menu item do.
-    fn open_library(&mut self, push: bool) {
-        let url = Url::parse(archive::LIBRARY).expect("hww:library is a valid address");
+    /// Open the bookmarks, as `b` and the menu item do.
+    fn open_bookmarks(&mut self, push: bool) {
+        let url = Url::parse(archive::BOOKMARKS).expect("hww:bookmarks is a valid address");
         self.navigate(url, self.opts, push);
     }
 
@@ -816,7 +823,7 @@ impl ReaderApp {
 
     /// Redraw a built view after the store behind it changed under it.
     ///
-    /// A no-op on a fetched page, which is what makes it safe to call from anywhere the library
+    /// A no-op on a fetched page, which is what makes it safe to call from anywhere the bookmarks
     /// can change. Through `navigate` with `push: false`, so the entry keeps its id and the
     /// reading position survives the rebuild.
     fn rebuild_builtin_view(&mut self) {
@@ -835,49 +842,56 @@ impl ReaderApp {
     /// A toggle, because the menu row is an `Item::Check` and a check mark that could only ever
     /// be turned on would be a strange checkbox. The forget half runs whatever the keep switch
     /// says: turning keeping off stops hww writing anything new, and must never be a way to trap
-    /// what is already in the library.
-    fn keep_page(&mut self) {
+    /// what is already in the bookmarks.
+    fn bookmark_page(&mut self) {
         let Some(page) = self.shown().filter(|r| !r.built) else {
-            // Reachable by key on the library, the splash, and an error screen, where the menu
+            // Reachable by key on the bookmarks, the splash, and an error screen, where the menu
             // row is greyed instead. A key that does nothing and says nothing reads as a broken
             // binding.
-            self.flash(notice::NOTHING_TO_KEEP.to_owned());
+            self.flash(notice::NOTHING_TO_BOOKMARK.to_owned());
             return;
         };
         let url = page.loaded.prov.final_url.clone();
         let title = page.loaded.doc.title.clone();
+        // The mark the page named for itself, stored so the bookmarks can draw its column
+        // without asking the page again. `Archive::bookmark` refuses one that is not an absolute
+        // http(s) address; see `archive::icon_to_store`.
+        let icon = page.loaded.doc.favicon.clone();
         if self.archive.forget(&url) {
             if self.save_archive() {
                 self.flash(notice::FORGOTTEN.to_owned());
             }
             return;
         }
-        match self.archive.keep(&self.settings, &url, title.as_deref()) {
-            Kept::Added => {
+        match self
+            .archive
+            .bookmark(&self.settings, &url, title.as_deref(), icon.as_deref())
+        {
+            Stored::Added => {
                 if self.save_archive() {
                     // Named from what was *stored* rather than from the page: that string has
                     // been flattened to one line and capped, so the toast cannot be a paragraph
                     // and an untitled page is still named by its address.
                     let label = self
                         .archive
-                        .kept()
+                        .bookmarks()
                         .next()
                         .map_or_else(|| url.to_string(), |i| i.label());
-                    self.flash(notice::kept(&label));
+                    self.flash(notice::bookmarked(&label));
                 }
             }
             // `forget` above answered `false` over the same predicate `holds` uses, so this door
             // pre-empts this arm. It is the store's own answer and the match is exhaustive, so
             // it gets the reader's words rather than a sentence invented here.
-            Kept::Already => self.flash(notice::ALREADY_KEPT.to_owned()),
-            Kept::Full => self.flash(notice::library_is_full(archive::MAX_ITEMS)),
-            Kept::TooLong => self.flash(notice::ADDRESS_TOO_LONG.to_owned()),
-            Kept::Off => self.flash(notice::KEEPING_IS_OFF.to_owned()),
+            Stored::Already => self.flash(notice::ALREADY_BOOKMARKED.to_owned()),
+            Stored::Full => self.flash(notice::bookmarks_are_full(archive::MAX_ITEMS)),
+            Stored::TooLong => self.flash(notice::ADDRESS_TOO_LONG.to_owned()),
+            Stored::Off => self.flash(notice::BOOKMARKING_IS_OFF.to_owned()),
             // Unreachable here: only `Archive::add_next` inspects the scheme, because only it is
             // handed an address a page chose. `keep` is given `prov.final_url`, which a fetch
             // resolved and followed. The arm exists because the two doors share one answer type,
             // and saying so is better than an `unreachable!` that a later caller could reach.
-            Kept::Refused => self.flash(notice::CANNOT_READ_LATER.to_owned()),
+            Stored::Refused => self.flash(notice::CANNOT_READ_LATER.to_owned()),
         }
     }
 
@@ -917,7 +931,7 @@ impl ReaderApp {
                 return;
             }
         };
-        // Off before on, as `keep_page` does: the removal half runs whatever the switch says, so
+        // Off before on, as `bookmark_page` does: the removal half runs whatever the switch says, so
         // turning the reading list off can never be a way to trap what is already on it.
         if self.archive.forget_next(&url) {
             if self.save_archive() {
@@ -927,9 +941,9 @@ impl ReaderApp {
             return;
         }
         match self.archive.add_next(&self.settings, &url, Some(title)) {
-            Kept::Added => {
+            Stored::Added => {
                 if self.save_archive() {
-                    // Named from what was *stored*, for the reason `keep_page` gives: that string
+                    // Named from what was *stored*, for the reason `bookmark_page` gives: that string
                     // has been flattened and capped, so a link wearing a paragraph of text cannot
                     // become a paragraph of toast.
                     let label = self
@@ -941,15 +955,15 @@ impl ReaderApp {
                 }
             }
             // `forget_next` above answered `false` over the same predicate `holds_next` uses, so
-            // this door pre-empts this arm, exactly as `keep_page`'s does.
-            Kept::Already => self.flash(notice::ALREADY_READ_LATER.to_owned()),
-            Kept::Full => self.flash(notice::reading_list_is_full(archive::MAX_NEXT)),
-            Kept::TooLong => self.flash(notice::ADDRESS_TOO_LONG_TO_READ_LATER.to_owned()),
-            Kept::Off => self.flash(notice::READING_LIST_IS_OFF.to_owned()),
+            // this door pre-empts this arm, exactly as `bookmark_page`'s does.
+            Stored::Already => self.flash(notice::ALREADY_READ_LATER.to_owned()),
+            Stored::Full => self.flash(notice::reading_list_is_full(archive::MAX_NEXT)),
+            Stored::TooLong => self.flash(notice::ADDRESS_TOO_LONG_TO_READ_LATER.to_owned()),
+            Stored::Off => self.flash(notice::READING_LIST_IS_OFF.to_owned()),
             // Unreachable through `classify_link`, which answers `Navigate` only for `http` and
             // `https`. The arm is the store's own answer and the match is exhaustive: the guard
             // inside the door is the one that has to hold, and this is what it says when it does.
-            Kept::Refused => self.flash(notice::CANNOT_READ_LATER.to_owned()),
+            Stored::Refused => self.flash(notice::CANNOT_READ_LATER.to_owned()),
         }
         self.rebuild_builtin_view();
     }
@@ -1015,7 +1029,7 @@ impl ReaderApp {
     /// *which* list was emptied. These two buttons empty the same one, so a second copy could only
     /// ever drift from this one and start saying something else about it.
     fn forget_reading_list(&mut self) {
-        // Asked before the forget, which is what lifts the seal; see the library's arm.
+        // Asked before the forget, which is what lifts the seal; see the bookmarks' arm.
         let replaced = self.archive.refuses_to_be_written();
         let n = self.archive.forget_all_next();
         if self.save_archive() {
@@ -1028,7 +1042,7 @@ impl ReaderApp {
         self.rebuild_builtin_view();
     }
 
-    /// Write the library now, and say so if it could not be written.
+    /// Write the bookmarks now, and say so if it could not be written.
     ///
     /// No debounce, unlike the settings: a keep is a single deliberate act, and the reader who
     /// presses `Ctrl+D` and shuts the laptop should find it there. Returns whether the caller
@@ -1106,19 +1120,19 @@ impl ReaderApp {
     /// still in the file and `Ctrl+D` still removes it, and the menu draws its tick from the same
     /// fact; a panel that answered "no" there would be the one surface in the program
     /// misstating what is stored, which is the disclosure this row exists to make.
-    /// [`pageinfo::Kept::Off`] is for a page that is genuinely not kept and cannot be, so that
+    /// [`pageinfo::Bookmarked::Off`] is for a page that is genuinely not kept and cannot be, so that
     /// "no" does not read as something a keypress would change.
-    fn kept_state(&self) -> pageinfo::Kept {
-        if self.shown_kept {
-            pageinfo::Kept::Yes
-        } else if !self.settings.keep_library {
-            pageinfo::Kept::Off
+    fn kept_state(&self) -> pageinfo::Bookmarked {
+        if self.shown_bookmarked {
+            pageinfo::Bookmarked::Yes
+        } else if !self.settings.keep_bookmarks {
+            pageinfo::Bookmarked::Off
         } else {
-            pageinfo::Kept::No
+            pageinfo::Bookmarked::No
         }
     }
 
-    /// Recompute [`ReaderApp::shown_kept`].
+    /// Recompute [`ReaderApp::shown_bookmarked`].
     ///
     /// Called from the three places that can change the answer and no others: the two that
     /// change the page, [`ReaderApp::install`] and [`ReaderApp::fail`], and
@@ -1126,9 +1140,9 @@ impl ReaderApp {
     /// to the file. Each of the three is a door with one caller-facing name, so a fourth
     /// transition cannot be added without passing through one of them.
     fn refresh_shown_kept(&mut self) {
-        self.shown_kept = self
+        self.shown_bookmarked = self
             .shown()
-            .is_some_and(|r| !r.built && self.archive.holds(&r.loaded.prov.final_url));
+            .is_some_and(|r| !r.built && self.archive.is_bookmarked(&r.loaded.prov.final_url));
     }
 
     /// Follow a link. The scheme gate runs here, before anything is dispatched: one place, so
@@ -1414,7 +1428,13 @@ impl ReaderApp {
     /// [`Self::ensure_favicon`] once a page is on screen; a toast would fire on every
     /// navigation, and a column-width decode is wasted on a 16-px mark.
     fn load_favicon(&mut self, src: &str) {
-        self.request_image(src, 64, false, false);
+        self.load_favicon_job(src, false);
+    }
+
+    /// The one place an icon's request size is chosen, so the masthead's mark and a bookmarks list
+    /// row's are decoded to the same 64 px and cannot drift apart.
+    fn load_favicon_job(&mut self, src: &str, automatic: bool) {
+        self.request_image(src, 64, false, automatic);
     }
 
     /// Start the favicon fetch for the page on screen, once. Failures stay silent: the eyebrow
@@ -1436,6 +1456,50 @@ impl ReaderApp {
             return;
         }
         self.load_favicon(&src);
+    }
+
+    /// Fetch the site marks the bookmarks just drew, for the rows near the window.
+    ///
+    /// The fifth door onto [`Self::request_image`], and the second one the reader did not push:
+    /// `ensure_favicon` fetches the mark of the page on screen and this fetches the mark of each
+    /// page a row on it points at. Same policy, answered here in the door's own name, and the
+    /// same silence on failure — a column with a gap in it is what a site that serves no icon
+    /// looks like, and there is nothing for the reader to retry.
+    ///
+    /// `srcs` is already bounded to the layout band by `RenderCtx::note_icon`, which is what
+    /// makes this a screenful of requests on a two-thousand-row bookmarks rather than two
+    /// thousand. `automatic: true`, so a worker that reaches a queued mark after the reader has
+    /// navigated away drops it instead of contacting a host for a page nobody is looking at.
+    fn load_site_icons(&mut self, srcs: &[String]) {
+        if !self.settings.read.images.allows_any_request() {
+            return;
+        }
+        // The same guard `autoload` carries, for the same reason and against a sharper failure.
+        // While a navigation is in flight the pool answers an automatic job for the outgoing
+        // page with `Msg::ImageDropped`, and the handler hands the `src` back by forgetting its
+        // state — so without this, a click on a bookmarks list row before its neighbours' marks have
+        // resolved spins request-and-drop at frame rate for the whole of the load, pumping the
+        // pool and moving the host counters for requests nobody wanted.
+        if self.current != self.shown().map(|r| r.req) {
+            return;
+        }
+        for src in srcs {
+            // Bounded like the automatic policy's, and by the same constant: the band is three
+            // window-heights of rows, so a tall window on a long bookmarks would otherwise open
+            // thirty connections in one frame. What is left over is recorded again next frame,
+            // so the rest arrive as a drip rather than being dropped.
+            if self.images.pending() >= autoload::MAX_OUTSTANDING {
+                break;
+            }
+            // Asked once per page, and this is the line that stops the LRU from becoming a
+            // request loop: an in-band mark evicted by a later one drops back to no state at
+            // all, `note_icon` records it again, and without this record hww would re-fetch it
+            // from a third-party host for as long as the bookmarks is on screen.
+            if !self.icons_asked.insert(src.clone()) {
+                continue;
+            }
+            self.load_favicon_job(src, true);
+        }
     }
 
     fn request_image(&mut self, src: &str, max_width: u32, announce: bool, automatic: bool) {
@@ -1480,8 +1544,12 @@ impl ReaderApp {
         // back by `ImageStore::forget` if the pool answers `Msg::ImageDropped` for it. A
         // counter moved for a request that never left is the panel claiming a disclosure that
         // did not happen.
-        self.images
-            .record_request(src, &host, self.settings.send_image_referer);
+        // The setting *and* whether this page can produce an origin at all, through the same
+        // function the header is built with (`fetch::page_origin`). A page hww built itself has
+        // an opaque origin, so the bookmarks' site marks carry no Referer however the setting is
+        // set, and a panel that counted the setting would report a disclosure that never left.
+        let referer = self.settings.send_image_referer && fetch::page_origin(&base).is_some();
+        self.images.record_request(src, &host, referer);
         // Decode straight to the reading column: without this, "load images" on a photo-heavy
         // page is a GPU-memory denial of service driven by untrusted input.
         self.net.submit(Job::Image {
@@ -1656,8 +1724,11 @@ impl ReaderApp {
                     self.images.forget(&src);
                     // Nothing was requested, so nothing was attempted: if this picture is
                     // still in the band the automatic policy may plan it again, with its full
-                    // allowance intact.
+                    // allowance intact. A site mark is handed back for the same reason — this
+                    // arm is the navigation that failed and put the reader back where they
+                    // were, and the bookmarks they are still looking at should draw its column.
                     self.auto_attempts.remove(&src);
+                    self.icons_asked.remove(&src);
                 }
                 Msg::Panicked { req, page } => {
                     if self.current != Some(page) {
@@ -1730,7 +1801,7 @@ impl ReaderApp {
         // is right — Back onto a page is a page hww drew — and it deliberately does not cover an
         // error screen, which never reaches `install`.
         //
-        // A built view records nothing: `hww:history` must not list itself, and a library the
+        // A built view records nothing: `hww:history` must not list itself, and a bookmarks list the
         // reader opens twice a day is not something they read.
         if !page.built {
             self.record_visit(&page);
@@ -1773,7 +1844,7 @@ impl ReaderApp {
     ///
     /// The third of those steps is the one that was being forgotten. A failure replaces the page
     /// it was fetched over, so it is a commit like any other; it also *unshows* a page, and
-    /// [`ReaderApp::shown_kept`] is a cache about the page on screen. Without the refresh, a
+    /// [`ReaderApp::shown_bookmarked`] is a cache about the page on screen. Without the refresh, a
     /// link that times out on a page the reader had kept leaves the File menu drawing that
     /// page's tick over an error screen.
     fn fail(&mut self, url: Url, error: LoadError) {
@@ -1852,7 +1923,7 @@ impl ReaderApp {
             && self.history.holds(id)
             && let Some(page) = self.page.take_shown()
         {
-            // A built view is never kept, and that is a feature rather than a cost. The library
+            // A built view is never kept, and that is a feature rather than a cost. The bookmarks
             // has to reflect what has been kept or forgotten since it was drawn, so Back onto it
             // rebuilds through `show_builtin` and shows a current list; a cached copy would show
             // the reader a page they have already changed. Its `chars` is zero, too, so it would
@@ -1877,6 +1948,7 @@ impl ReaderApp {
         // against the same `src` on the page arriving.
         self.image_blocks.clear();
         self.auto_attempts.clear();
+        self.icons_asked.clear();
         self.heights.clear();
         self.collapsed.clear();
         self.find_current = 0;
@@ -2033,7 +2105,7 @@ impl ReaderApp {
         // Shift and Alt but not the command modifier, and testing the modified binding first is
         // the rule this block already follows.
         if k(Modifiers::COMMAND, Key::D) {
-            self.keep_page();
+            self.bookmark_page();
         }
         if k(Modifiers::COMMAND, Key::L) {
             self.open_url_bar();
@@ -2071,7 +2143,7 @@ impl ReaderApp {
             self.open_url_bar();
         }
         if k(Modifiers::NONE, Key::B) {
-            self.open_library(true);
+            self.open_bookmarks(true);
         }
         if k(Modifiers::NONE, Key::L) {
             self.open_reading_list(true);
@@ -2299,6 +2371,9 @@ fn block_image_srcs(b: &ir::Block, budget: u16) -> Vec<String> {
 /// gathers those where each one draws instead.
 ///
 /// The document favicon is absent. It draws in the masthead, which no remembered height covers.
+/// So are the bookmarks' site marks, for the neighbouring reason: the column reserves the mark's
+/// box whether or not the bytes are here, so an icon arriving re-sizes nothing and there is no
+/// height to forget.
 fn image_blocks(doc: &ir::Document, budget: u16) -> HashMap<String, Vec<usize>> {
     let mut map: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, b) in doc.blocks.iter().enumerate() {
@@ -2489,9 +2564,9 @@ impl ReaderApp {
         }
         let enable = menu_ui::Enable {
             page: self.shown().is_some(),
-            // Narrower than `page`, and the library is the difference: once a built view is a
+            // Narrower than `page`, and the bookmarks is the difference: once a built view is a
             // real `Page::Ready`, `Needs::Page` is satisfied on it and "keep this page" there
-            // would offer to save the library into the library.
+            // would offer to bookmark the bookmarks view.
             fetched_page: self.shown().is_some_and(|r| !r.built),
             focused_link: self.focus_href_was.is_some(),
             thread: self.shown().is_some_and(|r| {
@@ -2506,9 +2581,9 @@ impl ReaderApp {
         };
         let checks = menu_ui::Checks {
             // Cached, not asked. `holds` parses every stored address, and this runs on every
-            // frame the bar is drawn: with a full library a tick mark cost a few thousand URL
+            // frame the bar is drawn: with a full bookmarks a tick mark cost a few thousand URL
             // parses per frame, and the page-info panel asked the same question again.
-            kept: self.shown_kept,
+            bookmarked: self.shown_bookmarked,
             link_addresses: self.settings.read.show_link_urls,
             outline: self.chrome.outline_open,
             page_info: self.chrome.info_open,
@@ -2545,8 +2620,8 @@ impl ReaderApp {
                 self.reload(LoadOptions::BARE);
                 self.flash(notice::RELOADED_BARE.to_owned());
             }
-            Command::KeepPage => self.keep_page(),
-            Command::OpenLibrary => self.open_library(true),
+            Command::BookmarkPage => self.bookmark_page(),
+            Command::OpenBookmarks => self.open_bookmarks(true),
             Command::ReadLater => self.read_focused_link_later(),
             Command::OpenReadingList => self.open_reading_list(true),
             Command::OpenHistory => self.open_history(true),
@@ -2634,11 +2709,11 @@ impl ReaderApp {
                 // effect, so the panel reports the number and this hands it to egui.
                 prefs_ui::Event::ZoomSet(z) => ctx.set_zoom_factor(z),
                 // The panel owns neither the store nor the file, and it is not the place that
-                // knows whether the library is the page on screen. `rebuild_builtin_view` is a
+                // knows whether the bookmarks is the page on screen. `rebuild_builtin_view` is a
                 // no-op on any other page, so forgetting from a fetched page costs nothing and
-                // forgetting while looking at the library redraws it rather than leaving rows
+                // forgetting while looking at the bookmarks redraws it rather than leaving rows
                 // on screen for items that no longer exist.
-                prefs_ui::Event::ForgetLibrary => {
+                prefs_ui::Event::ForgetBookmarks => {
                     // Asked before the forget, because forgetting is what lifts it: either
                     // button is the reader saying they want this file replaced by what hww
                     // holds, which is the way out of an unreadable file that does not involve
@@ -2650,7 +2725,7 @@ impl ReaderApp {
                         self.flash(if replaced {
                             notice::UNREADABLE_FILE_REPLACED.to_owned()
                         } else {
-                            notice::library_forgotten(n)
+                            notice::bookmarks_forgotten(n)
                         });
                     }
                     self.rebuild_builtin_view();
@@ -2935,7 +3010,7 @@ impl ReaderApp {
         if go {
             let typed = text.trim().to_owned();
             // hww's own views round-trip through the bar, before anything is called a search.
-            // `resolve_input` cannot recognise them and should not have to — `hww:library` is
+            // `resolve_input` cannot recognise them and should not have to — `hww:bookmarks` is
             // not an http address, and `search` owns no view of hww's — while the bar is
             // prefilled with whatever the history holds, so without this the ordinary
             // open-the-bar-and-press-Enter gesture on a built view would ask somebody else's
@@ -3553,6 +3628,10 @@ impl ReaderApp {
         // "may this block be skipped" and "is this picture near the window" are different
         // questions, and only the first one is allowed to have no answer.
         ctx.autoload_band = auto.then_some(band);
+        // Unconditionally, unlike the line above: a site mark is fetched under every policy but
+        // `NoRequests`, exactly as the masthead favicon is, and `RenderCtx::note_icon` is where
+        // that question is asked.
+        ctx.icon_band = Some(band);
         self.top_block = None;
         for (i, b) in doc.blocks.iter().enumerate() {
             // The article's <h1> is usually also its <title>, and its "By Name" is already
@@ -3605,6 +3684,7 @@ impl ReaderApp {
         // Gathered where each picture drew, at every nesting depth, so a feed card or a comment
         // is judged by where *it* landed and not by the one block that holds the lot.
         let in_band = std::mem::take(&mut ctx.autoload_srcs);
+        let marks = std::mem::take(&mut ctx.icon_srcs);
         self.find_total = ctx.find_seen;
         self.find_scroll = false;
         self.focused_href = ctx.focus_href.clone();
@@ -3632,6 +3712,12 @@ impl ReaderApp {
         }
         // Last, and only if this frame did not start a navigation: a click that is leaving the
         // page has just made every picture on it something nobody is going to look at.
+        // Before the article images and under the same "not if this frame is leaving" rule:
+        // the marks are what the reader is looking at while a list page settles, and a click
+        // that navigates has just made every request queued for the old page pointless.
+        if self.current == before && !marks.is_empty() {
+            self.load_site_icons(&marks);
+        }
         if auto && self.current == before && !in_band.is_empty() {
             self.autoload(ui.ctx(), &auto_base, &in_band);
         }
@@ -3755,13 +3841,13 @@ mod tests {
     /// [`builtin_view`] takes a `&Url` and returns an `Option`, with no `egui` anywhere; it lives
     /// under `ui/` only because `navigate` does. Its failure is the kind that hides: a match too
     /// loose by one character would divert a real address from a real fetch and the reader would
-    /// be shown their library instead of the page they asked for, with nothing anywhere saying
-    /// why. A match too tight hands `hww:library` to reqwest, which is the Back-out-of-the-
-    /// library bug this function exists to close.
+    /// be shown their bookmarks instead of the page they asked for, with nothing anywhere saying
+    /// why. A match too tight hands `hww:bookmarks` to reqwest, which is the Back-out-of-the-
+    /// bookmarks bug this function exists to close.
     #[test]
     fn builtin_view_claims_one_address_and_diverts_no_fetch() {
         let u = |s: &str| Url::parse(s).expect("a fixture URL parses");
-        assert_eq!(builtin_view(&u(archive::LIBRARY)), Some(View::Library));
+        assert_eq!(builtin_view(&u(archive::BOOKMARKS)), Some(View::Bookmarks));
         assert_eq!(builtin_view(&u(archive::HISTORY)), Some(View::History));
         assert_eq!(
             builtin_view(&u(archive::READING_LIST)),
@@ -3769,18 +3855,18 @@ mod tests {
         );
         // Three addresses, three distinct strings. Two of them differing would send one view's
         // key to the other's page, and the `match` above would compile either way.
-        assert_ne!(archive::LIBRARY, archive::HISTORY);
-        assert_ne!(archive::LIBRARY, archive::READING_LIST);
+        assert_ne!(archive::BOOKMARKS, archive::HISTORY);
+        assert_ne!(archive::BOOKMARKS, archive::READING_LIST);
         assert_ne!(archive::HISTORY, archive::READING_LIST);
         for other in [
             "https://example.com/",
-            "https://example.com/library",
-            "http://library/",
-            "https://hww.example.com/library",
+            "https://example.com/bookmarks",
+            "http://bookmarks/",
+            "https://hww.example.com/bookmarks",
             // Near misses on the scheme's own side.
-            "hww:library/",
-            "hww:librar",
-            "hww:libraryy",
+            "hww:bookmarks/",
+            "hww:bookmark",
+            "hww:bookmarksy",
             "hww:history/",
             "hww:histor",
             "hww:historyy",
@@ -3918,6 +4004,7 @@ mod tests {
                 ],
                 published: None,
                 address: None,
+                icon: None,
                 image: None,
             }])],
         };

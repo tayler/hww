@@ -146,6 +146,17 @@ pub struct RenderCtx<'a> {
     /// blocks touch the band" answers *the whole page* for exactly the two shapes that carry
     /// the most pictures — which is the bound `reader::autoload` exists to keep.
     pub autoload_srcs: Vec<String>,
+    /// Where a list row's site mark may be fetched from, set on every page whatever the policy.
+    ///
+    /// A second band rather than [`RenderCtx::autoload_band`], because the two answer different
+    /// questions: that one is `None` unless the reader chose `ImagePolicy::Auto`, and a site
+    /// mark is fetched under every policy but `NoRequests`, exactly as the masthead favicon is.
+    /// A band at all, and not the whole document, because the bookmarks is one
+    /// `ir::Block::Entries` that may hold two thousand rows — which is the bound `autoload`
+    /// exists to keep, arrived at from the other direction.
+    pub icon_band: Option<crate::reader::measure::Band>,
+    /// The `src`s of unfetched site marks drawn inside [`RenderCtx::icon_band`] this frame.
+    pub icon_srcs: Vec<String>,
     /// The comment heights for the frame, lent by `measure::Heights`.
     pub comment_heights: HashMap<(usize, usize), f32>,
 }
@@ -186,6 +197,8 @@ impl RenderCtx<'_> {
             block: 0,
             autoload_band: None,
             autoload_srcs: Vec::new(),
+            icon_band: None,
+            icon_srcs: Vec::new(),
             comment_heights: HashMap::new(),
         }
     }
@@ -206,6 +219,26 @@ impl RenderCtx<'_> {
             && !band.skips(y, 0.0)
         {
             self.autoload_srcs.push(src.to_owned());
+        }
+    }
+
+    /// Record a site mark about to be drawn at `y` that hww does not have yet.
+    ///
+    /// The policy is asked here, in the recorder, as well as at `ReaderApp::load_site_icons`,
+    /// which is the door: a reader who set `NoRequests` should not have a list of hosts built
+    /// every frame for a request nobody is going to make.
+    ///
+    /// Only a mark with no state at all is recorded. One that failed has a state, so a dead
+    /// icon address is asked for once and not once per frame, which is the difference between
+    /// a column with a hole in it and a host contacted sixty times a second.
+    pub fn note_icon(&mut self, y: f32, src: &str) {
+        if !self.opts.images.allows_any_request() || self.images.state(src).is_some() {
+            return;
+        }
+        if let Some(band) = self.icon_band
+            && !band.skips(y, 0.0)
+        {
+            self.icon_srcs.push(src.to_owned());
         }
     }
 

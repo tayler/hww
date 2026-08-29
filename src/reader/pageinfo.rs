@@ -110,25 +110,30 @@ pub enum Arrival {
     FromMemory {
         age: Duration,
     },
-    /// hww assembled this page itself: the library, and whatever joins it. **No request was
-    /// made.**
+    /// hww assembled this page itself: the bookmarks, and whatever joins it. **No document was
+    /// requested.**
     ///
     /// The reason this variant exists rather than a fabricated `status: 200`. A built page's
     /// `Provenance` carries its address and zeros, and a panel that printed `Server answered 0`
     /// and `Downloaded 0 bytes` would be reporting a response nobody received; one that printed
     /// `200` would be worse, because it would be the plausible-looking lie `docs/findings.md`
     /// names three times. This is what guarantees those zeros are never drawn: [`rows`] emits the
-    /// address and one Route row and stops.
+    /// address, one Route row, and no Response row at all.
+    ///
+    /// It does emit Third parties. "No request was made" was true of this variant until the
+    /// bookmarks grew its column of site marks, and the difference is the one this doc has to
+    /// keep straight: no *document* was fetched to draw the page, and the third-party requests
+    /// the page then made on its own are reported exactly as they are on a page that was.
     Built,
 }
 
-/// Whether the page on screen is in the reader's library.
+/// Whether the page on screen is in the reader's bookmarks.
 ///
 /// Named rather than a bare `bool` because [`rows`] already takes one, and two adjacent bools at
 /// a call site is a swap that compiles. See [`crate::reader::archive`] for the doctrine this row
 /// discloses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kept {
+pub enum Bookmarked {
     Yes,
     No,
     /// Keeping is switched off in the settings, so "no" would be true and unhelpful: it would
@@ -146,7 +151,7 @@ pub fn rows(
     counts: &Counts,
     rtl: bool,
     arrival: Arrival,
-    kept: Kept,
+    bookmarked: Bookmarked,
 ) -> Vec<Row> {
     use Group::*;
     let mut out = vec![Row::new(Address, "Address", prov.final_url.as_str())];
@@ -157,11 +162,18 @@ pub fn rows(
     if arrival == Arrival::Built {
         out.push(
             Row::new(Route, "Built by hww", "no request was made").with_note(
-                "This page is hww's own, assembled on this machine from what you have kept. \
-                 Nothing was fetched to draw it, so there is no response and no third party to \
-                 report.",
+                "This page is hww's own, assembled on this machine from what you have saved. \
+                 Nothing was fetched to draw it, so there is no response to report.",
             ),
         );
+        // The one thing a built page does contact the network for: the site icons in the
+        // bookmarks's left column. `Arrival::Built` used to end this function here, and the note
+        // above used to finish "and no third party to report" — which stopped being true the
+        // day the bookmarks grew a favicon column, and a panel that says a page contacted nobody
+        // while it is contacting twenty hosts is the plausible-looking lie this module exists
+        // to refuse. Every row below is the same row a fetched page gets, from the same
+        // counters.
+        out.extend(third_parties(counts, 0));
         return out;
     }
 
@@ -174,11 +186,13 @@ pub fn rows(
     // page arrived is the reader asking what hww has of it. It sits under Address rather than
     // under a heading of its own because it is a fact about this address and not about the
     // request, and a group of one row would draw a heading for a single word.
-    out.push(match kept {
-        Kept::Yes => Row::new(Address, "In your library", "yes")
-            .with_note("hww keeps the address and the title, and nothing else about this page."),
-        Kept::No => Row::new(Address, "In your library", "no"),
-        Kept::Off => Row::new(Address, "In your library", "no")
+    out.push(match bookmarked {
+        Bookmarked::Yes => Row::new(Address, "Bookmarked", "yes").with_note(
+            "hww keeps the address, the title, and the address of the site's icon, so the \
+                 bookmarks can draw it. Nothing else about this page.",
+        ),
+        Bookmarked::No => Row::new(Address, "Bookmarked", "no"),
+        Bookmarked::Off => Row::new(Address, "Bookmarked", "no")
             .with_note("hww is set not to keep pages; change Keep pages in Settings."),
     });
     // The first Route row, and ahead of every Response row, which is the whole disclosure
@@ -289,7 +303,19 @@ pub fn rows(
         ));
     }
 
-    let cookies = prov.cookie_attempts + counts.cookie_attempts;
+    out.extend(third_parties(counts, prov.cookie_attempts));
+    out
+}
+
+/// The third-party rows, shared by a fetched page and a built one.
+///
+/// `document_cookies` is what the page's own response tried to set, which a built page has none
+/// of; everything else is counted the same way whether the request went out for an article
+/// picture or for a bookmarks list row's icon, because it is the same request through the same door.
+fn third_parties(counts: &Counts, document_cookies: usize) -> Vec<Row> {
+    use Group::*;
+    let mut out = Vec::new();
+    let cookies = document_cookies + counts.cookie_attempts;
     if cookies > 0 {
         out.push(
             Row::new(ThirdParties, "Cookies discarded", group_digits(cookies)).with_note(
@@ -320,8 +346,9 @@ pub fn rows(
                 plural(counts.referer_requests, "request"),
             )
             .with_note(
-                "Scheme and host only, never the path, and only on images you asked for. \
-                 Document fetches carry no Referer.",
+                "Scheme and host only, never the path, and only on image requests. Document \
+                 fetches carry no Referer, and neither do requests made on behalf of a page \
+                 hww built itself, which has no origin to send.",
             ),
         );
     }
@@ -421,7 +448,7 @@ mod tests {
             &Counts::default(),
             false,
             Arrival::Fetched,
-            Kept::No,
+            Bookmarked::No,
         );
         for label in [
             "Address",
@@ -451,15 +478,21 @@ mod tests {
     /// The whole reason [`Arrival::Built`] exists rather than a fabricated `status: 200`.
     ///
     /// A built page's provenance is its address and zeros. Every Response row would be a claim
-    /// about a response nobody received, and the Third parties heading would be a claim about
-    /// hosts nobody contacted. The address and one Route row, and nothing else.
+    /// about a response nobody received. The address, one Route row, and — once the bookmarks grew
+    /// a column of site marks — whatever those marks contacted, which the next test pins.
     #[test]
-    fn a_built_page_reports_no_response_and_no_third_parties() {
-        let p = Provenance::built(Url::parse(crate::reader::archive::LIBRARY).unwrap());
-        let rows = rows(&p, &Counts::default(), false, Arrival::Built, Kept::No);
+    fn a_built_page_reports_no_response() {
+        let p = Provenance::built(Url::parse(crate::reader::archive::BOOKMARKS).unwrap());
+        let rows = rows(
+            &p,
+            &Counts::default(),
+            false,
+            Arrival::Built,
+            Bookmarked::No,
+        );
         assert_eq!(
             find(&rows, "Address").map(|r| r.value.as_str()),
-            Some("hww:library")
+            Some("hww:bookmarks")
         );
         let built = find(&rows, "Built by hww").expect("the one Route row");
         assert_eq!(built.group, Group::Route);
@@ -477,7 +510,7 @@ mod tests {
             "Format",
             "Article text",
             "Cookies discarded",
-            "In your library",
+            "Bookmarked",
             "Restored",
         ] {
             assert!(
@@ -495,17 +528,47 @@ mod tests {
         assert_eq!(p.bytes, 0);
     }
 
-    /// The archive doctrine's disclosure: whether the page on screen is kept, said where the
+    /// The bookmarks' icon column is the one thing a page hww built asks the network for, and a
+    /// panel that answered "no third party to report" while twenty hosts were being contacted
+    /// would be the plausible-looking lie this module exists to refuse.
+    #[test]
+    fn a_built_page_reports_the_hosts_its_site_marks_contacted() {
+        let p = Provenance::built(Url::parse(crate::reader::archive::BOOKMARKS).unwrap());
+        let counts = Counts {
+            images: 2,
+            hosts: vec!["a.example".to_owned(), "b.example".to_owned()],
+            cookie_attempts: 1,
+            // Zero, and not because the reader switched the setting off: `hww:bookmarks` has an
+            // opaque origin, so `fetch::page_origin` yields nothing and `record_request` counts
+            // no disclosure that never left. A built page reporting `Referer sent` would be
+            // this module's own failure mode.
+            referer_requests: 0,
+        };
+        let rows = rows(&p, &counts, false, Arrival::Built, Bookmarked::No);
+        let loaded = find(&rows, "Images loaded").expect("the marks are reported");
+        assert_eq!(loaded.group, Group::ThirdParties);
+        assert_eq!(loaded.value, "2, from 2 hosts");
+        assert_eq!(loaded.note.as_deref(), Some("a.example\nb.example"));
+        assert!(find(&rows, "Cookies discarded").is_some());
+        assert!(find(&rows, "Referer sent").is_none());
+        // Still no response: the marks are requests this page made, not a response it got.
+        assert!(find(&rows, "Server answered").is_none());
+        // And the note above them no longer says nothing was contacted.
+        let built = find(&rows, "Built by hww").expect("the one Route row");
+        assert!(!built.note.as_deref().unwrap().contains("third party"));
+    }
+
+    /// The archive doctrine's disclosure: whether the page on screen is bookmarked, said where the
     /// reader asks how it arrived.
     #[test]
     fn a_fetched_page_says_whether_it_is_kept() {
         for (kept, value, has_note) in [
-            (Kept::Yes, "yes", true),
-            (Kept::No, "no", false),
-            (Kept::Off, "no", true),
+            (Bookmarked::Yes, "yes", true),
+            (Bookmarked::No, "no", false),
+            (Bookmarked::Off, "no", true),
         ] {
             let rows = rows(&prov(), &Counts::default(), false, Arrival::Fetched, kept);
-            let row = find(&rows, "In your library").expect("the disclosure row");
+            let row = find(&rows, "Bookmarked").expect("the disclosure row");
             assert_eq!(row.group, Group::Address);
             assert_eq!(row.value, value);
             assert_eq!(row.note.is_some(), has_note, "{kept:?}");
@@ -516,10 +579,10 @@ mod tests {
             &Counts::default(),
             false,
             Arrival::Fetched,
-            Kept::Off,
+            Bookmarked::Off,
         );
         assert!(
-            find(&off, "In your library")
+            find(&off, "Bookmarked")
                 .unwrap()
                 .note
                 .as_deref()
@@ -539,7 +602,7 @@ mod tests {
                     &Counts::default(),
                     false,
                     Arrival::Fetched,
-                    Kept::No
+                    Bookmarked::No
                 ),
                 "Requested"
             )
@@ -548,7 +611,13 @@ mod tests {
 
         let mut p = prov();
         p.final_url = Url::parse("https://example.com/b").unwrap();
-        let rows = rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No);
+        let rows = rows(
+            &p,
+            &Counts::default(),
+            false,
+            Arrival::Fetched,
+            Bookmarked::No,
+        );
         assert_eq!(
             find(&rows, "Requested").unwrap().value,
             "https://example.com/a"
@@ -565,7 +634,7 @@ mod tests {
             cookie_attempts: 0,
             referer_requests: 2,
         };
-        let rows = rows(&prov(), &counts, false, Arrival::Fetched, Kept::No);
+        let rows = rows(&prov(), &counts, false, Arrival::Fetched, Bookmarked::No);
         let images = find(&rows, "Images loaded").unwrap();
         assert_eq!(images.value, "3, from 2 hosts");
         assert!(images.note.as_ref().unwrap().contains("cdn.example.net"));
@@ -592,7 +661,7 @@ mod tests {
         };
         assert_eq!(
             find(
-                &rows(&p, &counts, false, Arrival::Fetched, Kept::No),
+                &rows(&p, &counts, false, Arrival::Fetched, Bookmarked::No),
                 "Cookies discarded"
             )
             .unwrap()
@@ -603,7 +672,13 @@ mod tests {
         p.cookie_attempts = 0;
         assert!(
             find(
-                &rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No),
+                &rows(
+                    &p,
+                    &Counts::default(),
+                    false,
+                    Arrival::Fetched,
+                    Bookmarked::No
+                ),
                 "Cookies discarded"
             )
             .is_none()
@@ -622,7 +697,13 @@ mod tests {
         ] {
             let mut p = prov();
             p.truncation = t;
-            let rows = rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No);
+            let rows = rows(
+                &p,
+                &Counts::default(),
+                false,
+                Arrival::Fetched,
+                Bookmarked::No,
+            );
             assert!(find(&rows, "Transfer").is_some(), "{t:?} produced no row");
         }
     }
@@ -642,7 +723,7 @@ mod tests {
             cookie_attempts: 1,
             referer_requests: 1,
         };
-        for row in rows(&p, &counts, false, memory(), Kept::No) {
+        for row in rows(&p, &counts, false, memory(), Bookmarked::No) {
             assert!(!row.value.contains('→'), "arrow in {:?}", row.value);
             assert!(!row.label.contains('→'));
             if let Some(n) = &row.note {
@@ -675,7 +756,7 @@ mod tests {
         ];
         // Both arrivals: the restored row is emitted mid-Route and must not break the run.
         for arrival in [Arrival::Fetched, memory()] {
-            let rows = rows(&p, &counts, false, arrival, Kept::No);
+            let rows = rows(&p, &counts, false, arrival, Bookmarked::No);
             let mut last = 0usize;
             for r in &rows {
                 let at = order.iter().position(|g| *g == r.group).unwrap();
@@ -709,7 +790,7 @@ mod tests {
     /// eleven rows of fetch accounting at face value before being told no fetch happened.
     #[test]
     fn a_restored_page_says_so_before_it_reports_the_fetch() {
-        let rows = rows(&prov(), &Counts::default(), false, memory(), Kept::No);
+        let rows = rows(&prov(), &Counts::default(), false, memory(), Bookmarked::No);
         let at = rows
             .iter()
             .position(|r| r.label == "Restored")
@@ -727,7 +808,7 @@ mod tests {
     /// a restored page, so "nothing was requested" would be false.
     #[test]
     fn the_restored_note_is_about_the_document_and_not_the_page() {
-        let rows = rows(&prov(), &Counts::default(), false, memory(), Kept::No);
+        let rows = rows(&prov(), &Counts::default(), false, memory(), Bookmarked::No);
         let note = find(&rows, "Restored")
             .and_then(|r| r.note.as_deref())
             .expect("the row carries a note");
@@ -742,7 +823,7 @@ mod tests {
             &Counts::default(),
             false,
             Arrival::Fetched,
-            Kept::No,
+            Bookmarked::No,
         );
         assert!(find(&rows, "Restored").is_none());
     }
@@ -801,7 +882,13 @@ mod tests {
                 },
             ],
         });
-        let rows = rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No);
+        let rows = rows(
+            &p,
+            &Counts::default(),
+            false,
+            Arrival::Fetched,
+            Bookmarked::No,
+        );
         let row = find(&rows, "Site profile").expect("a row");
         assert_eq!(
             row.value,
@@ -820,7 +907,13 @@ mod tests {
     fn a_thin_page_notes_the_extraction_floor_on_article_text() {
         let mut p = prov();
         p.chars = crate::ir::THIN_TEXT - 1;
-        let rows_thin = rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No);
+        let rows_thin = rows(
+            &p,
+            &Counts::default(),
+            false,
+            Arrival::Fetched,
+            Bookmarked::No,
+        );
         let thin = find(&rows_thin, "Article text").unwrap();
         assert!(
             thin.note
@@ -831,7 +924,13 @@ mod tests {
         p.chars = crate::ir::THIN_TEXT;
         assert!(
             find(
-                &rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No),
+                &rows(
+                    &p,
+                    &Counts::default(),
+                    false,
+                    Arrival::Fetched,
+                    Bookmarked::No
+                ),
                 "Article text"
             )
             .unwrap()
@@ -852,7 +951,13 @@ mod tests {
             kind: crate::feed::Kind::Atom,
             entries: 5,
         });
-        let rows = rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No);
+        let rows = rows(
+            &p,
+            &Counts::default(),
+            false,
+            Arrival::Fetched,
+            Bookmarked::No,
+        );
         let row = find(&rows, "Format").expect("a feed says which format answered");
         assert_eq!(row.group, Group::Response);
         assert_eq!(row.value, "Atom feed, 5 entries");
@@ -872,7 +977,7 @@ mod tests {
                     &Counts::default(),
                     false,
                     Arrival::Fetched,
-                    Kept::No
+                    Bookmarked::No
                 ),
                 "Layout"
             )
@@ -883,7 +988,7 @@ mod tests {
             &Counts::default(),
             true,
             Arrival::Fetched,
-            Kept::No,
+            Bookmarked::No,
         );
         let row = find(&rows_rtl, "Layout").expect("a row");
         assert_eq!(row.value, "right-to-left");

@@ -16,7 +16,7 @@
 //! The module is named `reader` rather than `gui` because the pure half is renderer-agnostic:
 //! a future speech or e-ink backend reuses it unchanged.
 
-/// The archive: what hww is allowed to remember, and the library it remembers it in. No egui
+/// The archive: what hww is allowed to remember, and the file it remembers it in. No egui
 /// types, so the fast CI job tests it. Read its module doc before adding anything that writes to
 /// disk — the doctrine is there and it is the point of the module.
 pub mod archive;

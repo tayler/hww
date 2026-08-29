@@ -1622,6 +1622,9 @@ fn entry_from(card: &ElementRef, walk: &Walk<'_>, depth: usize) -> Option<crate:
         published,
         // A card says where it goes in its own words. See `ir::Entry::address`.
         address: None,
+        // And every card on a front page leads to the same site, so a mark per row would say
+        // one thing many times. See `ir::Entry::icon`.
+        icon: None,
         image,
     })
 }
@@ -2766,7 +2769,7 @@ mod tests {
     /// (about 22 KB, three orders of magnitude under the transfer cap) used to be enough on a
     /// worker's 2 MiB stack, and this is comfortably past that.
     ///
-    /// Kept at 5,000 rather than higher because `content_root`'s ancestor scoring is quadratic
+    /// Capped at 5,000 rather than higher because `content_root`'s ancestor scoring is quadratic
     /// in depth: 20,000 takes 15s where 5,000 takes one. That cost is a separate problem from
     /// the abort, and it is bounded by this cap rather than fixed by it.
     #[test]
@@ -3661,7 +3664,7 @@ mod tests {
     /// `a_pathologically_nested_page_extracts_instead_of_aborting` uses.
     #[test]
     fn nested_story_cards_do_not_walk_off_the_stack() {
-        // Overflowed at 200 before the fix, and not at 100. Kept at the smaller number that
+        // Overflowed at 200 before the fix, and not at 100. Capped at the smaller number that
         // did, because the detector's cost is quadratic in this depth.
         const DEPTH: usize = 200;
         let open = "<div class=\"card\"><a href=\"/s\">A headline long enough to be one</a> \
