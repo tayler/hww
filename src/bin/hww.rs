@@ -29,6 +29,7 @@ fn main() -> eframe::Result {
             "--no-rewrite" if !end_of_flags => opts.rewrite = false,
             "--no-profile" if !end_of_flags => opts.profile = false,
             "--no-search" if !end_of_flags => opts.search = false,
+            "--no-feed" if !end_of_flags => opts.feed = false,
             // The extractor's account of a page in place of the page: triage, not reading.
             // Prints and exits without a window.
             "--why" if !end_of_flags => why = true,
@@ -112,6 +113,13 @@ fn main() -> eframe::Result {
                 eprintln!("{}", hww::render::sanitize_for_terminal(&prov.to_string()));
                 if let Some(r) = &prov.profile {
                     eprintln!("{}", hww::render::sanitize_for_terminal(&r.to_string()));
+                }
+                // Beside the profile, and for the reason a disclosure may not live only here:
+                // this binary is a Windows GUI-subsystem executable, so `--why` prints into
+                // nothing there. The same fact is a page-info row and gates the thin-text
+                // caution, both of which reach every platform; this is the triage copy.
+                if let Some(f) = &prov.feed {
+                    eprintln!("{}", hww::render::sanitize_for_terminal(&f.to_string()));
                 }
                 print!(
                     "{}",

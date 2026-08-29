@@ -416,3 +416,107 @@ search: the user named words, not a host, so there is no operator to stay within
 does the whole job instead. `Rewrite::Searched` names the host **and the terms** before the
 request is dispatched, because "hww went somewhere you did not type" is only half the disclosure
 when what it carried was your query.
+
+# Phase 5: feeds
+
+`README.md` listed feeds as not started, but a feed fetched today was never refused —
+`session::is_web_page` already passed `application/rss+xml`, `application/atom+xml`, and
+`application/xml` — it was handed to `html::extract`, which reads XML as HTML soup. That is the
+confident wrong diagnosis the content-type gate exists to prevent, one level deeper: the page
+came out near-empty and the reader was told it might need JavaScript. Measured 2026-08-28 over
+six feeds chosen for format and payload-encoding coverage, then a wider sample of 27 for the
+parse-rate question. Nothing scoped to a host, so `docs/sites-checked.md` needs nothing.
+
+| feed | format | items | payload chars | payload encoding |
+|---|---|---|---|---|
+| Daring Fireball | Atom | 48 | 121,466 | CDATA, `xml:base` |
+| Hacker News | RSS | 30 | 2,040 | CDATA |
+| LWN | RSS | 15 | 14,050 | entity-escaped |
+| Rust Blog | Atom | 10 | 119,761 | entity-escaped, `xml:base` |
+| WordPress News | RSS | 10 | 271,965 | CDATA, `content:encoded` |
+| xkcd | Atom | 4 | 1,567 | entity-escaped |
+
+**html5ever cannot read feeds.** It parses `<![CDATA[…]]>` as a bogus comment, which runs to the
+first `>` inside the payload and swallows the prose into it. On WordPress News' first item
+`scraper` returns **0 characters** for `<description>` where `roxmltree` returns **3,251**, and
+**2,451** for the `content:encoded` beside it — 800 characters gone with nothing said. How much
+is lost depends on where that first `>` happens to fall, so the failure is silent and
+data-dependent: the entry simply comes out short. Over the whole of that feed, `html::extract`
+recovers **13,735** characters and `feed::read` **63,480** from the same bytes.
+
+Two further divergences, both reproduced on a four-element fixture. html5ever treats `<link>` as
+void, so an RSS item's URL is not the link element's text (`""`) but a loose sibling text node.
+And an unknown self-closing element nests its siblings underneath itself: after
+`<media:thumbnail/>`, the `<description>` that followed it parses as its child.
+
+**roxmltree reads real feeds: 26 of 28**, across WordPress, Ghost, Hugo, Jekyll, Blogger and
+hand-rolled generators, both formats, 1 to 71 items. It recovers CDATA and entity-escaped
+payloads alike and resolves `content:encoded` and `xml:base` by namespace. One package added to
+the lockfile (`memchr` was already there), no `unsafe`, no RustSec advisories, an explicit
+no-panic policy.
+
+**Neither miss is the parser's.** One feed is larger than the 5 MB transfer cap, so what arrives
+is a document cut mid-element; it opened `<?xml` rather than naming a format, so it is
+`NotAFeed` and falls through, and the reader gets the truncation caution, which is the accurate
+thing to say about it. The other is served as `application/octet-stream`, so
+`session::is_web_page` refuses it before any of this runs. Widening that gate to admit
+`octet-stream` would admit every PDF and archive with it, which is the failure the gate exists
+for; the reader is told which type was sent and that hww has no reader for it, and that is true.
+
+**Its strictness is real and is not a practical risk.** Constructed defects that kill the whole
+document: `&nbsp;` (`unknown entity reference`), an undeclared namespace prefix, a raw `&`, a
+control character. None occurred in the 27-feed sample, because generators emit well-formed XML —
+every other feed reader would break too. The answer is disclosure when it happens
+(`feed::Outcome::Unreadable`, which becomes a page remark carrying the parser's message and
+position), not leniency. A document that only ever opened `<?xml` and then failed is
+`NotAFeed` instead: plenty of XML is not a feed, and blaming a publisher for a document hww was
+not asked to read is the same wrong confidence in the other direction.
+
+**`allow_dtd` stays at its default of false.** Both measured consequences are wanted: a
+billion-laughs entity bomb is refused at the parse rather than expanded, and an HTML page is
+refused for its `<!DOCTYPE html>` before any element is inspected. Turning it on re-opens entity
+expansion on untrusted input.
+
+**The mapping needed no IR change.** `ir::Block::Entries` says so at the variant itself — *"A
+feed maps onto the same block"* — and both renderers already draw it. Each payload through
+`Html::parse_fragment` and the existing `html::blocks_from_public` produces real IR: Daring
+Fireball's first entry comes out `Paragraph, Quote, Paragraph, Paragraph`.
+
+**The chrome hints have to be off inside a summary.** They exist to drop nav, promo and footer
+subtrees from a whole page. A feed summary is already the content, so a publisher who wraps a
+post body in a `share`- or `promo`-classed element has it deleted with nothing on screen saying
+why — the `PagePromo` failure this document already records, one level in.
+`html::blocks_from_public_unhinted` is the entry point that does not apply them.
+
+**1,000 bytes is the entry budget.** It leaves Hacker News, xkcd and LWN entries whole and turns
+the two full-text feeds into lead-ins. Without one the WordPress feed is a single
+272,971-character block and one of its items is 127,328 on its own. The cut is a **floor** and
+overshoots by one block, so it always falls on a block boundary; it lives in `reader::budget`
+rather than in `feed.rs`, because a lossy extractor is not recoverable and the plain renderer has
+no width pressure. It is bytes and is named bytes: `ir::inlines_text_len` sums `s.len()`, so a
+budget written as characters would cut a CJK or Cyrillic feed at roughly a third of its visible
+length.
+
+**xkcd is why the disclosure field exists.** Its summaries are a single `<img>` each, so every
+entry is one `Block::Figure`, and `ir::block_text_len` counts a figure as its caption alone. The
+whole document scores under `ir::THIN_TEXT`, so `reader::notice::about_page` fired *"hww found
+little text on this page, which may need JavaScript to show its content"* and
+`reader::pageinfo::rows` repeated it on the `Article text` row. Both are false about a feed that
+parsed perfectly. The IR must not change to fix this — text length has one currency — so
+`Provenance::feed` carries the fact that the page was read as a feed, and one field serves the
+caution, the page-info row, and `--why`.
+
+**An XML declaration names an encoding that no charset prescan can see.** `fetch::decode`
+searched a 4 KiB window for the literal `charset=`; an XML declaration writes `encoding="…"`, so
+a legacy-encoded feed with no HTTP charset decoded as UTF-8 and reached the parser as replacement
+characters. It has to be fixed at decode: `roxmltree` takes a `&str`, so by then the decision is
+already made, and it ignores the declaration. The scan is the declaration itself and not a
+window, because `encoding=` is an ordinary word that appears in prose and in a feed's own payload.
+
+**RFC 822 dates are layout damage, not cosmetics.** A feed writes
+`Thu, 27 Aug 2026 17:17:57 +0000`, about 31 characters. `blocks::entries_ui` measures that stamp
+with `layout_no_wrap` and subtracts its width from the headline's, floored at half the available
+width, so every feed headline in a card was clamped to that floor. `reader::title::short_date`
+now reformats it to `2026-08-27`, which changes that function's contract from truncating to
+reformatting and gives dates one shape everywhere in the reader. `render.rs` is left verbatim:
+the text renderer has no width pressure and no reason to restate what the page said.

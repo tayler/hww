@@ -1166,6 +1166,21 @@ pub fn blocks_from_public(root: ElementRef<'_>, base: &Url) -> Vec<Block> {
     blocks_from(root, &Walk::bare(base))
 }
 
+/// [`blocks_from_public`] with the class-name chrome hints off: how a feed entry's payload is
+/// read.
+///
+/// The hints exist to drop nav, promo, and footer subtrees out of a **whole page**, where a
+/// `share`, `promo`, or `related` class names something wrapped *around* the content. A feed
+/// summary is not a page: the publisher already chose what went in it, so a post body that
+/// arrives inside a promo-classed wrapper has the article deleted with nothing on screen saying
+/// why. That is the `PagePromo` failure `docs/findings.md` records, one level in, and it is
+/// silent — the entry simply comes out short.
+///
+/// `a_promo_class_in_a_summary_survives` in `feed` is what holds this call in place.
+pub fn blocks_from_public_unhinted(root: ElementRef<'_>, base: &Url) -> Vec<Block> {
+    blocks_from(root, &Walk::without_hints(base))
+}
+
 /// [`blocks_from_public`] that does not enter the subtrees in `skip`: how a post's body is
 /// read when its replies nest inside it.
 pub fn blocks_from_skipping(

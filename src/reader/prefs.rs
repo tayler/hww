@@ -134,6 +134,7 @@ pub enum FieldId {
     Theme,
     Images,
     ShowLinkAddresses,
+    EntrySummary,
     Zoom,
     ScrollStep,
     ReplyIndent,
@@ -149,7 +150,7 @@ pub enum FieldId {
 impl FieldId {
     /// Every field. Walked by the tests, and by nothing else: the panel walks [`fields`],
     /// which carries the order and the grouping.
-    pub const ALL: [FieldId; 18] = [
+    pub const ALL: [FieldId; 19] = [
         FieldId::LineWidth,
         FieldId::TextSize,
         FieldId::LineSpacing,
@@ -158,6 +159,7 @@ impl FieldId {
         FieldId::Theme,
         FieldId::Images,
         FieldId::ShowLinkAddresses,
+        FieldId::EntrySummary,
         FieldId::Zoom,
         FieldId::ScrollStep,
         FieldId::ReplyIndent,
@@ -188,6 +190,7 @@ impl FieldId {
             FieldId::Theme => (Some("read"), "theme"),
             FieldId::Images => (Some("read"), "images"),
             FieldId::ShowLinkAddresses => (Some("read"), "show_link_urls"),
+            FieldId::EntrySummary => (Some("read"), "entry_summary_bytes"),
             FieldId::ReplyIndent => (Some("read"), "indent_per_depth"),
             FieldId::StopIndentingAfter => (Some("read"), "max_thread_indent"),
             FieldId::Zoom => (None, "zoom_factor"),
@@ -536,6 +539,24 @@ pub fn fields() -> Vec<Field> {
             control: Toggle,
         },
         Field {
+            id: F::EntrySummary,
+            group: G::Page,
+            label: "Entry summary",
+            note: Some(
+                "How much of each item a feed or a list of stories shows before the headline of \
+                 the next one. Zero shows every item in full. Measured in bytes of text, so a \
+                 line of Japanese or Russian counts for more than a line of English.",
+            ),
+            keys: "",
+            control: Slider {
+                min: ReadOpts::SUMMARY_MIN,
+                max: ReadOpts::SUMMARY_MAX,
+                step: 100.0,
+                fractional: false,
+                unit: "bytes",
+            },
+        },
+        Field {
             id: F::Zoom,
             group: G::Page,
             label: "Zoom",
@@ -712,6 +733,7 @@ pub fn get(s: &Settings, id: FieldId) -> Value {
         FieldId::KeepLibrary => Value::Bool(s.keep_library),
         FieldId::KeepHistory => Value::Bool(s.keep_history),
         FieldId::ShowLinkAddresses => Value::Bool(s.read.show_link_urls),
+        FieldId::EntrySummary => Value::Num(f32::from(s.read.entry_summary_bytes)),
         FieldId::Zoom => Value::Num(s.zoom_factor),
         FieldId::ScrollStep => Value::Num(s.scroll_lines),
         FieldId::ReplyIndent => Value::Num(s.read.indent_per_depth),
@@ -823,6 +845,11 @@ pub fn set(s: &mut Settings, id: FieldId, v: Value) {
         FieldId::ScrollStep => {
             if let Some(n) = v.num() {
                 s.scroll_lines = clamped(field, n);
+            }
+        }
+        FieldId::EntrySummary => {
+            if let Some(n) = v.num() {
+                s.read.entry_summary_bytes = clamped(field, n).round() as u16;
             }
         }
         FieldId::ReplyIndent => {
@@ -980,6 +1007,7 @@ mod tests {
                 | FieldId::Theme
                 | FieldId::Images
                 | FieldId::ShowLinkAddresses
+                | FieldId::EntrySummary
                 | FieldId::Zoom
                 | FieldId::ScrollStep
                 | FieldId::ReplyIndent

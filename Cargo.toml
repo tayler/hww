@@ -15,6 +15,11 @@ gui = ["dep:eframe", "dep:image", "dep:winit"]
 anyhow = "1.0.104"
 ego-tree = "0.11.0"
 encoding_rs = "0.8.35"
+# XML for feeds. html5ever reads `<![CDATA[…]]>` as a bogus comment running to the first `>`
+# in the payload, which loses a data-dependent amount of every entry silently; see `src/feed.rs`
+# for the measurement. `allow_dtd` stays at its default of false, which refuses an entity bomb
+# at parse rather than expanding it.
+roxmltree = "0.21.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls", "http2", "gzip", "brotli", "deflate", "charset"] }
 scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }

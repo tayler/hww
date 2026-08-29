@@ -389,27 +389,88 @@ fn read_capped(
     (buf, err)
 }
 
-/// Decode bytes to text. Precedence: HTTP `charset` -> `<meta charset>` prescan -> UTF-8.
+/// Decode bytes to text. Precedence: HTTP `charset` -> `<?xml encoding>` -> `<meta charset>`
+/// prescan -> UTF-8.
 ///
 /// Phase 0 measured 100% UTF-8 across the sample and zero legacy encodings, so this is
 /// correctness insurance rather than a hot path. It matters for the older web the client
 /// is aimed at, which that sample happened not to reach.
+///
+/// The XML declaration sits ahead of the prescan because it is the narrower claim: it is one
+/// element of one document, at byte zero, and it says outright what the bytes are. The prescan
+/// hunts a 4 KiB window for the literal `charset=`, which a feed's own payload may well
+/// contain.
+///
+/// It is skipped entirely for `text/html`, and the HTML spec's own sniffing algorithm skips it
+/// for the same reason: a prolog left behind by a conversion out of XHTML outlives the encoding
+/// it names, and the `<meta charset>` under it is the one the page is actually written in.
+/// Honouring the stale declaration there decoded a correct UTF-8 page as windows-1252. The gate
+/// is on `text/html` alone rather than on an XML allowlist, so a feed served under an
+/// unregistered type, or under none, keeps the declaration it declared.
 pub fn decode(
     bytes: &[u8],
     content_type: Option<&str>,
 ) -> (String, &'static encoding_rs::Encoding) {
+    let html = content_type.is_some_and(is_html);
     let enc = content_type
         .and_then(charset_from_content_type)
+        .or_else(|| (!html).then(|| xml_declaration_encoding(bytes)).flatten())
         .or_else(|| meta_charset_prescan(bytes))
         .unwrap_or(encoding_rs::UTF_8);
     let (text, actual, _had_errors) = enc.decode(bytes);
     (text.into_owned(), actual)
 }
 
+/// Whether a response is HTML proper. `application/xhtml+xml` is not: it is XML, its
+/// declaration is current rather than left over, and it keeps the precedence.
+fn is_html(ct: &str) -> bool {
+    ct.split(';')
+        .next()
+        .is_some_and(|m| m.trim().eq_ignore_ascii_case("text/html"))
+}
+
 fn charset_from_content_type(ct: &str) -> Option<&'static encoding_rs::Encoding> {
     let idx = ct.to_ascii_lowercase().find("charset=")?;
     let raw = ct[idx + 8..].trim().trim_matches(['"', '\'']);
     let label = raw.split(';').next()?.trim();
+    encoding_rs::Encoding::for_label(label.as_bytes())
+}
+
+/// How far in a leading `<?xml … ?>` declaration is allowed to run before it stops being one.
+///
+/// Deliberately tiny. The declaration is the first thing in the document and carries at most a
+/// version, an encoding, and a standalone flag; anything longer is not a declaration and the
+/// scan should not follow it into the feed.
+const XML_DECL_WINDOW: usize = 256;
+
+/// The `encoding` named by a leading XML declaration, when the document opens with one.
+///
+/// [`meta_charset_prescan`] cannot see it: an XML declaration writes `encoding="…"` and never
+/// `charset=`, so a legacy-encoded feed with no HTTP charset decoded as UTF-8 and reached the
+/// parser as replacement characters. Scoped to the declaration itself rather than to a window,
+/// because `encoding=` is an ordinary word that appears in prose and in a feed's own payload,
+/// and a false positive here mis-decodes the whole document.
+///
+/// It has to happen at decode. `roxmltree` takes a `&str`, so by the time the feed parser sees
+/// the document this decision is already made, and it ignores the declaration.
+fn xml_declaration_encoding(bytes: &[u8]) -> Option<&'static encoding_rs::Encoding> {
+    // No BOM handling: `Encoding::decode` sniffs one and overrides whatever is chosen here,
+    // which is the right precedence and would make honouring a declaration behind a BOM a
+    // no-op with extra steps.
+    let b = &bytes[..bytes.len().min(XML_DECL_WINDOW)];
+    let start = b.iter().position(|c| !c.is_ascii_whitespace())?;
+    let b = &b[start..];
+    if !b.starts_with(b"<?xml") {
+        return None;
+    }
+    let end = b.windows(2).position(|w| w == b"?>")?;
+    // Lossy, and only over the declaration: every encoding this can usefully name is
+    // ASCII-compatible, so the declaration's own bytes are ASCII whatever the body is.
+    let decl = String::from_utf8_lossy(&b[..end]).to_ascii_lowercase();
+    let rest = decl[decl.find("encoding")? + "encoding".len()..].trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let label = rest[quote.len_utf8()..].split(quote).next()?;
     encoding_rs::Encoding::for_label(label.as_bytes())
 }
 
@@ -537,6 +598,66 @@ mod tests {
         let (text, enc) = decode("plain ascii".as_bytes(), None);
         assert_eq!(enc.name(), "UTF-8");
         assert_eq!(text, "plain ascii");
+    }
+
+    /// A feed names its encoding in the XML declaration, which carries no `charset=` for the
+    /// prescan to find. Without this a legacy-encoded feed decoded as UTF-8 and reached the
+    /// parser as replacement characters.
+    #[test]
+    fn an_xml_declaration_names_the_encoding() {
+        let xml = b"<?xml version=\"1.0\" encoding=\"windows-1251\"?><rss><channel/></rss>";
+        assert_eq!(decode(xml, None).1.name(), "windows-1251");
+        // Single quotes and leading whitespace are both real in the wild.
+        let xml = "\n  <?xml version='1.0' encoding='iso-8859-1' ?><feed/>";
+        assert_eq!(decode(xml.as_bytes(), None).1.name(), "windows-1252");
+        // The HTTP header still wins.
+        let xml = b"<?xml version=\"1.0\" encoding=\"windows-1251\"?><rss/>";
+        assert_eq!(
+            decode(xml, Some("application/rss+xml; charset=utf-8"))
+                .1
+                .name(),
+            "UTF-8"
+        );
+    }
+
+    /// A prolog outlives the encoding it names. An XHTML page converted to HTML keeps the
+    /// declaration and gains a `<meta charset>`, and the HTML spec's own sniffing ignores the
+    /// declaration for `text/html` for exactly that reason; honouring it decoded a correct
+    /// UTF-8 page as windows-1252.
+    #[test]
+    fn a_stale_declaration_does_not_outrank_a_meta_charset_in_html() {
+        let page = b"<?xml version=\"1.0\" encoding=\"iso-8859-1\"?>\n\
+                     <html><head><meta charset=\"utf-8\"></head><body>x</body></html>";
+        assert_eq!(decode(page, Some("text/html")).1.name(), "UTF-8");
+        assert_eq!(
+            decode(page, Some("text/html; charset=")).1.name(),
+            "UTF-8",
+            "an unparseable charset parameter is still text/html"
+        );
+        // XML keeps the precedence: `application/xhtml+xml` is XML, and its declaration is
+        // current rather than left over. So is a feed, and so is one served under no type at
+        // all, which is the case the gate must not catch.
+        assert_eq!(
+            decode(page, Some("application/xhtml+xml")).1.name(),
+            "windows-1252"
+        );
+        let feed = b"<?xml version=\"1.0\" encoding=\"iso-8859-1\"?><rss><channel/></rss>";
+        assert_eq!(
+            decode(feed, Some("application/rss+xml")).1.name(),
+            "windows-1252"
+        );
+        assert_eq!(decode(feed, None).1.name(), "windows-1252");
+    }
+
+    /// The scan is the declaration and nothing past it. `encoding=` is an ordinary word, and a
+    /// document that never opened with a declaration must not have one read out of its prose.
+    #[test]
+    fn the_word_encoding_in_a_document_is_not_a_declaration() {
+        let html = b"<html><body><p>set encoding=\"windows-1251\" in your editor</p></body>";
+        assert_eq!(decode(html, None).1.name(), "UTF-8");
+        // A declaration with no encoding attribute names nothing.
+        let xml = b"<?xml version=\"1.0\"?><rss>encoding=\"windows-1251\"</rss>";
+        assert_eq!(decode(xml, None).1.name(), "UTF-8");
     }
 
     #[test]

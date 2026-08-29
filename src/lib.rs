@@ -7,6 +7,7 @@
 //! only that. See `docs/findings.md` for the measurements this design rests on.
 
 pub mod cards;
+pub mod feed;
 pub mod fetch;
 pub mod hint;
 pub mod html;

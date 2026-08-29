@@ -23,6 +23,10 @@ pub mod archive;
 /// Which pictures `ImagePolicy::Auto` asks for. No egui types, so the fast CI job tests it,
 /// which is the point: the mistakes are set arithmetic and none of them show in a screenshot.
 pub mod autoload;
+/// Where an entry's summary stops, for the draw and for the image walk alike. No egui types,
+/// so the fast CI job tests it, which is the point: a budget the two disagreed about would
+/// fetch pictures the reader never sees.
+pub mod budget;
 /// What the desktop asks a `Theme::System` reader for, and how that answer changes while the
 /// window is open. No egui types, so the fast CI job tests the reply parsing.
 pub mod desktop;

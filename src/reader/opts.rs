@@ -275,6 +275,14 @@ pub struct ReadOpts {
     pub show_link_urls: bool,
     #[serde(deserialize_with = "images_or_default")]
     pub images: ImagePolicy,
+    /// How much of a feed entry's summary is drawn, in **bytes** of visible text; 0 draws all
+    /// of it. A floor rather than a ceiling — see `reader::budget`, which owns the cut and is
+    /// what the image walk reads too.
+    ///
+    /// Bytes and not characters, because `ir::inlines_text_len` sums `s.len()`: written as
+    /// characters this would cut a CJK or Cyrillic feed at roughly a third of its visible
+    /// length, and text length in this crate has one currency.
+    pub entry_summary_bytes: u16,
     /// Points of indent per reply level in a thread.
     pub indent_per_depth: f32,
     /// Levels of indent before nesting stops accumulating. Without a cap a 40-deep thread
@@ -293,6 +301,7 @@ impl Default for ReadOpts {
             theme: Theme::System,
             show_link_urls: false,
             images: ImagePolicy::Placeholder,
+            entry_summary_bytes: Self::SUMMARY_DEFAULT,
             indent_per_depth: 18.0,
             max_thread_indent: 8,
         }
@@ -333,6 +342,19 @@ impl ReadOpts {
     /// the same page `INDENT_MIN` gives and is reachable from either end on purpose.
     pub const MAX_INDENT_MIN: u16 = 0;
     pub const MAX_INDENT_MAX: u16 = 24;
+
+    /// Bytes of an entry's summary. Zero is the whole entry, and it is the low end rather than
+    /// a switch beside the slider because it is the same quantity asked for without a limit —
+    /// the reader who wants every word and the reader who wants two paragraphs are turning one
+    /// knob. Four thousand is already several screens per row, past which a list of entries has
+    /// stopped being a list.
+    pub const SUMMARY_MIN: f32 = 0.0;
+    pub const SUMMARY_MAX: f32 = 4_000.0;
+
+    /// Measured 2026-08-28 across six feeds: 1,000 bytes leaves a headlines-only feed's entries
+    /// whole and turns a full-text feed into a lead-in. Without a budget one of those feeds was
+    /// a single 271,965-character block, and one of its items 127,328 on its own.
+    pub const SUMMARY_DEFAULT: u16 = 1_000;
 
     /// `[` and `]`. hww's own reading knob, the one a browser does not have.
     pub fn widen(&mut self) {

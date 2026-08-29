@@ -247,6 +247,17 @@ pub fn rows(
     ));
     out.push(Row::new(Response, "Text encoding", prov.encoding));
     out.push(Row::new(Response, "Downloaded", human_bytes(prov.bytes)));
+    // Under Response, because what came back is a fact about the response and not about how the
+    // request travelled, and *before* `Article text`, because it is the context that count has
+    // to be read in. `Article text` keeps its label: `a_clean_page_still_reports_how_it_arrived`
+    // asserts it is always present, and renaming it for one kind of page would put a different
+    // question under the same heading.
+    if let Some(f) = &prov.feed {
+        out.push(Row::new(Response, "Format", f.to_string()).with_note(
+            "Read with an XML parser rather than the HTML one. Entry summaries are the \
+             publisher's own, and hww requested none of the posts behind them.",
+        ));
+    }
     let mut article = Row::new(
         Response,
         "Article text",
@@ -254,7 +265,11 @@ pub fn rows(
     );
     // Same event as the thin-extraction bar. The count alone is easy to miss; the note is
     // the record after the bar is closed.
-    if prov.chars < crate::ir::THIN_TEXT {
+    //
+    // Not on a feed, for the same reason `about_page` does not draw the bar on one:
+    // `ir::block_text_len` counts a `Figure` as its caption alone, so a picture-only feed scores
+    // under the floor while having parsed perfectly, and the note would be false about it.
+    if prov.chars < crate::ir::THIN_TEXT && prov.feed.is_none() {
         article = article.with_note(
             "Below the extraction floor. This page may need JavaScript to show its content.",
         );
@@ -423,6 +438,7 @@ mod tests {
             "Rewrite rule",
             "Site profile",
             "Redirects",
+            "Format",
             "Transfer",
             "Layout",
             "Images loaded",
@@ -458,6 +474,7 @@ mod tests {
             "Server answered",
             "Text encoding",
             "Downloaded",
+            "Format",
             "Article text",
             "Cookies discarded",
             "In your library",
@@ -821,6 +838,28 @@ mod tests {
             .note
             .is_none()
         );
+    }
+
+    /// A feed says which format answered and how many entries came with it, above the character
+    /// count it is the context for. The below-the-floor note goes away: `ir::block_text_len`
+    /// counts a `Figure` as its caption alone, so a picture-only feed scores under the floor
+    /// having parsed perfectly, and the note would be false about it.
+    #[test]
+    fn a_feed_reports_its_format_and_drops_the_extraction_floor_note() {
+        let mut p = prov();
+        p.chars = crate::ir::THIN_TEXT - 1;
+        p.feed = Some(crate::feed::Report {
+            kind: crate::feed::Kind::Atom,
+            entries: 5,
+        });
+        let rows = rows(&p, &Counts::default(), false, Arrival::Fetched, Kept::No);
+        let row = find(&rows, "Format").expect("a feed says which format answered");
+        assert_eq!(row.group, Group::Response);
+        assert_eq!(row.value, "Atom feed, 5 entries");
+        assert!(find(&rows, "Article text").unwrap().note.is_none());
+        // And it is context for the count, so it comes first.
+        let at = |label| rows.iter().position(|r| r.label == label).unwrap();
+        assert!(at("Format") < at("Article text"));
     }
 
     /// The RTL caution's quiet half: a row, so dismissing the bar is not how the fact dies.

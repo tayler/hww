@@ -333,9 +333,18 @@ pub struct ReaderApp {
     hover_height: f32,
     chrome: Chrome,
     images: ImageStore,
-    /// Which blocks of the page on screen contain each image `src`. Built once when it
-    /// commits; see [`image_blocks`].
+    /// Which blocks of the page on screen contain each image `src`. Built when the page
+    /// commits and rebuilt when the lead-in budget moves under it; see [`image_blocks`].
     image_blocks: HashMap<String, Vec<usize>>,
+    /// The `entry_summary_bytes` [`Self::image_blocks`] was built under.
+    ///
+    /// The map is a function of the document *and* that budget: a longer lead-in draws figures
+    /// a shorter one cut, so raising the setting with a feed open leaves the map describing
+    /// blocks that are no longer the ones on screen. `collect_image_srcs` reads the live value
+    /// and would go on to request a picture the stale map has no entry for, so its arrival
+    /// invalidated no height and the entry kept a placeholder-sized row around a full-sized
+    /// image. See [`Self::ready_screen`].
+    image_blocks_budget: u16,
     /// How many times `ImagePolicy::Auto` has asked for each `src` on the page on screen.
     ///
     /// A count and not a set, because the LRU can drop a picture that is still on the page:
@@ -598,6 +607,7 @@ impl ReaderApp {
             chrome: Chrome::default(),
             images: ImageStore::default(),
             image_blocks: HashMap::new(),
+            image_blocks_budget: 0,
             auto_attempts: HashMap::new(),
             heights: Heights::default(),
             collapsed: HashSet::new(),
@@ -1325,7 +1335,7 @@ impl ReaderApp {
         let Some(ready) = self.shown() else {
             return;
         };
-        let all = collect_image_srcs(&ready.loaded.doc);
+        let all = collect_image_srcs(&ready.loaded.doc, self.settings.read.entry_summary_bytes);
         let base = ready.loaded.prov.final_url.clone();
         // Declined, and *only* declined. Testing the address the other way round dropped every
         // `src` that fails to join too, so a page whose images all had unusable addresses
@@ -1553,7 +1563,8 @@ impl ReaderApp {
         }
         // After `commit`, which cleared the outgoing page's index, and before the page is
         // installed, which is the last moment the document is not behind `self.page`.
-        self.image_blocks = image_blocks(&page.loaded.doc);
+        self.image_blocks_budget = self.settings.read.entry_summary_bytes;
+        self.image_blocks = image_blocks(&page.loaded.doc, self.image_blocks_budget);
         self.page = Page::Ready(page);
         // Where this page was left, if it is a page the reader has been on: Back, Forward and
         // `r` all arrive here with the cursor on an entry that has been read before, and
@@ -2031,26 +2042,38 @@ impl ReaderApp {
     }
 }
 
-fn walk_blocks(blocks: &[ir::Block], out: &mut Vec<String>) {
+/// Every image `src` in a block list, in document order, repeats kept.
+///
+/// `budget` is `ReadOpts::entry_summary_bytes` and is why this takes an argument at all: an
+/// entry's summary is cut at the draw, and a walk that read it whole would collect figures from
+/// the tail, name their hosts in the load-images disclosure, count them in page info, and fetch
+/// them — third-party requests for pictures the reader cannot see. `budget::lead_in` is the one
+/// place that decides where the cut falls, and both callers ask it.
+fn walk_blocks(blocks: &[ir::Block], budget: u16, out: &mut Vec<String>) {
     for b in blocks {
         match b {
             ir::Block::Figure { image, .. } => out.push(image.src.clone()),
             ir::Block::Paragraph(inlines) | ir::Block::Heading { inlines, .. } => {
                 walk_inlines(inlines, out)
             }
-            ir::Block::List { items, .. } => items.iter().for_each(|i| walk_blocks(i, out)),
-            ir::Block::Quote { blocks, .. } => walk_blocks(blocks, out),
+            ir::Block::List { items, .. } => items.iter().for_each(|i| walk_blocks(i, budget, out)),
+            ir::Block::Quote { blocks, .. } => walk_blocks(blocks, budget, out),
             ir::Block::Table { headers, rows } => {
                 headers.iter().for_each(|c| walk_inlines(c, out));
                 rows.iter().flatten().for_each(|c| walk_inlines(c, out));
             }
-            ir::Block::Thread(cs) => cs.iter().for_each(|c| walk_blocks(&c.blocks, out)),
+            ir::Block::Thread(cs) => cs.iter().for_each(|c| walk_blocks(&c.blocks, budget, out)),
             // Entry thumbnails draw once loaded (`blocks::entries_ui`), so `I` loads them
-            // with the rest and the page-info panel counts them.
+            // with the rest and the page-info panel counts them. The summary is walked only as
+            // far as it is drawn: see this function's doc comment.
             ir::Block::Entries(es) => es.iter().for_each(|e| {
                 out.extend(e.image.as_ref().map(|i| i.src.clone()));
                 walk_inlines(&e.title, out);
-                walk_blocks(&e.summary, out);
+                walk_blocks(
+                    crate::reader::budget::lead_in(&e.summary, budget),
+                    budget,
+                    out,
+                );
             }),
             ir::Block::Code { .. } | ir::Block::Rule | ir::Block::Embed { .. } => {}
         }
@@ -2074,9 +2097,9 @@ fn walk_inlines(inlines: &[ir::Inline], out: &mut Vec<String>) {
 /// window, so what a block contains is what "near the window" can mean for a picture.
 /// `autoload::plan` does the deduplicating, because a `src` repeated across two in-band blocks
 /// has to collapse the same way a `src` repeated inside one does.
-fn block_image_srcs(b: &ir::Block) -> Vec<String> {
+fn block_image_srcs(b: &ir::Block, budget: u16) -> Vec<String> {
     let mut out = Vec::new();
-    walk_blocks(std::slice::from_ref(b), &mut out);
+    walk_blocks(std::slice::from_ref(b), budget, &mut out);
     out
 }
 
@@ -2094,10 +2117,10 @@ fn block_image_srcs(b: &ir::Block) -> Vec<String> {
 /// gathers those where each one draws instead.
 ///
 /// The document favicon is absent. It draws in the masthead, which no remembered height covers.
-fn image_blocks(doc: &ir::Document) -> HashMap<String, Vec<usize>> {
+fn image_blocks(doc: &ir::Document, budget: u16) -> HashMap<String, Vec<usize>> {
     let mut map: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, b) in doc.blocks.iter().enumerate() {
-        for src in block_image_srcs(b) {
+        for src in block_image_srcs(b, budget) {
             let at = map.entry(src).or_default();
             // Repeats within one block are one entry; the same `src` in two blocks is two.
             if at.last() != Some(&i) {
@@ -2108,9 +2131,9 @@ fn image_blocks(doc: &ir::Document) -> HashMap<String, Vec<usize>> {
     map
 }
 
-fn collect_image_srcs(doc: &ir::Document) -> Vec<String> {
+fn collect_image_srcs(doc: &ir::Document, budget: u16) -> Vec<String> {
     let mut out = Vec::new();
-    walk_blocks(&doc.blocks, &mut out);
+    walk_blocks(&doc.blocks, budget, &mut out);
     // `Vec::dedup` only drops *adjacent* duplicates, and a page that reuses one `src` in two
     // places (a logo in header and footer, a repeated sprite) does not put them side by side.
     // The count feeds the "loading N image(s) from …" disclosure, so an inflated N is a
@@ -3282,6 +3305,13 @@ impl ReaderApp {
             pending_link: self.pending_link.map(|id| id.value()),
             collapsed: self.collapsed_changes,
         });
+        // Before the map is read, because the reader may have moved the lead-in budget since the
+        // page committed and the blocks it names are then the wrong ones. Cheap to compare and
+        // rare to rebuild: this is a walk of one document, on the frames a setting changed.
+        if self.image_blocks_budget != self.settings.read.entry_summary_bytes {
+            self.image_blocks_budget = self.settings.read.entry_summary_bytes;
+            self.image_blocks = image_blocks(&ready.loaded.doc, self.image_blocks_budget);
+        }
         // After `under`, which may have cleared the table wholesale, and before anything is
         // drawn from it. A picture that arrived, failed, was dropped, or was evicted since the
         // last frame re-sizes the block it sits in and leaves every other block alone; this is
@@ -3608,7 +3638,9 @@ mod tests {
              <p>A repeat of <img src=\"/logo.png\" alt=\"d\">.</p></article>",
             &url,
         );
-        let map = image_blocks(&doc);
+        // Zero: this document is an article and carries no entries, so the budget has nothing
+        // to cut, and pinning it makes that explicit rather than incidental.
+        let map = image_blocks(&doc, 0);
         // The extractor absolutises every `src` against the page, which is why
         // `autoload::plan` resolves rather than assumes and why these are spelled out.
         let logo = map
@@ -3629,15 +3661,62 @@ mod tests {
         for (src, blocks) in &map {
             for i in blocks {
                 assert!(
-                    block_image_srcs(&doc.blocks[*i]).contains(src),
+                    block_image_srcs(&doc.blocks[*i], 0).contains(src),
                     "block {i} does not contain {src}"
                 );
             }
         }
         // And nothing on the page is missing from it.
-        for src in collect_image_srcs(&doc) {
+        for src in collect_image_srcs(&doc, 0) {
             assert!(map.contains_key(&src), "{src} is in no block");
         }
+    }
+
+    /// The image walk stops where the draw stops.
+    ///
+    /// Same argument as the test above, sharpened: an entry's summary is cut at the draw, and a
+    /// walk that read it whole would put every picture in the cut tail into the load-images
+    /// disclosure, into the page-info count, and onto the wire. That is a third-party request
+    /// for something the reader cannot see, and no screenshot shows it — the picture never
+    /// draws, which is the whole point. `budget::lead_in` is the one place that decides, and
+    /// `blocks::entries_ui` asks the same function.
+    #[test]
+    fn the_image_walk_stops_where_the_entry_is_cut() {
+        let para = |n: usize| ir::Block::Paragraph(vec![ir::Inline::Text("x".repeat(n))]);
+        let pic = |src: &str| ir::Block::Figure {
+            image: ir::Image {
+                src: src.to_owned(),
+                alt: None,
+            },
+            caption: None,
+        };
+        let doc = ir::Document {
+            url: "https://example.com/feed.xml".to_owned(),
+            title: None,
+            byline: None,
+            published: None,
+            site_name: None,
+            favicon: None,
+            lang: None,
+            blocks: vec![ir::Block::Entries(vec![ir::Entry {
+                title: vec![ir::Inline::Text("One".to_owned())],
+                href: None,
+                summary: vec![
+                    pic("https://example.com/shown.png"),
+                    para(500),
+                    pic("https://example.com/cut.png"),
+                    para(500),
+                ],
+                published: None,
+                address: None,
+                image: None,
+            }])],
+        };
+        // The budget is spent by the first paragraph, so the second picture never draws.
+        let shown = collect_image_srcs(&doc, 100);
+        assert_eq!(shown, ["https://example.com/shown.png"]);
+        // With the budget off, both are on the page and both are offered.
+        assert_eq!(collect_image_srcs(&doc, 0).len(), 2);
     }
 
     fn loading_pushed(from: Option<Box<Ready>>, pushed: bool) -> Page {

@@ -26,23 +26,68 @@ pub fn display(doc: &ir::Document) -> Option<String> {
     (!t.is_empty()).then_some(t)
 }
 
-/// A date as the strip shows it: the calendar date of an ISO 8601 timestamp, and anything
-/// else verbatim. `2026-08-22T11:30:29.264Z` is a machine's idea of a byline.
+/// A date as the strip shows it: the calendar date of a machine timestamp as `YYYY-MM-DD`,
+/// and anything else verbatim. `2026-08-22T11:30:29.264Z` is a machine's idea of a byline.
+///
+/// Two shapes, because two producers write dates here. HTML pages put ISO 8601 in
+/// `article:published_time`, and this truncates it. Feeds put **RFC 822** in `<pubDate>`
+/// (`Thu, 27 Aug 2026 17:17:57 +0000`), which is 31 characters of mostly offset, and there is
+/// nothing to truncate: it has to be reformatted. `blocks::entries_ui` measures this stamp and
+/// subtracts its width from the headline's, floored at half the row, so an un-shortened RFC 822
+/// date clamps every headline in a feed to that floor. Layout damage, not cosmetics.
+///
+/// Both come out ISO, so a date has one shape everywhere in the reader whatever the source
+/// wrote. `render.rs` is deliberately left alone: the text renderer has no width pressure and
+/// no reason to restate what the page said.
 pub fn short_date(s: &str) -> String {
     let t = s.trim();
+    iso_calendar_date(t)
+        .or_else(|| rfc822_calendar_date(t))
+        .unwrap_or_else(|| t.to_owned())
+}
+
+/// `2026-08-22T11:30:29.264Z` -> `2026-08-22`. The date part only, and only when what follows
+/// it is a timestamp's separator rather than more of a word.
+fn iso_calendar_date(t: &str) -> Option<String> {
     let b = t.as_bytes();
-    let is_iso_date = b.len() >= 10
+    let ok = b.len() >= 10
         && b[..4].iter().all(u8::is_ascii_digit)
         && b[4] == b'-'
         && b[5..7].iter().all(u8::is_ascii_digit)
         && b[7] == b'-'
         && b[8..10].iter().all(u8::is_ascii_digit)
         && (b.len() == 10 || b[10] == b'T' || b[10] == b' ');
-    if is_iso_date {
-        t[..10].to_owned()
-    } else {
-        t.to_owned()
+    ok.then(|| t[..10].to_owned())
+}
+
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// `Thu, 27 Aug 2026 17:17:57 +0000` -> `2026-08-27`.
+///
+/// The day name is optional, as RFC 822 has it, and everything after the year is dropped
+/// unread: hww shows no clock times, so a zone offset is 6 characters of nothing.
+///
+/// Four-digit years only. RFC 822's two-digit year would need a century guessed for it, and
+/// guessing is what makes a wrong date look like a right one. Such a feed keeps its stamp
+/// verbatim, which is honest and merely long.
+fn rfc822_calendar_date(t: &str) -> Option<String> {
+    // "Thu, 27 Aug …". A comma anywhere else ("August 27, 2026") leaves a tail that fails the
+    // day parse below, which is the wanted answer.
+    let rest = t.split_once(',').map_or(t, |(_, r)| r);
+    let mut parts = rest.split_whitespace();
+    let day: u8 = parts.next()?.parse().ok()?;
+    if !(1..=31).contains(&day) {
+        return None;
     }
+    let name = parts.next()?;
+    let month = MONTHS.iter().position(|m| m.eq_ignore_ascii_case(name))? + 1;
+    let year = parts.next()?;
+    if year.len() != 4 || !year.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("{year}-{month:02}-{day:02}"))
 }
 
 /// Which leading blocks the masthead already says.
@@ -336,5 +381,18 @@ mod tests {
         assert_eq!(short_date("2026-08-22"), "2026-08-22");
         assert_eq!(short_date("21 hours ago"), "21 hours ago");
         assert_eq!(short_date("20260822"), "20260822");
+        // RFC 822, which is what every feed writes. Reformatted rather than truncated: there
+        // is no prefix of it that is the calendar date.
+        assert_eq!(short_date("Thu, 27 Aug 2026 17:17:57 +0000"), "2026-08-27");
+        assert_eq!(short_date("27 Aug 2026 17:17:57 GMT"), "2026-08-27");
+        assert_eq!(short_date("Sun, 02 Feb 2025 00:00:00 -0500"), "2025-02-02");
+        // Anything that is not one of the two shapes is still the publisher's own words.
+        assert_eq!(short_date("August 27, 2026"), "August 27, 2026");
+        assert_eq!(
+            short_date("Thu, 27 Aug 26 17:17:57 +0000"),
+            "Thu, 27 Aug 26 17:17:57 +0000"
+        );
+        assert_eq!(short_date("27 Fructidor 2026"), "27 Fructidor 2026");
+        assert_eq!(short_date("32 Aug 2026"), "32 Aug 2026");
     }
 }
