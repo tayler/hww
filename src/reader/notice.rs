@@ -162,6 +162,132 @@ pub fn library_is_empty() -> String {
     )
 }
 
+/// The reading list's masthead, and so also its window title and its line in the status strip.
+///
+/// "Your", for [`LIBRARY_TITLE`]'s reason. "Read next" rather than "Reading list" because the
+/// list is a queue and the title is the instruction: these are the things the reader said they
+/// would come back to.
+pub const READING_LIST_TITLE: &str = "Read next";
+
+/// The one line an empty reading list shows, which is two different sentences.
+///
+/// Two, for [`history_is_empty`]'s reason: an empty list either means nothing has been marked yet
+/// or means hww has been told not to keep one, and a reader who switched it off would otherwise
+/// meet a blank page that looks like a bug.
+///
+/// The first arm has a job the library's and the history's do not, and it is why this is the
+/// longest of the three. `Ctrl+D` and `h` act on the page in front of the reader, so their empty
+/// states can assume the reader already knows what to press. This list is filled from a *link*,
+/// which is a thing the reader has to be told how to aim at — so the sentence names both routes,
+/// the key and the right-click, and a list that can only be filled by a gesture nobody mentioned
+/// is a list that stays empty.
+pub fn reading_list_is_empty(marking: bool) -> String {
+    if marking {
+        format!(
+            "Nothing to read next yet. Tab to a link and press {}, or right-click it and \
+             choose Read later. hww keeps it here until you open it.",
+            crate::reader::menu::READ_LATER
+        )
+    } else {
+        "hww is set not to keep a reading list, so this stays empty. Turn on Keep a reading \
+         list in Settings › Reading list to start one."
+            .to_owned()
+    }
+}
+
+/// What the reader is told when a link goes on the reading list.
+///
+/// It names the link for [`kept`]'s reason, and here the reason is sharper: the reader was aiming
+/// at one of many links on a page, and the only confirmation that they hit the right one is being
+/// told which.
+pub fn read_later(label: &str) -> String {
+    format!("hww will keep {label} on your reading list; l opens it")
+}
+
+/// What the reader is told when a link comes off the reading list.
+pub const READ_LATER_REMOVED: &str = "hww took that link off your reading list.";
+
+/// The store's answer when the link is already listed. Not a failure, for [`ALREADY_KEPT`]'s
+/// reason, and pre-empted by the same toggle.
+pub const ALREADY_READ_LATER: &str = "that link is already on your reading list.";
+
+/// A link whose address is longer than `archive::MAX_URL`. [`ADDRESS_TOO_LONG`] one tenant over,
+/// and a separate string because it has to name the right list.
+pub const ADDRESS_TOO_LONG_TO_READ_LATER: &str =
+    "that link's address is too long for hww to write down; it was not added.";
+
+/// A link this file will not write down whatever the switch says: not a web address, or one
+/// carrying a credential. `Archive::add_next`'s own answer, which `ReaderApp` normally pre-empts
+/// with the better sentence `session::classify_link` gives.
+pub const CANNOT_READ_LATER: &str = "hww only puts web links on your reading list.";
+
+/// The reading list is at its cap. It says the number and says nothing was dropped, for
+/// [`library_is_full`]'s reason.
+pub fn reading_list_is_full(cap: usize) -> String {
+    format!(
+        "your reading list holds {cap} links, which is all hww keeps; nothing was removed to \
+         make room."
+    )
+}
+
+/// A link was marked while the reading list is switched off. Said rather than swallowed, for
+/// [`KEEPING_IS_OFF`]'s reason.
+pub const READING_LIST_IS_OFF: &str =
+    "hww is set not to keep a reading list; change Keep a reading list in Settings › Reading list.";
+
+/// What `Shift+L` says when nothing on the page is focused.
+///
+/// A function, because it names two `cfg`-selected keys. It does not stop at reporting the
+/// failure: the near-miss this catches is a reader who meant to save the page they are on, so it
+/// names the key that does that rather than leaving them to guess which of the two they wanted.
+pub fn no_link_to_read_later() -> String {
+    format!(
+        "hww has no link to read later: none is focused. Tab picks one, and {} keeps the page \
+         you are reading.",
+        crate::reader::menu::KEEP_PAGE
+    )
+}
+
+/// What "forget the reading list" reports. The count, for [`library_forgotten`]'s reason.
+pub fn reading_list_forgotten(n: usize) -> String {
+    match n {
+        0 => "your reading list was already empty.".to_owned(),
+        1 => "hww forgot the one link on your reading list.".to_owned(),
+        n => format!("hww forgot all {n} links on your reading list."),
+    }
+}
+
+/// The label on the control that takes one link off the reading list, drawn at the end of every
+/// row of `hww:reading-list`.
+///
+/// Unbracketed, because it is drawn as a framed button rather than as one of the page's marks.
+/// Brackets are how a mark set in the page's own text says it is hww's — `[image]`, `[Video]`,
+/// `notice::PENDING` — and a control that already has a border around it does not need the
+/// typographic version of one. Lower case, like every button in the settings panel.
+///
+/// A control at all, rather than leaving the key to do it, because this is the one view whose
+/// rows are things the reader chose and may now unchoose, and the key that removes one is
+/// `Shift+L` — the same key that added it, which is a toggle nobody arriving here would guess at.
+/// What it presses is a door that removes and never adds; see `ReaderApp::forget_next_link`.
+pub const READING_LIST_REMOVE: &str = "remove";
+
+/// The label on the reading list's own empty-it control, drawn under the masthead whenever there
+/// is anything to empty.
+///
+/// Shorter than the panel's "forget the reading list" because the page under it has already said
+/// which list this is; a button that repeats its own masthead reads as a button that must
+/// therefore do something else.
+pub const READING_LIST_FORGET_ALL: &str = "forget all";
+
+/// What that control says on hover, and what the panel's button says: one sentence, because they
+/// are one act reached from two places.
+///
+/// It names what survives, for the reason the panel has three buttons instead of one: a reader
+/// clearing the links they lined up is not asking to lose the pages they kept or the trail hww
+/// wrote down.
+pub const READING_LIST_FORGET_ALL_HOVER: &str = "Remove every link you marked to read later. This cannot be undone, and it leaves the pages \
+     you have kept and your history alone.";
+
 /// The history's masthead, and so also its window title and its line in the status strip.
 ///
 /// "Your", for the reason [`LIBRARY_TITLE`] is: hww wrote this list, but it is a record of the
@@ -1228,6 +1354,19 @@ mod tests {
             history_forgotten(0),
             history_forgotten(1),
             history_forgotten(4),
+            read_later("A link"),
+            ALREADY_READ_LATER.to_owned(),
+            READ_LATER_REMOVED.to_owned(),
+            CANNOT_READ_LATER.to_owned(),
+            ADDRESS_TOO_LONG_TO_READ_LATER.to_owned(),
+            reading_list_is_full(crate::reader::archive::MAX_NEXT),
+            READING_LIST_IS_OFF.to_owned(),
+            no_link_to_read_later(),
+            reading_list_is_empty(true),
+            reading_list_is_empty(false),
+            reading_list_forgotten(0),
+            reading_list_forgotten(1),
+            reading_list_forgotten(4),
         ] {
             assert!(!s.is_empty());
             assert!(
@@ -1235,6 +1374,81 @@ mod tests {
                 "a remark with no actor: {s}"
             );
         }
+    }
+
+    /// The reading list's own wording. Two halves, like the history's, and one extra demand the
+    /// other two empty states do not carry: it is filled from a *link* rather than from the page
+    /// on screen, so the empty state has to name both ways of aiming at one or a reader who
+    /// arrives here has been shown a list and not told how to add to it.
+    #[test]
+    fn an_empty_reading_list_says_how_to_fill_it_and_whether_it_is_off() {
+        assert!(!READING_LIST_TITLE.is_empty());
+        let on = reading_list_is_empty(true);
+        let off = reading_list_is_empty(false);
+        assert_ne!(on, off);
+        assert!(
+            on.contains(crate::reader::menu::READ_LATER),
+            "the key is named for this platform: {on}"
+        );
+        assert!(
+            on.contains("right-click"),
+            "the mouse route is named too, or a mouse-only reader cannot fill it: {on}"
+        );
+        assert!(off.contains("not to keep"), "{off}");
+        for s in [&on, &off] {
+            assert!(s.contains("Settings") || s.contains("Tab"), "{s}");
+        }
+        // The key that fails names the key that would have worked, rather than only reporting
+        // that nothing was focused.
+        let none = no_link_to_read_later();
+        assert!(none.contains(crate::reader::menu::KEEP_PAGE), "{none}");
+    }
+
+    /// The reading list's own two controls. Labels rather than remarks, which is why they are not
+    /// in the loop above that demands an actor: a button says what pressing it does, and the toast
+    /// it produces says who did it.
+    #[test]
+    fn the_reading_lists_controls_are_labelled_for_the_act_they_perform() {
+        for s in [READING_LIST_REMOVE, READING_LIST_FORGET_ALL] {
+            assert!(!s.is_empty());
+            // Set in the page's own family, and none of the embedded faces is a symbol font. ASCII
+            // is the range all of them carry, and a two-word label has no reason to leave it.
+            assert!(
+                s.is_ascii(),
+                "a control label may need a glyph the faces lack: {s}"
+            );
+            assert_eq!(
+                s.to_lowercase(),
+                s,
+                "the panel's buttons are lower case and these are the same act: {s}"
+            );
+        }
+        assert_ne!(READING_LIST_REMOVE, READING_LIST_FORGET_ALL);
+        // The destructive one says so before it is pressed, and names the two tenants it leaves
+        // where they are: the whole argument for three buttons is that none takes another with it.
+        for part in ["cannot be undone", "kept", "history"] {
+            assert!(
+                READING_LIST_FORGET_ALL_HOVER.contains(part),
+                "the hover drops {part:?}: {READING_LIST_FORGET_ALL_HOVER}"
+            );
+        }
+    }
+
+    /// The three tenants' wording stays distinct. One list's sentence shown about another is a
+    /// wrong claim about where the reader's data went, and the strings are close enough to copy.
+    #[test]
+    fn no_tenant_borrows_another_tenants_words() {
+        for (a, b) in [
+            (KEEPING_IS_OFF, READING_LIST_IS_OFF),
+            (ALREADY_KEPT, ALREADY_READ_LATER),
+            (ADDRESS_TOO_LONG, ADDRESS_TOO_LONG_TO_READ_LATER),
+        ] {
+            assert_ne!(a, b);
+        }
+        assert_ne!(LIBRARY_TITLE, READING_LIST_TITLE);
+        assert_ne!(HISTORY_TITLE, READING_LIST_TITLE);
+        assert_ne!(library_forgotten(3), reading_list_forgotten(3));
+        assert_ne!(library_is_empty(), reading_list_is_empty(true));
     }
 
     /// A readable 404 is not a failure. Many paywalls answer 403 with the article intact, and

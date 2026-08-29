@@ -397,6 +397,13 @@ pub struct ReaderApp {
     pending_copy: Option<String>,
     /// What Tab last landed on, read back by `Enter`, `Y`, `i`, and `z`. Set during render.
     focused_href: Option<String>,
+    /// The words of the link [`Self::focused_href`] names, read back by `Shift+L`.
+    ///
+    /// Its own field rather than looked up from the document when the key arrives: `focused_href`
+    /// is an href, and `html::link_block` copies one block-level anchor's href onto every inline
+    /// in the block, so a search for "the link with this href" finds several and cannot say which
+    /// carried the words Tab was actually on.
+    focused_text: Option<String>,
     focused_image: Option<String>,
     focused_comment: Option<CommentKey>,
     /// Focus on a page widget none of the three above describes; see `RenderCtx::focus_other`.
@@ -418,6 +425,10 @@ pub struct ReaderApp {
     /// good. `Shift+Y` worked the whole time only because `handle_keys` runs ahead of the
     /// clear, which is what made the gap invisible.
     focus_href_was: Option<String>,
+    /// The words that link was wearing, snapshotted beside [`Self::focus_href_was`] and for its
+    /// reason: the chrome is drawn before the page, so the menu row and the key both read the
+    /// snapshot rather than a field the render has already cleared.
+    focus_text_was: Option<String>,
     /// Which block the focused widget was found in this frame, and the frame before: the one
     /// block that must be laid out for egui to keep the focus, which is what used to cost the
     /// whole page for as long as a link had it.
@@ -536,6 +547,7 @@ fn centred_card(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
     Library,
+    ReadingList,
     History,
 }
 
@@ -549,6 +561,7 @@ enum View {
 fn builtin_view(url: &Url) -> Option<View> {
     match url.as_str() {
         archive::LIBRARY => Some(View::Library),
+        archive::READING_LIST => Some(View::ReadingList),
         archive::HISTORY => Some(View::History),
         _ => None,
     }
@@ -624,11 +637,13 @@ impl ReaderApp {
             max_scroll: 0.0,
             pending_copy: None,
             focused_href: None,
+            focused_text: None,
             focused_image: None,
             focused_comment: None,
             focused_other: false,
             focus_was_on_page: false,
             focus_href_was: None,
+            focus_text_was: None,
             focus_block: None,
             focus_block_was: None,
             tab_frames: 0,
@@ -759,6 +774,7 @@ impl ReaderApp {
         }
         let doc = match view {
             View::Library => archive::document(&self.archive),
+            View::ReadingList => archive::reading_list_document(&self.archive, &self.settings),
             View::History => archive::history_document(&self.archive, &self.settings),
         };
         let outline = outline::build(&doc.blocks);
@@ -783,6 +799,12 @@ impl ReaderApp {
     /// Open the library, as `b` and the menu item do.
     fn open_library(&mut self, push: bool) {
         let url = Url::parse(archive::LIBRARY).expect("hww:library is a valid address");
+        self.navigate(url, self.opts, push);
+    }
+
+    /// Open the reading list, as `l` and the menu item do.
+    fn open_reading_list(&mut self, push: bool) {
+        let url = Url::parse(archive::READING_LIST).expect("hww:reading-list is a valid address");
         self.navigate(url, self.opts, push);
     }
 
@@ -851,7 +873,159 @@ impl ReaderApp {
             Kept::Full => self.flash(notice::library_is_full(archive::MAX_ITEMS)),
             Kept::TooLong => self.flash(notice::ADDRESS_TOO_LONG.to_owned()),
             Kept::Off => self.flash(notice::KEEPING_IS_OFF.to_owned()),
+            // Unreachable here: only `Archive::add_next` inspects the scheme, because only it is
+            // handed an address a page chose. `keep` is given `prov.final_url`, which a fetch
+            // resolved and followed. The arm exists because the two doors share one answer type,
+            // and saying so is better than an `unreachable!` that a later caller could reach.
+            Kept::Refused => self.flash(notice::CANNOT_READ_LATER.to_owned()),
         }
+    }
+
+    /// `Shift+L`, the context menu's "Read later", and the menu row: put one link on the reading
+    /// list, or take it off if it is already there.
+    ///
+    /// **Public, and a fifth hook.** `follow_link` is public because Enter-on-a-focused-link is
+    /// not something the screenshot harness can drive — `AGENTS.md` says a synthetic Tab does not
+    /// reliably land focus, so anything reachable only by tabbing needs a door rather than key
+    /// steps. This is the second such thing in the program and it needs the door for the same
+    /// reason: a scene that pressed `Shift+L` would photograph an empty list and pass.
+    ///
+    /// `title` is the link's own words, which is all the name this item will ever have: nothing
+    /// here has been fetched, so there is no `<title>` to fall back to. Empty is fine —
+    /// `Item::label` falls back to the address, which is drawn under every row of this view
+    /// anyway.
+    ///
+    /// The href goes through `session::classify_link` first, so a `mailto:` or `javascript:` link
+    /// is answered in the words the rest of the reader already uses for it rather than refused in
+    /// silence. That is a courtesy and not the guard: `Archive::add_next` refuses the same schemes
+    /// inside the door, because a door guarded at one caller is a door guarded nowhere, and this
+    /// one has two callers on the day it lands.
+    pub fn read_later(&mut self, href: &str, title: &str) {
+        let url = match session::classify_link(href) {
+            Target::Navigate(url) => url,
+            // The same two sentences a click on one of these gets. Copying is not offered here:
+            // the reader asked to read something later, and an address that cannot be read later
+            // is the answer, not a clipboard.
+            Target::OfferCopy { url, note } => {
+                self.flash(format!(
+                    "{url} is {note}, so there is nothing to read later"
+                ));
+                return;
+            }
+            Target::Refuse { url, reason } => {
+                self.flash(format!("{reason}: {url}"));
+                return;
+            }
+        };
+        // Off before on, as `keep_page` does: the removal half runs whatever the switch says, so
+        // turning the reading list off can never be a way to trap what is already on it.
+        if self.archive.forget_next(&url) {
+            if self.save_archive() {
+                self.flash(notice::READ_LATER_REMOVED.to_owned());
+            }
+            self.rebuild_builtin_view();
+            return;
+        }
+        match self.archive.add_next(&self.settings, &url, Some(title)) {
+            Kept::Added => {
+                if self.save_archive() {
+                    // Named from what was *stored*, for the reason `keep_page` gives: that string
+                    // has been flattened and capped, so a link wearing a paragraph of text cannot
+                    // become a paragraph of toast.
+                    let label = self
+                        .archive
+                        .read_next()
+                        .next()
+                        .map_or_else(|| url.to_string(), |i| i.label());
+                    self.flash(notice::read_later(&label));
+                }
+            }
+            // `forget_next` above answered `false` over the same predicate `holds_next` uses, so
+            // this door pre-empts this arm, exactly as `keep_page`'s does.
+            Kept::Already => self.flash(notice::ALREADY_READ_LATER.to_owned()),
+            Kept::Full => self.flash(notice::reading_list_is_full(archive::MAX_NEXT)),
+            Kept::TooLong => self.flash(notice::ADDRESS_TOO_LONG_TO_READ_LATER.to_owned()),
+            Kept::Off => self.flash(notice::READING_LIST_IS_OFF.to_owned()),
+            // Unreachable through `classify_link`, which answers `Navigate` only for `http` and
+            // `https`. The arm is the store's own answer and the match is exhaustive: the guard
+            // inside the door is the one that has to hold, and this is what it says when it does.
+            Kept::Refused => self.flash(notice::CANNOT_READ_LATER.to_owned()),
+        }
+        self.rebuild_builtin_view();
+    }
+
+    /// `Shift+L` with nothing focused, and the one path that is not about a link at all.
+    ///
+    /// Split out so the key and the two link-carrying callers do not share a `None` case that
+    /// only one of them can reach.
+    fn read_focused_link_later(&mut self) {
+        // Both fields, because the two callers read at different points in the frame. `Shift+L`
+        // arrives in `handle_keys`, which runs *ahead* of the clear, so the live field is the one
+        // with the answer; the menu row is dispatched from the chrome, which is drawn before the
+        // page, so by then only the snapshot has it. `Shift+Y` and `Command::CopyFocusedLink`
+        // are the same pair one action over, and they read one field each — which is why the
+        // menu row for copying a link was greyed for good until `focus_href_was` was added.
+        let Some(href) = self
+            .focused_href
+            .clone()
+            .or_else(|| self.focus_href_was.clone())
+        else {
+            self.flash(notice::no_link_to_read_later());
+            return;
+        };
+        let title = self
+            .focused_text
+            .clone()
+            .or_else(|| self.focus_text_was.clone())
+            .unwrap_or_default();
+        self.read_later(&href, &title);
+    }
+
+    /// The `remove` button on a row of `hww:reading-list`: take that one link off.
+    ///
+    /// It removes and never adds, which is what makes it a door of its own rather than
+    /// [`ReaderApp::read_later`] with another label on it. The row was drawn from an item the
+    /// archive holds, so the only thing a press can mean is "take it off" — a toggle reached from
+    /// here would put back a row that a click landing a frame late had already removed.
+    ///
+    /// The address is parsed rather than trusted, like every other href the reader can press: it
+    /// came out of the file, and a file this build did not write is a file that can hold anything.
+    /// A row whose address no longer parses is one this control cannot act on, and doing nothing
+    /// is the answer — `Archive::forget_next` matches by URL, so there is nothing to aim at.
+    fn forget_next_link(&mut self, href: &str) {
+        let Ok(url) = Url::parse(href) else {
+            return;
+        };
+        if self.archive.forget_next(&url) {
+            if self.save_archive() {
+                self.flash(notice::READ_LATER_REMOVED.to_owned());
+            }
+            // Whatever the write answered. The store no longer holds that link, and a list still
+            // showing the row would be the page claiming something hww has stopped remembering;
+            // if the file could not be written, `save_archive` has already said so.
+            self.rebuild_builtin_view();
+        }
+    }
+
+    /// Empty the reading list: the settings panel's "forget the reading list" and the view's own
+    /// "forget all" both press this.
+    ///
+    /// One function and not two copies, unlike the other two tenants' arms below, and for the
+    /// reason those two are written out separately: what may not be shared is a sentence about
+    /// *which* list was emptied. These two buttons empty the same one, so a second copy could only
+    /// ever drift from this one and start saying something else about it.
+    fn forget_reading_list(&mut self) {
+        // Asked before the forget, which is what lifts the seal; see the library's arm.
+        let replaced = self.archive.refuses_to_be_written();
+        let n = self.archive.forget_all_next();
+        if self.save_archive() {
+            self.flash(if replaced {
+                notice::UNREADABLE_FILE_REPLACED.to_owned()
+            } else {
+                notice::reading_list_forgotten(n)
+            });
+        }
+        self.rebuild_builtin_view();
     }
 
     /// Write the library now, and say so if it could not be written.
@@ -1843,6 +2017,11 @@ impl ReaderApp {
         if k(Modifiers::SHIFT, Key::Z) {
             self.collapse_all();
         }
+        // Before the unshifted `l` below, which opens the list: `consume_key` ignores extra
+        // Shift, so `Shift+L` tested second would open the reading list instead of adding to it.
+        if k(Modifiers::SHIFT, Key::L) {
+            self.read_focused_link_later();
+        }
         if self.find_total > 0 && k(Modifiers::SHIFT, Key::N) {
             self.find_current = (self.find_current + self.find_total - 1) % self.find_total;
             self.find_scroll = true;
@@ -1893,6 +2072,9 @@ impl ReaderApp {
         }
         if k(Modifiers::NONE, Key::B) {
             self.open_library(true);
+        }
+        if k(Modifiers::NONE, Key::L) {
+            self.open_reading_list(true);
         }
         if k(Modifiers::NONE, Key::H) {
             self.open_history(true);
@@ -2165,6 +2347,7 @@ impl eframe::App for ReaderApp {
             || self.focused_other;
         self.focus_block_was = self.focus_block.take();
         self.focus_href_was = self.focused_href.take();
+        self.focus_text_was = self.focused_text.take();
         self.focused_image = None;
         self.focused_comment = None;
         self.focused_other = false;
@@ -2364,6 +2547,8 @@ impl ReaderApp {
             }
             Command::KeepPage => self.keep_page(),
             Command::OpenLibrary => self.open_library(true),
+            Command::ReadLater => self.read_focused_link_later(),
+            Command::OpenReadingList => self.open_reading_list(true),
             Command::OpenHistory => self.open_history(true),
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Command::CopyPageUrl => {
@@ -2470,9 +2655,11 @@ impl ReaderApp {
                     }
                     self.rebuild_builtin_view();
                 }
-                // The same three steps for the other tenant, and they are three rather than one
-                // shared helper because the two buttons say different things to the reader and
-                // must go on being able to.
+                // The same three steps for the other two tenants, written out rather than folded
+                // into one helper because each button says a different thing to the reader and
+                // must go on being able to. The reading list's are a named function only because
+                // its own view carries a second button that does the identical thing.
+                prefs_ui::Event::ForgetReadingList => self.forget_reading_list(),
                 prefs_ui::Event::ForgetHistory => {
                     let replaced = self.archive.refuses_to_be_written();
                     let n = self.archive.forget_visits();
@@ -3333,6 +3520,10 @@ impl ReaderApp {
         // A second handle, because `RenderCtx` takes ownership of the first and the automatic
         // policy needs the same base to resolve a `src` against after the column is drawn.
         let auto_base = base.clone();
+        // Read before `base` is moved into the context, and through `builtin_view`, which matches
+        // one exact address: the controls this turns on act on `reader::archive`, so no fetched
+        // page may be drawn holding them.
+        let reading_list = builtin_view(&base) == Some(View::ReadingList);
         let mut ctx = RenderCtx::new(
             theme::palette(self.settings.read.theme, theme::system_is_dark(ui.ctx())),
             &self.settings.read,
@@ -3351,6 +3542,7 @@ impl ReaderApp {
         ctx.pending = self.pending_link;
         ctx.pending_href = self.pending_href.clone();
         ctx.comment_heights = self.heights.take_comments();
+        ctx.reading_list = reading_list;
 
         let doc = &ready.loaded.doc;
         blocks::document_header(ui, doc, &mut ctx);
@@ -3416,6 +3608,7 @@ impl ReaderApp {
         self.find_total = ctx.find_seen;
         self.find_scroll = false;
         self.focused_href = ctx.focus_href.clone();
+        self.focused_text = ctx.focus_text.clone();
         self.focused_image = ctx.focus_image.clone();
         self.focused_comment = ctx.focus_comment.clone();
         self.focused_other = ctx.focus_other;
@@ -3452,6 +3645,9 @@ impl ReaderApp {
                 self.copy(&text);
                 self.flash(format!("copied {text}"));
             }
+            Action::ReadLater { href, title } => self.read_later(&href, &title),
+            Action::ForgetNext(href) => self.forget_next_link(&href),
+            Action::ForgetAllNext => self.forget_reading_list(),
             Action::LoadImage(src) => self.load_image(ctx, &src),
             Action::GoToBlock(b) => self.scroll_to_block = Some(b),
             Action::ToggleComment(key) => self.toggle_collapsed(key),
@@ -3567,7 +3763,15 @@ mod tests {
         let u = |s: &str| Url::parse(s).expect("a fixture URL parses");
         assert_eq!(builtin_view(&u(archive::LIBRARY)), Some(View::Library));
         assert_eq!(builtin_view(&u(archive::HISTORY)), Some(View::History));
+        assert_eq!(
+            builtin_view(&u(archive::READING_LIST)),
+            Some(View::ReadingList)
+        );
+        // Three addresses, three distinct strings. Two of them differing would send one view's
+        // key to the other's page, and the `match` above would compile either way.
         assert_ne!(archive::LIBRARY, archive::HISTORY);
+        assert_ne!(archive::LIBRARY, archive::READING_LIST);
+        assert_ne!(archive::HISTORY, archive::READING_LIST);
         for other in [
             "https://example.com/",
             "https://example.com/library",
@@ -3580,6 +3784,11 @@ mod tests {
             "hww:history/",
             "hww:histor",
             "hww:historyy",
+            "hww:reading-list/",
+            "hww:reading-lis",
+            "hww:reading-listt",
+            "hww:readinglist",
+            "hww:reading_list",
             "hww:other",
         ] {
             assert_eq!(

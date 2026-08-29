@@ -399,6 +399,9 @@ fn link_ui(
     theme::focus_ring(ui, &focus, &ctx.pal);
     if focus.has_focus() {
         ctx.focus_href = Some(href.to_owned());
+        // Beside the href, because the two are one fact about the focused link and a reading
+        // list built from the href alone is a column of addresses.
+        ctx.focus_text = Some(galley.text().to_owned());
     }
     if resp.clicked() {
         ctx.act(Action::Follow(href.to_owned()));
@@ -422,11 +425,24 @@ fn link_ui(
                 .font(theme::chrome_font(ctx.opts)),
         );
     }
-    // Two items, both of which already exist as keyboard actions. A second route to them, not
+    // Three items, all of which already exist as keyboard actions. A second route to them, not
     // new capability.
+    //
+    // The third one is why the rule is worth restating rather than just obeyed. `ui::app`'s
+    // charter is that **no affordance is reachable by keyboard alone**, and the reading list is
+    // the first feature in hww whose subject is a *link* rather than the page on screen — a
+    // mouse-only reader cannot Tab to one, so without this row they could open the list, follow
+    // things out of it, and never once put anything in it.
     resp.context_menu(|ui| {
         if ui.button("Copy link").clicked() {
             ctx.act(Action::Copy(href.to_owned()));
+            ui.close();
+        }
+        if ui.button("Read later").clicked() {
+            ctx.act(Action::ReadLater {
+                href: href.to_owned(),
+                title: galley.text().to_owned(),
+            });
             ui.close();
         }
         if ui.button("Open without rewrite").clicked() {

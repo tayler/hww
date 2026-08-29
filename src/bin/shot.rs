@@ -71,6 +71,17 @@ enum Step {
     /// A real navigation started from a link in the page, as Enter on it does. What a click
     /// does, without needing to know where the link is drawn.
     Follow(String),
+    /// Mark one link to read later, as `Shift+L` on it and the context menu's "Read later" both
+    /// do.
+    ///
+    /// [`Step::Follow`]'s argument exactly, one action over, and it is the reason
+    /// `ReaderApp::read_later` is public. Both routes to it need a *focused* link, and a
+    /// synthetic Tab does not reliably land focus — so a scene built from key steps would mark
+    /// nothing, photograph an empty reading list, and pass.
+    ReadLater {
+        href: String,
+        title: String,
+    },
     /// One menu command, as choosing it from the bar does.
     ///
     /// The same argument as [`Step::Follow`], one menu over: a synthetic Tab does not
@@ -414,6 +425,41 @@ fn catalog(port: u16) -> Vec<Scene> {
                     page(THREAD_URL, THREAD),
                     Step::Run(Command::KeepPage),
                     Step::Run(Command::OpenLibrary),
+                ],
+            )
+        },
+        Scene {
+            volatile: true,
+            ..scene(
+                "reading-list",
+                "the reading list: links marked to read later, addresses under their words",
+                // Three real marks and a real open, through `ReaderApp::read_later` — the hook
+                // that exists because both routes to this need a focused link and a synthetic Tab
+                // does not reliably land one. Key steps here would mark nothing and photograph an
+                // empty list, which is a scene that passes while the feature is broken.
+                //
+                // The first two wear the words a link usually wears, which is the whole argument
+                // for drawing the address under each row: without it these are two identical
+                // "Read more"s. The third carries none at all, so the picture also covers
+                // `Item::label`'s fallback to the address and `address_under`'s refusal to print
+                // it twice.
+                //
+                // Volatile for the library scene's reason: a row says the day it was marked.
+                vec![
+                    page(FRONT_URL, FRONT),
+                    Step::ReadLater {
+                        href: ARTICLE_URL.to_owned(),
+                        title: "Read more".to_owned(),
+                    },
+                    Step::ReadLater {
+                        href: THREAD_URL.to_owned(),
+                        title: "Read more".to_owned(),
+                    },
+                    Step::ReadLater {
+                        href: "https://example.net/untitled".to_owned(),
+                        title: String::new(),
+                    },
+                    Step::Run(Command::OpenReadingList),
                 ],
             )
         },
@@ -924,6 +970,7 @@ impl Runner {
             }
             Step::Nav(_)
             | Step::Follow(_)
+            | Step::ReadLater { .. }
             | Step::Run(_)
             | Step::Key(..)
             | Step::Type(_)
@@ -965,6 +1012,10 @@ impl Runner {
                         }
                         Step::Follow(href) => {
                             self.app.follow_link(&href);
+                            self.wait = 2;
+                        }
+                        Step::ReadLater { href, title } => {
+                            self.app.read_later(&href, &title);
                             self.wait = 2;
                         }
                         Step::Run(command) => {
@@ -1871,6 +1922,10 @@ fn clone_step(s: &Step) -> Step {
         Step::Wait(n) => Step::Wait(*n),
         Step::Nav(u) => Step::Nav(u.clone()),
         Step::Follow(u) => Step::Follow(u.clone()),
+        Step::ReadLater { href, title } => Step::ReadLater {
+            href: href.clone(),
+            title: title.clone(),
+        },
         Step::Run(c) => Step::Run(*c),
         Step::Page {
             url,

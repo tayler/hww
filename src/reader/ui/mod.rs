@@ -33,6 +33,26 @@ pub enum Action {
     /// Follow with neither table applied: the page as the host sends it.
     FollowBare(String),
     Copy(String),
+    /// The context menu's third item: mark this link to read later.
+    ///
+    /// It carries the link's words as well as its address, and it is the only `Action` that
+    /// carries two strings. The reason is that the thing being filed has never been fetched, so
+    /// there is no `<title>` anywhere to name it — the words in the link are all the name it will
+    /// ever have, and they are in scope here and nowhere downstream.
+    ReadLater {
+        href: String,
+        title: String,
+    },
+    /// The `remove` button on a row of `hww:reading-list`: take that one link off it.
+    ///
+    /// A separate `Action` from [`Action::ReadLater`] rather than the same one pressed on a link
+    /// that is already listed, because the two mean different things. `ReadLater` is a toggle
+    /// aimed at a link on someone else's page and cannot know which way it will go; this is a
+    /// control drawn from an item hww holds, so the only thing pressing it can mean is "take it
+    /// off", and a door that could still add would put back a row a stale frame had removed.
+    ForgetNext(String),
+    /// The reading list's own "forget all": empty it, as the settings panel's button does.
+    ForgetAllNext,
     /// Load one image, named by its `src` as it appears in the IR.
     LoadImage(String),
     /// Jump to a block index: outline entries and resolved fragments.
@@ -89,12 +109,26 @@ pub struct RenderCtx<'a> {
     /// What Tab landed on this frame. Links, image placeholders, and comment toggles are the
     /// focusable things on the page; if plain text were focusable, Tab would walk every label.
     pub focus_href: Option<String>,
+    /// The words of the link Tab landed on, taken beside [`RenderCtx::focus_href`].
+    ///
+    /// The keyboard route's half of what [`Action::ReadLater`] carries by hand. `Shift+L` happens
+    /// in `handle_keys`, which is nowhere near the galley, so the text has to be picked up during
+    /// the render like the href beside it or a reading list is a column of bare addresses.
+    pub focus_text: Option<String>,
     pub focus_image: Option<String>,
     pub focus_comment: Option<CommentKey>,
     /// Focus is on a page widget that none of the three above describes (a button with no
     /// keyboard action of its own). `app` reads it only to keep that widget drawn: a focused
     /// widget that is not laid out loses its focus.
     pub focus_other: bool,
+    /// The page being drawn is hww's own reading list, whose rows carry a control of their own.
+    ///
+    /// The renderer knows this one view by name because the control is not a general fact about a
+    /// run of entries: a card on a front page and a search result are the page's rows, and hww has
+    /// nothing to remove them from. These rows are items in `reader::archive`, and taking one off
+    /// is the second half of the switch that put it there. `app` sets it from `builtin_view`, so
+    /// no fetched page can turn it on.
+    pub reading_list: bool,
     /// The window the reading column may skip outside of, or `None` when this block is laid
     /// out whole. Consulted by `thread_ui`, which skips comment by comment inside one block.
     pub band: Option<crate::reader::measure::Band>,
@@ -143,9 +177,11 @@ impl RenderCtx<'_> {
             clicked_link: None,
             hover_href: None,
             focus_href: None,
+            focus_text: None,
             focus_image: None,
             focus_comment: None,
             focus_other: false,
+            reading_list: false,
             band: None,
             block: 0,
             autoload_band: None,

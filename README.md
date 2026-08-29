@@ -21,7 +21,8 @@ hww fetches a web page, parses the HTML, then displays it using hww's own render
 - **Limited sharing when loading images.** An image's server can see which website the image appears on, but not the full page address. You can switch this off.
 - **Ubuntu, Windows, and macOS,** binaries (See #Install below). More Linux distros planned.
 - **Keyboard navigation** Every action has a keyboard shortcut.
-- **A library, and a history you can switch off.** `Ctrl+D` (`Cmd+D` on macOS) keeps the page you are reading and `b` opens the list; `h` opens the pages hww has drawn for you, which it writes down as it goes. Each has its own switch in Settings and its own button to empty it, and neither takes the other with it. The history records the address and the title, once per page rather than once per visit, and nothing about what you did on the page. Page info tells you whether the page on screen is kept.
+- **A library, a reading list, and a history you can switch off.** `Ctrl+D` (`Cmd+D` on macOS) keeps the page you are reading and `b` opens the list; `h` opens the pages hww has drawn for you, which it writes down as it goes. Each has its own switch in Settings and its own button to empty it, and none of them takes another with it. The history records the address and the title, once per page rather than once per visit, and nothing about what you did on the page. Page info tells you whether the page on screen is kept.
+- **Line up what to read next.** Tab to a link and press `Shift+L`, or right-click it and choose **Read later**, and it waits on a list `l` opens. hww does not fetch any of them until you open one, so a reading list of thirty links makes no requests and costs no network — it is a list of addresses and the words the links were wearing, nothing else. Each row carries a **remove** button, and **forget all** under the title empties the list; `Shift+L` on a link already listed takes it off too.
 - **Six themes.** Follow-the-desktop (the default), light, sepia, dark, and a high-contrast AAA pair.
 - **Four typefaces.** IBM Plex Sans, Serif, and Mono, plus Atkinson Hyperlegible Next for low vision. All of them are compiled into the binary.
 - **Screen-reader support.** An AccessKit tree, with the off-screen layout skip suspended while an assistive technology is attached.
@@ -111,7 +112,7 @@ Windows has no door yet. It ships as a zip with no installer, and registering a 
 
 ### On every platform
 
-`HWW_CONFIG_DIR` overrides where settings, the library, and the history are kept; if it was set when hww ran, remove that directory instead of the one named above. Page content and images are never saved to disk. The one file that outlives a run besides `settings.json` is `library.json`, and it holds two lists: the pages you asked hww to keep, and — unless you switch it off — the address and title of each page hww has shown you. **Settings › Library › forget everything** empties the first and **Settings › History › forget history** empties the second; the uninstall commands above delete the file with the rest of the directory.
+`HWW_CONFIG_DIR` overrides where settings, the library, and the history are kept; if it was set when hww ran, remove that directory instead of the one named above. Page content and images are never saved to disk. The one file that outlives a run besides `settings.json` is `library.json`, and it holds three lists: the pages you asked hww to keep, the links you marked to read later, and — unless you switch it off — the address and title of each page hww has shown you. **Settings › Library › forget everything** empties the first, **Settings › Reading list › forget the reading list** the second, and **Settings › History › forget history** the third; each leaves the other two alone, and the uninstall commands above delete the file with the rest of the directory.
 
 ## Main files
 
@@ -119,7 +120,7 @@ Windows has no door yet. It ships as a zip with no installer, and registering a 
 | --- | --- |
 | `src/bin/hww.rs` | Parses command-line flags and starts the reader |
 | `src/reader/` | Reading logic and settings; `reader/ui` drives the egui window |
-| `src/reader/archive.rs` | The library and the history, and the doctrine for anything hww is allowed to remember |
+| `src/reader/archive.rs` | The library, the reading list, and the history, and the doctrine for anything hww is allowed to remember |
 | `src/session.rs` | Runs rewrite → fetch → decode → extract for a URL |
 | `src/sites.rs` | Builtin host rewrites and per-site extraction profiles |
 | `src/search.rs` | Turns a query into a URL and a result page into entries |

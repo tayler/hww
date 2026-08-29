@@ -187,18 +187,38 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
         } else {
             0.0
         };
-        if time_w + control_w > 0.0 {
+        // The reading list's own control, reserved like the picture's and drawn beside it. A run
+        // of entries anywhere else is the page's own rows, and hww has nothing to take them off;
+        // see `RenderCtx::reading_list`. A width rather than a measurement, as `control_w` is: the
+        // label is one short word in a face the painter would have to be handed to measure, and
+        // the headline beside it wraps into whatever is left either way.
+        let remove_w = if ctx.reading_list && e.href.is_some() {
+            theme::snap(ctx.opts.base_size_pt * 4.5)
+        } else {
+            0.0
+        };
+        if time_w + control_w + remove_w > 0.0 {
             let pad = theme::snap(ctx.opts.base_size_pt * 0.8);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 let avail = ui.available_width();
                 ui.allocate_ui_with_layout(
-                    egui::vec2((avail - time_w - control_w - pad).max(avail * 0.5), 0.0),
+                    egui::vec2(
+                        (avail - time_w - control_w - remove_w - pad).max(avail * 0.5),
+                        0.0,
+                    ),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| runs(ui, &title, &set, ctx),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                     ui.spacing_mut().item_spacing.x = theme::snap(ctx.opts.base_size_pt * 0.5);
+                    // First, so it sits at the outside edge under the header's own control. The
+                    // other two are about the row's page; this one is about the row.
+                    if remove_w > 0.0
+                        && let Some(href) = &e.href
+                    {
+                        remove_control(ui, href, ctx);
+                    }
                     if let Some(p) = &when {
                         ui.label(
                             RichText::new(p.as_str())
@@ -241,6 +261,29 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
         // See the module doc there.
         let shown = crate::reader::budget::lead_in(&e.summary, ctx.opts.entry_summary_bytes);
         blocks_ui(ui, shown, ctx, None);
+    }
+}
+
+/// The control at the trailing edge of a reading-list row: take this one link off the list.
+///
+/// A framed button, like the `forget all` above it and the panel's three, rather than the dim
+/// bracketed label `images::load_control` uses. The two are different offers: `[image]` asks a
+/// page whether to fetch something and has to stay quiet enough to sit in the middle of it, and
+/// this one deletes something the reader owns. A border is what says a press has a consequence,
+/// and hww's other deleting controls all have one.
+///
+/// No `theme::focus_ring`: a framed button keeps egui's own focused border, and the ring exists
+/// for the controls that have no frame to change. It writes `focus_other` and not `focus_href`,
+/// because the row's headline is the link — a second widget claiming to be one would hand
+/// `Shift+Y` and `Shift+L` a link the reader is not pointing at.
+fn remove_control(ui: &mut Ui, href: &str, ctx: &mut RenderCtx<'_>) {
+    let resp = ui.small_button(crate::reader::notice::READING_LIST_REMOVE);
+    super::follow_focus(&resp);
+    if resp.has_focus() {
+        ctx.focus_other = true;
+    }
+    if resp.clicked() {
+        ctx.act(Action::ForgetNext(href.to_owned()));
     }
 }
 
@@ -422,7 +465,39 @@ pub fn document_header(ui: &mut Ui, doc: &ir::Document, ctx: &mut RenderCtx<'_>)
         ui.add_space(theme::snap(base * 0.1));
         ui.label(RichText::new(meta.join(" · ")).color(ctx.pal.dim).small());
     }
+    // The reading list's one header control, and the only thing hww ever draws in a document
+    // header that is not a fact about the document. It belongs here rather than only in the
+    // settings panel because a reader looking at a list they want gone is looking at the list, not
+    // at three groups of preferences; the panel's button stays where it is, and both press the
+    // same door so both say the same sentence afterwards.
+    //
+    // Only while there is something to empty. On an empty list the document is one sentence about
+    // how to fill it, and a button offering to clear nothing under it would be the page inventing
+    // a state it is not in.
+    if ctx.reading_list && has_entries(doc) {
+        ui.add_space(theme::snap(base * 0.25));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+            let resp = ui
+                .small_button(crate::reader::notice::READING_LIST_FORGET_ALL)
+                .on_hover_text(crate::reader::notice::READING_LIST_FORGET_ALL_HOVER);
+            super::follow_focus(&resp);
+            if resp.has_focus() {
+                ctx.focus_other = true;
+            }
+            if resp.clicked() {
+                ctx.act(Action::ForgetAllNext);
+            }
+        });
+    }
     ui.add_space(theme::snap(base * 0.5));
     ui.separator();
     ui.add_space(theme::snap(base * 0.6));
+}
+
+/// Whether a document has a row in it, which for one of hww's own list views is the difference
+/// between a list and the sentence it shows instead of one.
+fn has_entries(doc: &ir::Document) -> bool {
+    doc.blocks
+        .iter()
+        .any(|b| matches!(b, ir::Block::Entries(e) if !e.is_empty()))
 }

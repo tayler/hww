@@ -68,6 +68,7 @@ mod keyspec {
     pub const BACK: &str = "Alt+Left";
     pub const FORWARD: &str = "Alt+Right";
     pub const KEEP_PAGE: &str = "Ctrl+D";
+    pub const READ_LATER: &str = "Shift+L";
 
     pub const HELP_OPEN_LOCATION: &str = "Ctrl+L or o";
     pub const HELP_BACK: &str = "Alt+Left / Backspace";
@@ -96,6 +97,11 @@ mod keyspec {
     pub const BACK: &str = "Cmd+[";
     pub const FORWARD: &str = "Cmd+]";
     pub const KEEP_PAGE: &str = "Cmd+D";
+    /// Not a modifier swap: Shift is Shift on every platform hww ships to. It is here anyway,
+    /// because the rule the `cfg` split enforces is that no table outside this module spells a
+    /// modifier — a key that happens to be the same on both is still spelled once, in the one
+    /// place a later change to it would be found.
+    pub const READ_LATER: &str = "Shift+L";
 
     pub const HELP_OPEN_LOCATION: &str = "Cmd+L or o";
     pub const HELP_BACK: &str = "Cmd+[ / Backspace";
@@ -129,6 +135,8 @@ pub enum Command {
     ReloadBare,
     KeepPage,
     OpenLibrary,
+    ReadLater,
+    OpenReadingList,
     OpenHistory,
     Quit,
     CopyPageUrl,
@@ -307,11 +315,33 @@ pub fn bar() -> Vec<Menu> {
                     checked: Checked::Kept,
                     needs: N::FetchedPage,
                 },
+                // `Item::Run` and not `Item::Check` beside "Keep this page", though this is a
+                // toggle too. A tick answers a question about the page on screen and stays
+                // still while the reader reads it; this one would answer about whichever link
+                // Tab last touched, so it would be a frame stale and would flicker down the
+                // page as focus moved. `menu_ui::Checks` is also rebuilt every frame the bar is
+                // drawn, and its own comment says an uncached `holds` costs a few thousand URL
+                // parses per frame — `Needs::FocusedLink` costs an `is_some`.
+                Item::Run {
+                    label: "Read this link later",
+                    keys: READ_LATER,
+                    command: C::ReadLater,
+                    needs: N::FocusedLink,
+                },
                 // The one view worth reaching from the idle screen, so it needs nothing.
                 Item::Run {
                     label: "Library",
                     keys: "b",
                     command: C::OpenLibrary,
+                    needs: N::Nothing,
+                },
+                // Beside Library rather than under History with the visited pages, because it is
+                // the other list the reader filled on purpose. It needs nothing for Library's
+                // reason: what it holds outlives the session.
+                Item::Run {
+                    label: "Read next",
+                    keys: "l",
+                    command: C::OpenReadingList,
                     needs: N::Nothing,
                 },
                 Item::Separator,
@@ -514,8 +544,16 @@ pub const HELP: &[(&str, &str)] = &[
     ("z / Z", "collapse focused reply · collapse all"),
     ("y / Y", "copy page URL · copy focused link"),
     (KEEP_PAGE, "keep this page in your library"),
-    ("b", "open your library"),
-    ("h", "open the pages you have visited"),
+    (READ_LATER, "add the focused link to your reading list"),
+    // The three openers on one row, as `r / R` and `y / Y` already are. They are one family —
+    // each opens a view hww builds from `library.json` — and the card is sized by the window
+    // rather than scrolled, so a row per tenant would push the footnote off the bottom edge the
+    // moment a fourth arrives. `the_menu_and_the_help_card_agree` matches per token, so the
+    // three menu rows still each find their key here.
+    (
+        "b / l / h",
+        "open your library · reading list · visited pages",
+    ),
     ("[ / ]", "narrow / widen the reading measure"),
     (HELP_ZOOM, "zoom in · out · actual size"),
     ("d", "cycle theme"),
@@ -587,6 +625,8 @@ mod tests {
             Command::ReloadBare,
             Command::KeepPage,
             Command::OpenLibrary,
+            Command::ReadLater,
+            Command::OpenReadingList,
             Command::OpenHistory,
             Command::Quit,
             Command::CopyPageUrl,
