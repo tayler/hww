@@ -25,6 +25,7 @@ hww fetches a web page, parses the HTML, then displays it using hww's own render
 - **Six themes.** Follow-the-desktop (the default), light, sepia, dark, and a high-contrast AAA pair.
 - **Four typefaces.** IBM Plex Sans, Serif, and Mono, plus Atkinson Hyperlegible Next for low vision. All of them are compiled into the binary.
 - **Screen-reader support.** An AccessKit tree, with the off-screen layout skip suspended while an assistive technology is attached.
+- **RSS and Atom feeds.** Open a feed's address and it is read as a list of entries with their summaries, not as a wall of XML. Nothing behind a headline is requested until you follow it, and how much of each entry to show is a setting.
 - **Per-site rules, compiled in and reported.** A rewrite table, a profile table, a search-engine table. Every application is announced before the request goes out, and `Shift+R` reloads bare.
 
 ## Install
@@ -121,6 +122,8 @@ Windows has no door yet. It ships as a zip with no installer, and registering a 
 | `src/reader/archive.rs` | The library and the history, and the doctrine for anything hww is allowed to remember |
 | `src/session.rs` | Runs rewrite → fetch → decode → extract for a URL |
 | `src/sites.rs` | Builtin host rewrites and per-site extraction profiles |
+| `src/search.rs` | Turns a query into a URL and a result page into entries |
+| `src/feed.rs` | Parses RSS 2.0 and Atom into `Document` |
 | `src/fetch.rs` | HTTP client with no cookie jar, redirect inspection, and request limits |
 | `src/html.rs` | Parses HTML into `Document`: article scoring, cards, thread hooks |
 | `src/thread.rs` | Detects comment lists from repeated siblings with the same classes |
@@ -136,7 +139,7 @@ cargo run --features gui -- example.com/article   # straight to a page
 cargo build --release --features gui              # ./target/release/hww
 ```
 
-The application lives behind the `gui` feature, so core tests compile without the egui dependency graph or the image subresource path. `hww` takes `--no-rewrite`, `--no-profile`, and `--no-search` to switch off a per-site table for one run, `--show-rewrites`, `--show-profiles`, and `--show-engines` to print one and exit, and `--why` for triage.
+The application lives behind the `gui` feature, so core tests compile without the egui dependency graph or the image subresource path. `hww` takes `--no-rewrite`, `--no-profile`, `--no-search`, and `--no-feed` to switch off one way of reading a response for a single run, `--show-rewrites`, `--show-profiles`, and `--show-engines` to print a table and exit, and `--why` for triage. In the reader, `Shift+R` reloads with all four off at once.
 
 ### Diagnosing a site
 

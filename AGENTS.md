@@ -7,8 +7,9 @@ ledger. This file contains only rules useful across tasks. Reference symbols, no
 
 ## What this is
 
-hww is a second browser for stripped, non-app HTML, with text and GUI renderers. Feeds,
-gemini, gopher, and Markdown are not started. Nothing writes page content to disk. Two files
+hww is a second browser for stripped, non-app HTML, with text and GUI renderers. RSS 2.0 and
+Atom ship; feed autodiscovery, JSON Feed, RSS 1.0/RDF, gemini, gopher, and Markdown are not
+started. Nothing writes page content to disk. Two files
 survive a run, both in `settings::config_dir()`: `settings.json`, and `library.json`, which holds
 the pages the reader asked hww to keep and nothing else. **Read `src/reader/archive.rs` before
 adding anything that writes to disk** — the archive doctrine is there, and it is the rule, not
@@ -67,6 +68,12 @@ than key steps; key steps photograph an open popup and never what the item does.
 
 The merge order in `html::extract_traced` is load-bearing. Read its module documentation before
 changing cards, content-root scoring, thread extraction, or body fallback.
+
+**XML input never goes through html5ever.** It reads `<![CDATA[…]]>` as a bogus comment running
+to the first `>` in the payload, which loses a data-dependent amount of every feed entry
+silently; `src/feed.rs` carries the measurement. Feeds parse with `roxmltree`, `allow_dtd`
+stays false, and a feed summary is walked by `html::blocks_from_public_unhinted` because the
+class-name chrome hints describe a whole page and a summary is already the content.
 
 Text length has one currency: `Document::text_len`, `ir::blocks_text_len`, and
 `thread::comments_text_len`. Reuse them. `ir::THIN_TEXT` is the shared thin-document threshold.

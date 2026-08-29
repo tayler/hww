@@ -29,6 +29,14 @@ pub struct LoadOptions {
     /// the reader's `Shift+R` clear it, which is how you see the SERP the engine actually
     /// sent when a shape looks wrong.
     pub search: bool,
+    /// Read an RSS or Atom response as a feed rather than as prose. `--no-feed` and the
+    /// reader's `Shift+R` clear it, which is how you see the raw XML the generic extractor
+    /// makes of a feed — the only way to tell a stale reading from a stale publisher.
+    ///
+    /// Not keyed on a host, unlike the three tables beside it: a feed is recognised from its
+    /// own first bytes. It is a switch here because everything `BARE` turns off is something
+    /// that reads a response as other than prose, and a feed reader is the fourth of those.
+    pub feed: bool,
 }
 
 impl Default for LoadOptions {
@@ -37,16 +45,18 @@ impl Default for LoadOptions {
             rewrite: true,
             profile: true,
             search: true,
+            feed: true,
         }
     }
 }
 
 impl LoadOptions {
-    /// Neither table: the page as the host sent it, read by the extractor unaided.
+    /// None of them: the page as the host sent it, read by the extractor unaided.
     pub const BARE: LoadOptions = LoadOptions {
         rewrite: false,
         profile: false,
         search: false,
+        feed: false,
     };
 }
 
@@ -107,6 +117,19 @@ pub struct Provenance {
     /// for a host with no profile. Not in `Display`: headless `--why` prints it on its own line,
     /// so the provenance line stays what it was.
     pub profile: Option<crate::profile::ProfileReport>,
+    /// The response was read as a feed, and which one. `None` under `--no-feed` and for every
+    /// page that is not a feed.
+    ///
+    /// One field, three consumers, which is the whole reason it lives here rather than as an
+    /// `Explanation::feed` beside `Explanation::search`: `notice::about_page` gates the
+    /// thin-text caution on it, `pageinfo::rows` draws it, and `bin/hww.rs` prints it. Two
+    /// representations of one fact is the drift this struct's doc comment forbids.
+    ///
+    /// It matters most to the first of those. `ir::block_text_len` counts a `Figure` as its
+    /// caption alone, so a picture-only feed scores under `ir::THIN_TEXT` and draws the
+    /// JavaScript caution over a feed that parsed perfectly. The IR must not change to fix it —
+    /// text length has one currency — so the pipeline says the page was a feed instead.
+    pub feed: Option<crate::feed::Report>,
 }
 
 impl std::fmt::Display for Provenance {
@@ -178,6 +201,7 @@ impl Provenance {
             cookie_attempts: 0,
             truncation: Truncation::Complete,
             profile: None,
+            feed: None,
         }
     }
 }
@@ -203,6 +227,7 @@ impl Provenance {
             cookie_attempts: 2,
             truncation: Truncation::Complete,
             profile: None,
+            feed: None,
         }
     }
 }
@@ -230,6 +255,29 @@ pub enum LoadError {
     /// column carries page content only, so "nothing" has to be said as a page remark.
     #[error("{engine} found nothing for {terms:?}")]
     SearchEmpty { engine: &'static str, terms: String },
+    /// The feed parsed and carried no items. Not a failure of the fetch, and the same argument
+    /// as [`Self::SearchEmpty`]: the reading column carries page content only, so "nothing" has
+    /// to be said as a page remark rather than drawn as an empty run of entries.
+    ///
+    /// A `String` rather than an `Option<String>`, because `thiserror`'s `#[error(...)]`
+    /// interpolates unconditionally. `session::load` fills a feed that named no title with the
+    /// host it came from, which is a name and not a guess.
+    #[error("{title} carried no entries")]
+    FeedEmpty { title: String },
+    /// It said it was a feed and would not parse.
+    ///
+    /// `why` is the parser's message and position, and it is **publisher-controlled**: it
+    /// embeds the offending entity name or namespace prefix. `feed::read` caps its length and
+    /// `bin/hww.rs` sanitizes everything it prints, because a terminal reads an escape sequence
+    /// in one of those as a command.
+    ///
+    /// `truncated` is whether hww is the one that broke it, and the remark turns on it. The
+    /// transfer cap and the read clock both cut a document mid-element, and XML that stops
+    /// partway is unclosed through no fault of the publisher's — `feed.rs` measured one feed in
+    /// 28 over the 5 MB cap. Without this the failure page told a reader to wait for a
+    /// generator fix that was never coming, for a document hww had truncated itself.
+    #[error("this feed would not parse: {why}")]
+    FeedUnreadable { why: String, truncated: bool },
 }
 
 /// What following a link should do, decided **before** anything is dispatched.
@@ -308,7 +356,9 @@ fn is_web_page(content_type: Option<&str>) -> bool {
             "application/xhtml+xml"
                 | "application/xml"
                 | "application/rss+xml"
+                | "application/x-rss+xml"
                 | "application/atom+xml"
+                | "application/rdf+xml"
                 | "application/json"
         )
 }
@@ -363,6 +413,34 @@ impl Session {
                 crate::search::Outcome::Unrecognized => {}
             }
         }
+        // After search, because a result page is never a feed, and before the profile lookup,
+        // because a profile keys on a host and describes an HTML tree. No method on `Fetched`:
+        // `search` and `profile` exist to consult a `sites` table keyed on the final URL, and a
+        // feed is recognised from its own bytes.
+        if opts.feed {
+            match crate::feed::read(&f.source, &f.resp.final_url) {
+                crate::feed::Outcome::Feed(doc, report) => {
+                    let chars = doc.text_len();
+                    let mut prov = f.provenance(requested, chars, None);
+                    prov.feed = Some(report);
+                    return Ok(Loaded { doc, prov });
+                }
+                crate::feed::Outcome::Empty { title } => {
+                    return Err(LoadError::FeedEmpty {
+                        title: named(&title, &f.resp.final_url),
+                    });
+                }
+                crate::feed::Outcome::Unreadable(why) => {
+                    return Err(LoadError::FeedUnreadable {
+                        why,
+                        truncated: f.resp.truncation != Truncation::Complete,
+                    });
+                }
+                // Not a feed at all, including an RSS 1.0 / RDF document. The generic extractor
+                // has it, which is a rougher page rather than a blank one.
+                crate::feed::Outcome::NotAFeed => {}
+            }
+        }
         let (host, profile) = f.profile(opts);
         let x = html::extract_with_profile(&f.source, &f.resp.final_url, profile);
         let report = x.profile.map(|mut r| {
@@ -413,7 +491,19 @@ impl Session {
                 },
             );
         }
-        let prov = f.provenance(requested, why.text_len, why.profile.clone());
+        // `explain` does not go through `load`, so without this call `prov.feed` is `None` on
+        // precisely the path built for diagnosis, and `--why` would rank content-root candidates
+        // for a feed while saying nothing about the feed. The duplicate parse is the price, on
+        // a path that renders no page and opens no window.
+        let feed = opts
+            .feed
+            .then(|| crate::feed::read(&f.source, &f.resp.final_url))
+            .and_then(|o| match o {
+                crate::feed::Outcome::Feed(_, r) => Some(r),
+                _ => None,
+            });
+        let mut prov = f.provenance(requested, why.text_len, why.profile.clone());
+        prov.feed = feed;
         Ok((why, prov))
     }
 
@@ -462,6 +552,17 @@ impl Session {
             source,
             encoding: enc.name(),
         })
+    }
+}
+
+/// A feed's own title, or the host that served it when the feed named none.
+///
+/// A remark that opens with a blank is a remark that reads as broken. The host is a name the
+/// reader can act on and not a guess about the publication.
+fn named(title: &str, url: &Url) -> String {
+    match title.trim() {
+        "" => url.host_str().unwrap_or("This feed").to_owned(),
+        t => t.to_owned(),
     }
 }
 
@@ -548,6 +649,10 @@ impl Fetched {
             cookie_attempts: self.resp.cookie_attempts,
             truncation: self.resp.truncation,
             profile,
+            // Filled by the one arm that read a feed, on the value it gets back. This method
+            // already takes three arguments, two of them `Option`s, and a fourth would be one
+            // more thing to pass `None` to from every caller that never saw a feed.
+            feed: None,
         }
     }
 }
@@ -690,6 +795,15 @@ mod tests {
             Some("application/xhtml+xml"),
             Some("text/plain"),
             Some(""),
+            // Every type a feed is served as. RDF is here because `feed::read` answers
+            // `NotAFeed` for an RSS 1.0 root and lets the generic extractor have it: refusing
+            // the content type would turn that fallback into a failure screen. `x-rss+xml` is
+            // what a number of older publishers still send.
+            Some("application/rss+xml"),
+            Some("application/x-rss+xml"),
+            Some("application/atom+xml"),
+            Some("application/rdf+xml"),
+            Some("application/xml; charset=utf-8"),
         ] {
             assert!(is_web_page(ct), "{ct:?} should be readable");
         }
@@ -763,6 +877,20 @@ mod tests {
         assert!(LoadOptions::default().search);
     }
 
+    /// The same argument for feeds, and it is the sharper one: the generic extractor reads a
+    /// result page acceptably, and reads an XML document as nonsense. `Shift+R` on a feed is
+    /// how you see what `feed::read` was handed, which is the only way to tell a stale reading
+    /// from a publisher who changed their generator.
+    ///
+    /// Asserted by hand because neither this test nor
+    /// `bare_options_apply_neither_table_and_the_default_applies_both` is exhaustive over the
+    /// struct: a fourth field could be added to `BARE` as `true` and nothing would say so.
+    #[test]
+    fn bare_reads_a_feed_as_a_page() {
+        const { assert!(!LoadOptions::BARE.feed) };
+        assert!(LoadOptions::default().feed);
+    }
+
     /// Every engine's own fixture reads as results through the same call `load` makes, and
     /// produces a document made of entries rather than prose.
     #[test]
@@ -782,6 +910,44 @@ mod tests {
             );
             assert!(doc.text_len() > 0);
         }
+    }
+
+    /// Every feed fixture reads through the same call `load` makes, and produces a document of
+    /// entries rather than prose. Mirrors `every_engine_fixture_becomes_entries`: a shape that
+    /// passes its own parser and falls over in the pipeline fails here instead of on a screen.
+    #[test]
+    fn every_feed_fixture_becomes_entries() {
+        let url = Url::parse("https://example.com/feed.xml").unwrap();
+        for f in crate::feed::FIXTURES {
+            let crate::feed::Outcome::Feed(doc, report) = crate::feed::read(f.source, &url) else {
+                panic!("{}: its own fixture did not read as a feed", f.name);
+            };
+            assert_eq!(report.entries, f.entries, "{}", f.name);
+            assert!(
+                matches!(doc.blocks.as_slice(), [ir::Block::Entries(es)] if es.len() == f.entries),
+                "{}: document is not a run of entries",
+                f.name
+            );
+            assert!(doc.text_len() > 0, "{}", f.name);
+        }
+    }
+
+    /// The feed branch sits after search and before the profile lookup, and `BARE` turns it
+    /// off, so the four ways a response can be read as other than prose are one list.
+    #[test]
+    fn a_feed_is_read_as_a_feed_only_when_the_option_says_so() {
+        let url = Url::parse("https://example.com/feed.xml").unwrap();
+        let src = crate::feed::FIXTURES[0].source;
+        assert!(matches!(
+            crate::feed::read(src, &url),
+            crate::feed::Outcome::Feed(..)
+        ));
+        // And an ordinary page never diverts into it, whatever the option says.
+        let page = "<!DOCTYPE html><html><body><p>a feed of news</p></body></html>";
+        assert!(matches!(
+            crate::feed::read(page, &url),
+            crate::feed::Outcome::NotAFeed
+        ));
     }
 
     #[test]
@@ -824,7 +990,10 @@ mod tests {
     fn bare_options_apply_neither_table_and_the_default_applies_both() {
         let bare = LoadOptions::BARE;
         let dflt = LoadOptions::default();
-        assert_eq!((bare.rewrite, bare.profile), (false, false));
-        assert_eq!((dflt.rewrite, dflt.profile), (true, true));
+        assert_eq!(
+            (bare.rewrite, bare.profile, bare.feed),
+            (false, false, false)
+        );
+        assert_eq!((dflt.rewrite, dflt.profile, dflt.feed), (true, true, true));
     }
 }

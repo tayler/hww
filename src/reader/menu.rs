@@ -505,7 +505,7 @@ pub const HELP: &[(&str, &str)] = &[
     (FORWARD, "forward · the mouse side buttons do both"),
     (
         "r / R",
-        "reload · reload bare: no rewrite rule, no site profile, no search shape",
+        "reload · reload bare: no rewrite rule, no site profile, no search shape, no feed reader",
     ),
     ("i / I", "load focused image · load all, naming their hosts"),
     ("t", "outline"),
@@ -691,11 +691,11 @@ mod tests {
         }
     }
 
-    /// The help card and the toast name the same three tables.
+    /// The help card and the toast name the same list.
     ///
     /// `Shift+R` says what it turned off twice: once on the card before you press it, once in
-    /// the toast after. A reload that quietly stopped honouring a fourth table would leave both
-    /// surfaces lying, and this is the cheaper half of noticing that.
+    /// the toast after. A reload that quietly stopped honouring one more of them would leave
+    /// both surfaces lying, and this is the cheaper half of noticing that.
     #[test]
     fn the_bare_reload_says_the_same_thing_twice() {
         let toast = crate::reader::notice::RELOADED_BARE;

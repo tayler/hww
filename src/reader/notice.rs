@@ -128,13 +128,18 @@ pub const URL_BAR_HINT: &str = "Search or type a URL";
 
 /// What a bare reload turns off, named after `Shift+R` has done it.
 ///
-/// Three tables, in the order `session::load` consults them, because a reader diagnosing a page
-/// needs to know which of them was in play. Search joined the list when result pages became
-/// readable: `LoadOptions::BARE` is the documented way to see the markup an engine actually
-/// sent, so a message that named only two would leave the reader wondering why the results
-/// stopped being results. `menu::HELP` says the same three; `the_bare_reload_says_the_same_thing_twice`
-/// holds them together.
-pub const RELOADED_BARE: &str = "reloaded bare: no rewrite rule, no site profile, no search shape";
+/// Everything that reads a response as other than prose, in the order `session::load` consults
+/// them, because a reader diagnosing a page needs to know which of them was in play. Search
+/// joined the list when result pages became readable and the feed reader joined it next:
+/// `LoadOptions::BARE` is the documented way to see what a host actually sent, so a message
+/// that named three of the four would leave the reader wondering why the entries stopped being
+/// entries. The last is not a table — a feed is recognised from its own first bytes rather than
+/// from a host — and it is here because what it turns off is the same kind of thing.
+///
+/// `menu::HELP` says the same four; `the_bare_reload_says_the_same_thing_twice` holds them
+/// together.
+pub const RELOADED_BARE: &str =
+    "reloaded bare: no rewrite rule, no site profile, no search shape, no feed reader";
 
 /// The library's masthead, and so also its window title in the outline and the status strip.
 ///
@@ -458,7 +463,12 @@ pub fn about_page(prov: &Provenance, text_len: usize, arrival: Arrival) -> Vec<N
             ),
         ));
     }
-    if text_len < THIN_TEXT {
+    // Not on a feed. `ir::block_text_len` counts a `Block::Figure` as its caption alone, so a
+    // feed whose entries are each a single picture scores under the floor having parsed
+    // perfectly, and this caution would tell its reader that a page hww read correctly needs
+    // JavaScript. The IR is not the place to fix that — text length has one currency — so the
+    // pipeline says the page was a feed and the caution reads `prov.feed`.
+    if text_len < THIN_TEXT && prov.feed.is_none() {
         out.push(Notice::new(
             Severity::Caution,
             "hww found little text on this page, which may need JavaScript to show its content.",
@@ -632,13 +642,67 @@ pub fn failure(error: &LoadError, url: &Url) -> Notice {
                 &[Button::OpenSettings, Button::CopyUrl],
                 "SearchEmpty",
             ),
+            // Parsed, and carried nothing. Same shape as `SearchEmpty` and for the same reason:
+            // the reading column holds page content only, so the absence of content is said
+            // here rather than drawn as an empty run of entries.
+            LoadError::FeedEmpty { title } => (
+                "This feed is empty.",
+                format!(
+                    "{title} is a feed hww can read, and it listed no entries. Either nothing \
+                     has been posted to it or everything has been taken down."
+                ),
+                &[Button::Retry, Button::CopyUrl],
+                "FeedEmpty",
+            ),
+            // It said it was a feed and would not parse. Falling through to the extractor
+            // instead would draw a near-blank page under a caution blaming JavaScript, which is
+            // the confident wrong diagnosis in its purest form: the reason hww reads feeds with
+            // an XML parser at all is that the HTML extractor gets nothing out of them.
+            // Two documents that fail at the same parser call for opposite reasons, and the
+            // difference is whose fault it is. A feed hww cut at the transfer cap or the read
+            // clock ends mid-element and cannot parse; telling that reader a generator is
+            // broken and a reload will not help is a confident wrong diagnosis about the one
+            // party who did nothing wrong, and it is the reload that actually stands a chance.
+            // Its own heading and its own code, because it is its own failure.
+            LoadError::FeedUnreadable {
+                truncated: true, ..
+            } => (
+                "This feed arrived incomplete.",
+                "hww reads feeds with an XML parser, which needs the whole document. This one \
+                 stopped arriving partway, so it breaks off mid-element and none of it can be \
+                 read. That cut is hww's own limit rather than a fault in the feed, and \
+                 reloading may well get all of it."
+                    .to_owned(),
+                &[Button::Retry, Button::CopyUrl],
+                "FeedTruncated",
+            ),
+            LoadError::FeedUnreadable { .. } => (
+                "This feed is not well-formed.",
+                "hww reads feeds with an XML parser, which is strict where an HTML parser \
+                 guesses. Something in this document is not valid XML, so none of it can be \
+                 read. That is the publisher's generator rather than anything here, and \
+                 reloading will not change it until they fix it."
+                    .to_owned(),
+                // Reload, because the fix is a redeploy at the other end and a reader who comes
+                // back to it wants one press. Not `RetryWithoutRewrite`: no rewrite rule chose
+                // this document's contents.
+                &[Button::Retry, Button::CopyUrl],
+                "FeedUnreadable",
+            ),
             LoadError::NotWebPage { content_type } => (
                 "Not a web page.",
                 format!("The server sent {content_type}, which hww has no reader for."),
                 &[Button::CopyUrl],
                 "NotWebPage",
             ),
-            other => (
+            // Every remaining transport failure, and the arm that keeps this match exhaustive.
+            // It was a bare `other =>`, which meant a new `LoadError` variant compiled straight
+            // onto the generic transport screen with the code `"Transport"` and a Retry button:
+            // the confident wrong diagnosis this function exists to prevent, arriving silently.
+            // `every_failure_gets_its_own_words` walks a hand-written list rather than the enum,
+            // so it would not have caught it either. Naming `Fetch` here makes the next variant
+            // a compile error instead.
+            LoadError::Fetch(other) => (
                 "The request failed.",
                 other.to_string(),
                 &[Button::Retry, Button::CopyUrl],
@@ -650,6 +714,11 @@ pub fn failure(error: &LoadError, url: &Url) -> Notice {
     if let LoadError::Fetch(FetchError::TooManyRedirects(hops)) = error {
         // A redirect loop is usually a consent wall, and the chain is what shows it.
         detail.extend(hops.iter().map(|h| format!("  -> {h}")));
+    }
+    if let LoadError::FeedUnreadable { why, .. } = error {
+        // The parser's own message and position: which entity, which prefix, which line. It is
+        // publisher-controlled text, capped by `feed::read` before it gets here.
+        detail.push(why.clone());
     }
 
     Notice {
@@ -819,6 +888,17 @@ mod tests {
                 engine: "Mojeek",
                 terms: "lorem ipsum".to_owned(),
             },
+            LoadError::FeedEmpty {
+                title: "Lorem Weekly".to_owned(),
+            },
+            LoadError::FeedUnreadable {
+                why: "unknown entity reference 'nbsp' at 3:24".to_owned(),
+                truncated: false,
+            },
+            LoadError::FeedUnreadable {
+                why: "expected element end tag at 812:1".to_owned(),
+                truncated: true,
+            },
         ]
         .iter()
         .map(|e| failure(e, &u))
@@ -871,6 +951,44 @@ mod tests {
         assert!(!offers(LoadError::Fetch(FetchError::Timeout(
             Duration::from_secs(15)
         ))));
+    }
+
+    /// The same parser failure from opposite causes. `feed.rs` measured one feed in 28 over the
+    /// 5 MB cap: it arrives cut mid-element and cannot parse, and the publisher did nothing
+    /// wrong. Telling that reader to wait for a generator fix is a confident wrong diagnosis,
+    /// and it points them away from the reload that would actually work.
+    #[test]
+    fn a_feed_hww_truncated_does_not_blame_the_publisher() {
+        let u = url("https://example.com/feed.xml");
+        let cut = failure(
+            &LoadError::FeedUnreadable {
+                why: "expected element end tag at 812:1".to_owned(),
+                truncated: true,
+            },
+            &u,
+        );
+        let theirs = failure(
+            &LoadError::FeedUnreadable {
+                why: "unknown entity reference 'nbsp' at 3:24".to_owned(),
+                truncated: false,
+            },
+            &u,
+        );
+        assert_ne!(cut.heading, theirs.heading);
+        assert_ne!(cut.code, theirs.code);
+        let body = cut.body.to_lowercase();
+        assert!(
+            !body.contains("publisher") && !body.contains("generator"),
+            "hww cut this one: {}",
+            cut.body
+        );
+        assert!(body.contains("hww"), "and it says so: {}", cut.body);
+        // The other half of the claim: the one hww did not cut still names whose it is, and
+        // still says a reload will not help.
+        assert!(theirs.body.contains("publisher"), "{}", theirs.body);
+        // The parser's message reaches both, because it is what a bug report quotes.
+        assert!(cut.detail.iter().any(|d| d.contains("812:1")));
+        assert!(theirs.detail.iter().any(|d| d.contains("nbsp")));
     }
 
     #[test]
@@ -1143,6 +1261,33 @@ mod tests {
             about_page(&page(200), THIN_TEXT - 1, Arrival::Fetched).len(),
             1
         );
+    }
+
+    /// A feed draws no thin-text caution, however little text it carries.
+    ///
+    /// `ir::block_text_len` counts a `Block::Figure` as its caption alone, so a picture-only
+    /// feed — a comic, a photo blog — comes out under the floor while having parsed perfectly,
+    /// and the caution would blame JavaScript for a page hww read correctly. The IR must not
+    /// change to fix it, so the pipeline says the page was a feed and this reads `prov.feed`.
+    #[test]
+    fn a_thin_feed_is_not_a_page_that_needs_javascript() {
+        let mut p = page(200);
+        p.feed = Some(crate::feed::Report {
+            kind: crate::feed::Kind::Atom,
+            entries: 5,
+        });
+        assert!(about_page(&p, 0, Arrival::Fetched).is_empty());
+        assert!(about_page(&p, THIN_TEXT - 1, Arrival::Fetched).is_empty());
+        // And the same page read as anything else still gets it, so nothing else was suppressed.
+        p.feed = None;
+        assert_eq!(about_page(&p, THIN_TEXT - 1, Arrival::Fetched).len(), 1);
+        // Everything a feed *can* be wrong about is still said.
+        p.feed = Some(crate::feed::Report {
+            kind: crate::feed::Kind::Rss,
+            entries: 1,
+        });
+        p.status = 500;
+        assert_eq!(about_page(&p, 0, Arrival::Fetched).len(), 1);
     }
 
     /// Loudest first: the remark most likely to change how the page is read sits nearest the

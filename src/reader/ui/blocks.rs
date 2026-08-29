@@ -164,16 +164,19 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
             None => e.title.clone(),
         };
         let set = Setting::headline(ctx.opts, &ctx.pal);
+        // Through `short_date`, as the masthead's dateline is: a feed writes RFC 822, which is
+        // 31 characters of mostly zone offset, and the headline below gets whatever width this
+        // stamp leaves it. See `title::short_date`.
         let when = e
             .published
             .as_deref()
-            .map(str::trim)
+            .map(crate::reader::title::short_date)
             .filter(|p| !p.is_empty());
         // The right-hand end of the headline's first line holds the time and, for a card with
         // a picture, the small `[image]` control (`images::load_control`). Measure the time,
         // give the headline the rest, and let the headline wrap under both.
         let font = theme::chrome_font(ctx.opts);
-        let time_w = when.map_or(0.0, |p| {
+        let time_w = when.as_deref().map_or(0.0, |p| {
             ui.painter()
                 .layout_no_wrap(p.to_owned(), font.clone(), ctx.pal.dim)
                 .rect
@@ -196,8 +199,12 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                     ui.spacing_mut().item_spacing.x = theme::snap(ctx.opts.base_size_pt * 0.5);
-                    if let Some(p) = when {
-                        ui.label(RichText::new(p).font(font.clone()).color(ctx.pal.dim));
+                    if let Some(p) = &when {
+                        ui.label(
+                            RichText::new(p.as_str())
+                                .font(font.clone())
+                                .color(ctx.pal.dim),
+                        );
                     }
                     if let Some(img) = &e.image {
                         super::images::load_control(ui, img, ctx);
@@ -229,7 +236,11 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
             };
             runs(ui, &[ir::Inline::Text(addr.clone())], &set, ctx);
         }
-        blocks_ui(ui, &e.summary, ctx, None);
+        // Through `budget::lead_in`, not a loop here: `app::walk_blocks` reads the same
+        // function, so the pictures `I` offers to load are exactly the pictures on screen.
+        // See the module doc there.
+        let shown = crate::reader::budget::lead_in(&e.summary, ctx.opts.entry_summary_bytes);
+        blocks_ui(ui, shown, ctx, None);
     }
 }
 

@@ -323,6 +323,57 @@ are counted in the page info panel next to the cookies nobody stored.</p>
 </article></body></html>
 "#;
 
+/// A feed: a masthead with no site of its own, entries with real dates, and one summary long
+/// enough for the reading budget to cut. Through the real `feed::read`, so what is photographed
+/// is the XML path rather than the extractor's idea of XML.
+const FEED_URL: &str = "https://example.com/feed.xml";
+const FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"
+     xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <atom:link href="https://example.com/feed.xml" rel="self"/>
+    <title>The Example Times</title>
+    <link>https://example.com/</link>
+    <language>en</language>
+    <lastBuildDate>Thu, 27 Aug 2026 17:17:57 +0000</lastBuildDate>
+    <item>
+      <title>A quiet week for the human-wide web</title>
+      <link>https://example.com/2026/quiet-week</link>
+      <pubDate>Thu, 27 Aug 2026 09:12:00 +0000</pubDate>
+      <content:encoded><![CDATA[<div class="post-promo"><p>Three publishers moved back to
+      hand-written HTML this month, and none of them announced it. The pages are half the size
+      they were, they read the same in every client anyone has tried them in, and not one of the
+      three has had to touch a build step since. That is the whole argument, and it keeps
+      arriving as a footnote to something else.</p>
+      <p>The wrapper this paragraph sits in is classed as promotional, which on a whole page is
+      the sort of thing the chrome hints exist to delete. Inside a feed summary it is the post,
+      and deleting it would leave the entry short with nothing on screen saying why. It also
+      carries a &gt; greater-than sign, which is exactly where an HTML parser reading this CDATA
+      section as a bogus comment would have stopped swallowing it, losing however much of the
+      entry happened to sit before the next one, which is a different amount on every feed and
+      is never announced anywhere the reader could see it.</p>
+      <blockquote><p>The web was readable before it was interactive, and where anyone has left
+      it alone, it is readable still.</p></blockquote>
+      <p>This fourth paragraph is past the reading budget. It is on the page, hww has it, and
+      the renderer stops before it — which is why the picture below the quotation goes straight
+      to the next headline.</p></div>]]></content:encoded>
+    </item>
+    <item>
+      <title>Notes from a slow reader</title>
+      <link>/2026/slow-reader</link>
+      <pubDate>Wed, 26 Aug 2026 18:40:00 +0000</pubDate>
+      <description>&lt;p&gt;A short entry, entity-escaped rather than wrapped in CDATA, which
+      is the other half of what a feed reader has to handle.&lt;/p&gt;</description>
+    </item>
+    <item>
+      <link>https://example.com/2026/no-headline</link>
+      <pubDate>Tue, 25 Aug 2026 07:05:00 +0000</pubDate>
+      <description>An item with no title element at all, which is how a link blog writes one,
+      and whose headline is therefore the first line of what it does carry.</description>
+    </item>
+  </channel>
+</rss>"#;
+
 fn catalog(port: u16) -> Vec<Scene> {
     let images = IMAGES.replace("{PORT}", &port.to_string());
     let stall = format!("http://127.0.0.1:{port}/stall");
@@ -382,6 +433,11 @@ fn catalog(port: u16) -> Vec<Scene> {
                 ],
             )
         },
+        scene(
+            "feed",
+            "an RSS feed: entries with calendar dates, summaries cut at a block boundary",
+            vec![page(FEED_URL, FEED)],
+        ),
         scene(
             "thread",
             "a discussion: authors, timestamps, nested replies",
@@ -1050,9 +1106,17 @@ fn press(ctx: &egui::Context, modifiers: Modifiers, key: Key) {
     }
 }
 
-/// Fixture markup through the real extractor, with the provenance the scene needs.
+/// Fixture markup through the real reader, with the provenance the scene needs.
+///
+/// `feed::read` first and `html::extract` second, which is the order `session::load` asks them
+/// in. A feed scene then photographs the path a feed really takes, and `prov.feed` is set the
+/// same way the pipeline sets it, so the page-info row and the suppressed thin-text caution are
+/// the real ones.
 fn build(url: &Url, body: &str, tweak: fn(&mut Provenance)) -> Loaded {
-    let doc = html::extract(body, url);
+    let (doc, feed) = match hww::feed::read(body, url) {
+        hww::feed::Outcome::Feed(doc, report) => (doc, Some(report)),
+        _ => (html::extract(body, url), None),
+    };
     let mut prov = Provenance {
         requested: url.clone(),
         rewritten_to: None,
@@ -1066,6 +1130,7 @@ fn build(url: &Url, body: &str, tweak: fn(&mut Provenance)) -> Loaded {
         cookie_attempts: 0,
         truncation: Truncation::Complete,
         profile: None,
+        feed,
     };
     tweak(&mut prov);
     Loaded { doc, prov }
