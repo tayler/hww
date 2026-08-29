@@ -73,6 +73,29 @@ pub fn flatten(inlines: &[ir::Inline]) -> Vec<Run> {
     out
 }
 
+/// [`flatten`], with the whole run wrapped in one link.
+///
+/// The alternative is building an `ir::Inline::Link` to hold a *clone* of the inlines and
+/// flattening that, which is what every row of the bookmarks, the reading list, the history, and
+/// every story card on a front page was doing on every frame: a deep copy of the title's inline
+/// tree, per row, to say where it points. The output is the run list that clone produced, down
+/// to the empty-link rule — a link with nothing to click is not a link, so an empty run list
+/// stays empty rather than becoming a `Run::Link` around nothing.
+pub fn flatten_linked(inlines: &[ir::Inline], href: Option<&str>) -> Vec<Run> {
+    let Some(href) = href else {
+        return flatten(inlines);
+    };
+    let mut inner = Vec::new();
+    walk(inlines, Style::default(), true, &mut inner);
+    if inner.is_empty() {
+        return inner;
+    }
+    vec![Run::Link {
+        href: href.to_owned(),
+        runs: inner,
+    }]
+}
+
 fn walk(inlines: &[ir::Inline], style: Style, in_link: bool, out: &mut Vec<Run>) {
     for i in inlines {
         match i {
@@ -156,6 +179,48 @@ mod tests {
 
     fn t(s: &str) -> ir::Inline {
         ir::Inline::Text(s.to_owned())
+    }
+
+    /// [`flatten_linked`] is the clone-and-wrap it replaced.
+    ///
+    /// The old shape built an `ir::Inline::Link` holding a copy of the title's inlines and
+    /// flattened that. This asserts the two agree on the cases where they could differ: a run
+    /// with no href at all, one that already contains a link (the inner href is unreachable and
+    /// joins the outer), emphasis that has to survive the wrap, an image with no text beside it,
+    /// and the empty run that must not become a link around nothing.
+    #[test]
+    fn a_linked_flatten_is_the_wrap_it_replaced() {
+        let img = ir::Inline::Image(ir::Image {
+            src: "https://example.test/i.png".to_owned(),
+            alt: Some("alt".to_owned()),
+        });
+        let cases: Vec<Vec<ir::Inline>> = vec![
+            vec![t("a headline")],
+            vec![t("a "), ir::Inline::Emph(vec![t("headline")])],
+            vec![ir::Inline::Link {
+                href: "https://example.test/inner".to_owned(),
+                inlines: vec![t("already linked")],
+            }],
+            vec![img.clone()],
+            vec![],
+            vec![t("")],
+        ];
+        for inlines in cases {
+            for href in [None, Some("https://example.test/row")] {
+                let want = match href {
+                    Some(h) => flatten(&[ir::Inline::Link {
+                        href: h.to_owned(),
+                        inlines: inlines.clone(),
+                    }]),
+                    None => flatten(&inlines),
+                };
+                assert_eq!(
+                    flatten_linked(&inlines, href),
+                    want,
+                    "{inlines:?} under {href:?}"
+                );
+            }
+        }
     }
 
     fn text_runs(runs: &[Run]) -> Vec<(&str, Style)> {

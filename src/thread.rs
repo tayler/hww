@@ -70,12 +70,9 @@ const BODY_HINT: &[&str] = &[
     "cooked",
 ];
 
-pub fn extract_thread(html: &Html, base: &Url) -> Option<Vec<Comment>> {
-    extract_thread_traced(html, base, &crate::cards::CardMap::new()).0
-}
-
-/// [`extract_thread`], plus the account of every group it weighed. One function under both
-/// entry points, so `--why` reports the decision that was made rather than a re-enactment.
+/// The thread, plus the account of every group it weighed. One function under the document and
+/// under `--why`, so the explanation reports the decision that was made rather than a
+/// re-enactment.
 ///
 /// `cards` is what the story-card detector accepted; a group it claimed is not a thread,
 /// whatever its bylines say. A news-feed card carries an author and a date exactly as a post
@@ -85,8 +82,23 @@ pub fn extract_thread_traced(
     base: &Url,
     cards: &crate::cards::CardMap,
 ) -> (Option<Vec<Comment>>, Verdict) {
-    let (group, mut verdict) = best_group(html, cards);
-    let Some(group) = group else {
+    extract_thread_in(html, base, cards, &sibling_groups(html))
+}
+
+/// [`extract_thread_traced`] over a census the caller already took.
+///
+/// The sibling-group walk is the same work for the card detector and for this one, and running
+/// it twice per page meant a `signature` — a sorted, de-duplicated class list, a join, and a
+/// `format!` — built twice for every element on the page. `html::extract_traced` takes it once
+/// and lends it to both. The wrapper above keeps the standalone entry point honest.
+pub(crate) fn extract_thread_in(
+    html: &Html,
+    base: &Url,
+    cards: &crate::cards::CardMap,
+    groups: &[Group<'_>],
+) -> (Option<Vec<Comment>>, Verdict) {
+    let (signature, group, mut verdict) = best_group(groups, cards);
+    let (Some(group), Some(signature)) = (group, signature) else {
         return (None, verdict);
     };
     // Replies that nest inside a post rather than beside it are posts of the same signature
@@ -94,7 +106,7 @@ pub fn extract_thread_traced(
     // in document order, and their parents' bodies stop where they begin. This was the
     // 13-of-61: the detector found the top-level comments and the article path found the
     // tree, and the merge had to choose.
-    let group = with_nested(html, group);
+    let group = with_nested(html, group, signature);
     let skip: std::collections::HashSet<ego_tree::NodeId> = group.iter().map(|e| e.id()).collect();
     let mut comments: Vec<Comment> = Vec::new();
     for el in &group {
@@ -105,7 +117,7 @@ pub fn extract_thread_traced(
         comments.push(Comment {
             author: find_hint_skipping(el, AUTHOR_HINT, &skip),
             timestamp: find_hint_skipping(el, TIME_HINT, &skip),
-            depth: depth_of(el, &group),
+            depth: depth_of(el, &skip),
             id: el.value().id().map(str::to_owned),
             blocks: body,
         });
@@ -190,7 +202,7 @@ pub(crate) fn signature_classes<'a>(el: &ElementRef<'a>) -> Vec<&'a str> {
 /// their first member. The raw material of both the thread detector and `cards`: a
 /// discussion is N sibling posts, a front page is N sibling story cards, and the two are
 /// told apart by what the members contain, not by how they were found.
-pub(crate) fn sibling_groups(html: &Html) -> Vec<Vec<ElementRef<'_>>> {
+pub(crate) fn sibling_groups(html: &Html) -> Vec<Group<'_>> {
     let mut groups: HashMap<(ego_tree::NodeId, String), Vec<ElementRef<'_>>> = HashMap::new();
     let mut order: Vec<(ego_tree::NodeId, String)> = Vec::new();
     for node in html.tree.root().descendants() {
@@ -205,28 +217,46 @@ pub(crate) fn sibling_groups(html: &Html) -> Vec<Vec<ElementRef<'_>>> {
         if sig.ends_with('.') {
             continue;
         }
-        let key = (parent.id(), sig);
-        let entry = groups.entry(key.clone()).or_default();
-        if entry.is_empty() {
-            order.push(key);
+        // Through the `Entry` API rather than `entry(key.clone())`: the signature is a fresh
+        // `String` per element already, and cloning the key on every hit made it two.
+        match groups.entry((parent.id(), sig)) {
+            std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().push(el),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                order.push(e.key().clone());
+                e.insert(vec![el]);
+            }
         }
-        entry.push(el);
     }
     order
         .into_iter()
-        .filter_map(|k| groups.remove(&k))
-        .filter(|g| g.len() >= MIN_SIBLINGS)
+        .filter_map(|k| {
+            let members = groups.remove(&k)?;
+            (members.len() >= MIN_SIBLINGS).then_some(Group {
+                signature: k.1,
+                members,
+            })
+        })
         .collect()
 }
 
+/// A run of same-signature siblings, with the signature that found it.
+///
+/// Carried rather than recomputed: `best_group`, `cards::detect`, and [`with_nested`] each
+/// wanted it again, and building one is a sorted, de-duplicated class list and two allocations.
+pub(crate) struct Group<'h> {
+    pub signature: String,
+    pub members: Vec<ElementRef<'h>>,
+}
+
 fn best_group<'a>(
-    html: &'a Html,
+    groups: &'a [Group<'a>],
     cards: &crate::cards::CardMap,
-) -> (Option<Vec<ElementRef<'a>>>, Verdict) {
+) -> (Option<&'a str>, Option<Vec<ElementRef<'a>>>, Verdict) {
     use crate::cards::CardMapExt;
-    let mut weighed: Vec<(Vec<ElementRef<'a>>, GroupReport)> = sibling_groups(html)
-        .into_iter()
-        .map(|g| {
+    let mut weighed: Vec<(&Group<'a>, GroupReport)> = groups
+        .iter()
+        .map(|group| {
+            let g = &group.members;
             let mut lens: Vec<usize> = g.iter().map(|e| text_len(**e)).collect();
             lens.sort_unstable();
             let median = lens[lens.len() / 2];
@@ -259,22 +289,30 @@ fn best_group<'a>(
                 None
             };
             let report = GroupReport {
-                signature: signature(&g[0]),
+                signature: group.signature.clone(),
                 count: g.len(),
                 attributed,
                 median_text: median,
                 total_text: lens.iter().sum(),
                 rejected,
             };
-            (g, report)
+            (group, report)
         })
         .collect();
     // Largest first, so the winner is the first unrejected entry and the report reads in the
-    // order the detector ranked it. Ties keep HashMap order, which is why the tests never
-    // build two groups of the same size.
+    // order the detector ranked it. `sort_by_key` is stable and `sibling_groups` hands them over
+    // in document order, so ties keep the order the page wrote them in.
     weighed.sort_by_key(|w| std::cmp::Reverse(w.1.total_text));
     let chosen = weighed.iter().position(|(_, r)| r.rejected.is_none());
-    let group = chosen.map(|i| std::mem::take(&mut weighed[i].0));
+    // Cloned rather than moved: the census belongs to the caller, which lends it to the card
+    // detector as well. `ElementRef` is `Copy`, so this is a memcpy of the member list.
+    let (signature, group) = match chosen {
+        Some(i) => (
+            Some(weighed[i].0.signature.as_str()),
+            Some(weighed[i].0.members.clone()),
+        ),
+        None => (None, None),
+    };
     let mut reports: Vec<GroupReport> = weighed.into_iter().map(|(_, r)| r).collect();
     // The chosen group stays in view even when it is not among the largest.
     let chosen = chosen.map(|i| {
@@ -289,6 +327,7 @@ fn best_group<'a>(
     });
     reports.truncate(Verdict::KEEP);
     (
+        signature,
         group,
         Verdict {
             groups: reports,
@@ -299,8 +338,7 @@ fn best_group<'a>(
 
 /// The group plus every same-signature element nested inside any of its members, in document
 /// order.
-fn with_nested<'a>(html: &'a Html, group: Vec<ElementRef<'a>>) -> Vec<ElementRef<'a>> {
-    let sig = signature(&group[0]);
+fn with_nested<'a>(html: &'a Html, group: Vec<ElementRef<'a>>, sig: &str) -> Vec<ElementRef<'a>> {
     let mut ids: std::collections::HashSet<ego_tree::NodeId> =
         group.iter().map(|e| e.id()).collect();
     let mut all = group;
@@ -335,7 +373,12 @@ fn with_nested<'a>(html: &'a Html, group: Vec<ElementRef<'a>>) -> Vec<ElementRef
 
 /// Reply nesting. HN encodes depth in an `indent` attribute on a spacer cell; nested markup
 /// (Discourse, Reddit) encodes it by containment. Support both.
-fn depth_of(el: &ElementRef, group: &[ElementRef]) -> u16 {
+///
+/// `group` is the caller's own set of the group's ids, not a fresh one: this used to rebuild the
+/// list per comment and scan it linearly per ancestor, which is O(comments² × depth) on the page
+/// shape it exists for — a thread deep enough to need it. `extract_thread_in` already builds the
+/// set for `body_of` and `find_hint_skipping` one line above the loop.
+fn depth_of(el: &ElementRef, group: &std::collections::HashSet<ego_tree::NodeId>) -> u16 {
     for node in el.descendants() {
         if let Some(e) = ElementRef::wrap(node)
             && let Some(v) = e.value().attr("indent").and_then(|v| v.parse::<u16>().ok())
@@ -343,11 +386,10 @@ fn depth_of(el: &ElementRef, group: &[ElementRef]) -> u16 {
             return v;
         }
     }
-    let ids: Vec<_> = group.iter().map(|g| g.id()).collect();
     let mut depth = 0u16;
     let mut cur = el.parent();
     while let Some(n) = cur {
-        if ids.contains(&n.id()) {
+        if group.contains(&n.id()) {
             depth += 1;
         }
         cur = n.parent();
@@ -394,14 +436,15 @@ fn find_hint_skipping(
         let Some(e) = ElementRef::wrap(node) else {
             continue;
         };
-        let attrs = format!(
-            "{} {} {}",
-            e.value().attr("class").unwrap_or(""),
-            e.value().id().unwrap_or(""),
-            e.value().name()
-        );
-        // Token match, not substring: `age` is not in `image`. See `hint`.
-        if crate::hint::matches(&attrs, hints) {
+        // Token match, not substring: `age` is not in `image`. See `hint`. The three go in
+        // separately; this runs over every descendant of every member of every group.
+        let v = e.value();
+        let attrs = [
+            v.attr("class").unwrap_or(""),
+            v.id().unwrap_or(""),
+            v.name(),
+        ];
+        if crate::hint::matches_in(&attrs, hints) {
             let t = text_of(node);
             if !t.is_empty() && t.len() < 120 {
                 return Some(t);
@@ -434,11 +477,41 @@ fn body_of(
 pub(crate) fn text_of(node: NodeRef<'_, Node>) -> String {
     let mut s = String::new();
     collect(node, &mut s);
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    crate::ir::normalize_ws(&s)
 }
 
+/// The length of [`text_of`] without building it.
+///
+/// This is the extractor's most-asked question — once per member of every sibling group, once
+/// per anchor inside every card, and again per card in `html::cards_outside_chrome` — and it was
+/// answered by materializing the whole subtree's text and taking `.len()` of the string. Two
+/// allocations and a second pass, thrown away, for one number.
+///
+/// The number is reproduced rather than approximated. `text_of` normalizes to tokens joined by
+/// single spaces, so its length is the non-whitespace byte count plus one separator between each
+/// pair of tokens, and [`crate::html::WsSummary`] is exactly that arithmetic with the seam rule
+/// that makes it composable: two text nodes meeting without whitespace between them share a
+/// word. `text_len_equals_the_length_of_the_text` pins the two against each other.
+///
+/// Not [`crate::html::TextMetrics`], which answers the same question about a different text:
+/// that one reproduces `inner_text`, which skips the whole `NOISE` tag list and spaces every
+/// block element on both sides. The thread and card thresholds were measured against *this*
+/// text, and swapping the currency underneath them would move all four at once.
 pub(crate) fn text_len(node: NodeRef<'_, Node>) -> usize {
-    text_of(node).len()
+    use crate::html::WsSummary;
+    // Iterative, and in document order, for the reason `collect` gives: the seam rule makes the
+    // fold order-dependent, so this walks the same nodes in the same sequence that builds the
+    // string.
+    let mut acc = WsSummary::default();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        match n.value() {
+            Node::Text(t) => acc = WsSummary::concat(acc, WsSummary::text(t)),
+            Node::Element(e) if matches!(e.name.local.as_ref(), "script" | "style" | "svg") => {}
+            _ => stack.extend(n.children().rev()),
+        }
+    }
+    acc.len()
 }
 
 /// Share of an element's text that sits inside its anchors.
@@ -452,8 +525,7 @@ fn link_density(el: &ElementRef) -> f64 {
     if el.value().name() == "a" {
         return 1.0;
     }
-    let a = scraper::Selector::parse("a").unwrap();
-    let linked: usize = el.select(&a).map(|l| text_len(*l)).sum();
+    let linked: usize = el.select(&crate::html::sel::A).map(|l| text_len(*l)).sum();
     (linked as f64 / total as f64).min(1.0)
 }
 
@@ -488,6 +560,44 @@ mod tests {
     }
     fn base() -> Url {
         Url::parse("https://example.test/a").unwrap()
+    }
+
+    /// [`text_len`] answers what [`text_of`] would, without building it.
+    ///
+    /// The counting walk is only worth having if it is the same number, so this asserts it over
+    /// the shapes that make the two disagree if the seam rule or the skip set is wrong: text
+    /// split across element boundaries with and without whitespace at the seam, a `<script>` and
+    /// a `<style>` that contribute nothing, block elements that get no spacing here (unlike
+    /// `html::inner_text`), non-ASCII text where bytes and characters differ, and a subtree with
+    /// no text at all.
+    #[test]
+    fn text_len_equals_the_length_of_the_text() {
+        let cases = [
+            "<div>plain words here</div>",
+            "<div>  leading and trailing   </div>",
+            "<div><span>merge</span><span>d</span></div>",
+            "<div><span>kept </span><span>apart</span></div>",
+            "<div>a<script>var x = 'no'</script>b</div>",
+            "<div>a<style>.x{color:red}</style> b</div>",
+            "<div><p>one</p><p>two</p></div>",
+            "<div><svg><text>hidden</text></svg>shown</div>",
+            "<div>naïve café — ünïcode</div>",
+            "<div><span></span><em>  </em></div>",
+            "<div>tabs\tand\nnewlines\r\ncollapse</div>",
+            "<ul><li>one</li><li>two</li><li>three</li></ul>",
+        ];
+        for body in cases {
+            let html = parse(body);
+            let all = scraper::Selector::parse("*").unwrap();
+            for el in html.select(&all) {
+                assert_eq!(
+                    text_len(*el),
+                    text_of(*el).len(),
+                    "<{}> in {body}",
+                    el.value().name()
+                );
+            }
+        }
     }
 
     /// Regression: every article on the top-ten US news sites grew a "discussion" of three

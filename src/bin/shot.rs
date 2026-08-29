@@ -186,6 +186,32 @@ still talking. What was agreed, and what was left for the autumn.</p><span class
 </body></html>
 "#;
 
+/// A front page long enough that most of it is off-screen: what the row-level window rule in
+/// `blocks::entries_ui` is for.
+///
+/// `FRONT` has seven cards and fits in about two screens, so every row of it is inside the band
+/// and the skip never fires. This one is sixty, which at 900x800 leaves the great majority of
+/// them clear of the window in either direction once the page is scrolled — so the `front-long`
+/// scene photographs rows drawn *below* a run of skipped ones, which is where an error in the
+/// remembered heights shows up as text in the wrong place.
+fn front_long() -> String {
+    let mut s = String::from(
+        "<html lang=\"en\"><head><title>The Example Times - Every Story</title>\n\
+         <meta property=\"og:site_name\" content=\"The Example Times\"></head><body>\n\
+         <main><h2>Every story</h2>\n",
+    );
+    for i in 1..=60 {
+        s.push_str(&format!(
+            "<div class=\"card\"><h3><a href=\"/s/{i}\">Story number {i}: the council, the \
+             harbour, and the long night of amendments</a></h3>\n\
+             <p class=\"dek\">The vote came at two in the morning, with the gallery still full \
+             and the dissenters still talking.</p><span class=\"time\">{i} hours ago</span></div>\n"
+        ));
+    }
+    s.push_str("</main></body></html>\n");
+    s
+}
+
 /// The article with one more link in its first paragraph, to `href`: what `pending-link`
 /// follows. A fixture of its own rather than a change to `ARTICLE`, which a dozen scenes share.
 fn article_linking(href: &str) -> String {
@@ -895,6 +921,24 @@ fn catalog(port: u16) -> Vec<Scene> {
             "the foot of an article, after Shift+G",
             vec![page(ARTICLE_URL, ARTICLE), shift(Key::G)],
         ),
+        Scene {
+            settle_ms: 1200,
+            ..scene(
+                "entries-scrolled",
+                "the foot of a sixty-card front page: rows drawn under a run of skipped ones",
+                vec![
+                    page("https://example.com/every-story", &front_long()),
+                    // Before the key, not after: `Shift+G` scrolls to the bottom the *previous*
+                    // frame measured, and a list this long does not reach its final height on
+                    // the frame it arrives. Without the wait the scene lands somewhere in the
+                    // forties and somewhere else next run — which it did before the row-level
+                    // window rule existed too. It is the scene racing the layout, not the reader
+                    // seeing anything move.
+                    Step::Wait(1200),
+                    shift(Key::G),
+                ],
+            )
+        },
         scene(
             "images-placeholder",
             "image placeholders, naming the host before the click",

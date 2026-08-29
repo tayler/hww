@@ -660,29 +660,39 @@ pub fn carries_rtl(doc: &crate::ir::Document) -> bool {
     fn has_rtl(s: &str) -> bool {
         s.chars().any(|c| ('\u{0590}'..='\u{08FF}').contains(&c))
     }
+    /// The inline tree, scanned rather than flattened.
+    ///
+    /// This used to be `has_rtl(&ir::plain_text(inlines))`, which builds a `String` per run to
+    /// look at its characters and throw it away. The answer is the same and the walk is the
+    /// same; only the buffer is gone. An image's alt text and a `Break`'s newline are what
+    /// `plain_text` would have put in it, so the alt is scanned and the newline is not a
+    /// right-to-left character.
+    fn inlines_have_rtl(inlines: &[crate::ir::Inline]) -> bool {
+        use crate::ir::Inline;
+        inlines.iter().any(|i| match i {
+            Inline::Text(t) | Inline::Code(t) => has_rtl(t),
+            Inline::Emph(v) | Inline::Strong(v) => inlines_have_rtl(v),
+            Inline::Link { inlines, .. } => inlines_have_rtl(inlines),
+            Inline::Image(img) => img.alt.as_deref().is_some_and(has_rtl),
+            Inline::Break => false,
+        })
+    }
     fn blocks_have_rtl(blocks: &[crate::ir::Block]) -> bool {
         use crate::ir::Block;
         blocks.iter().any(|b| match b {
-            Block::Heading { inlines, .. } | Block::Paragraph(inlines) => {
-                has_rtl(&crate::ir::plain_text(inlines))
-            }
+            Block::Heading { inlines, .. } | Block::Paragraph(inlines) => inlines_have_rtl(inlines),
             Block::List { items, .. } => items.iter().any(|i| blocks_have_rtl(i)),
             Block::Quote { blocks, .. } => blocks_have_rtl(blocks),
             Block::Code { text, .. } => has_rtl(text),
-            Block::Figure { caption, .. } => caption
-                .as_deref()
-                .is_some_and(|c| has_rtl(&crate::ir::plain_text(c))),
+            Block::Figure { caption, .. } => caption.as_deref().is_some_and(inlines_have_rtl),
             Block::Table { headers, rows } => {
-                headers.iter().any(|c| has_rtl(&crate::ir::plain_text(c)))
-                    || rows
-                        .iter()
-                        .flatten()
-                        .any(|c| has_rtl(&crate::ir::plain_text(c)))
+                headers.iter().any(|c| inlines_have_rtl(c))
+                    || rows.iter().flatten().any(|c| inlines_have_rtl(c))
             }
             Block::Thread(cs) => cs.iter().any(|c| blocks_have_rtl(&c.blocks)),
             Block::Entries(es) => es
                 .iter()
-                .any(|e| has_rtl(&crate::ir::plain_text(&e.title)) || blocks_have_rtl(&e.summary)),
+                .any(|e| inlines_have_rtl(&e.title) || blocks_have_rtl(&e.summary)),
             Block::Rule | Block::Embed { .. } => false,
         })
     }
@@ -695,14 +705,21 @@ pub fn carries_rtl(doc: &crate::ir::Document) -> bool {
 /// choice is to say so. `U+0590..=U+08FF` is Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan,
 /// Mandaic, and Arabic Supplement/Extended-A: the RTL blocks in one span.
 pub fn rtl(doc: &crate::ir::Document) -> Option<Notice> {
-    carries_rtl(doc).then(|| {
-        Notice::new(
-            Severity::Caution,
-            "hww cannot lay out the right-to-left text on this page: a Hebrew or Arabic run \
-             is drawn in the wrong order, or as missing glyphs."
-                .to_owned(),
-        )
-    })
+    carries_rtl(doc).then(rtl_notice)
+}
+
+/// The remark [`rtl`] makes, for a caller that has already asked [`carries_rtl`].
+///
+/// The reader asks it once per page, at `ReaderApp::settle`, rather than once per frame: the
+/// walk allocates the plain text of every run it looks at and stops at the first right-to-left
+/// character, so the page that pays for all of it is the page that has none.
+pub fn rtl_notice() -> Notice {
+    Notice::new(
+        Severity::Caution,
+        "hww cannot lay out the right-to-left text on this page: a Hebrew or Arabic run \
+         is drawn in the wrong order, or as missing glyphs."
+            .to_owned(),
+    )
 }
 
 /// The screen a failed navigation gets.
@@ -1659,5 +1676,121 @@ mod tests {
             )]));
         let n = rtl(&d).expect("a caution");
         assert_eq!(n.severity, Severity::Caution);
+    }
+
+    /// The scan reaches everywhere the flatten it replaced did.
+    ///
+    /// [`carries_rtl`] used to build `ir::plain_text` per run and look at the characters in it.
+    /// It walks the tree directly now, and a place the walk forgets is a page that lays out
+    /// backwards with nothing said about it — so every variant that carries text is asserted,
+    /// including the image alt that `plain_text` folded in and the nesting that hides one.
+    #[test]
+    fn the_rtl_scan_reaches_every_place_text_hides() {
+        use crate::ir::{Block, Image, Inline};
+        let hebrew = || Inline::Text("שלום".to_owned());
+        let latin = || Inline::Text("plain".to_owned());
+        let cases: Vec<Block> = vec![
+            Block::Paragraph(vec![hebrew()]),
+            Block::Heading {
+                level: 2,
+                inlines: vec![hebrew()],
+            },
+            Block::Paragraph(vec![Inline::Emph(vec![Inline::Strong(vec![hebrew()])])]),
+            Block::Paragraph(vec![Inline::Link {
+                href: "https://example.test/".to_owned(),
+                inlines: vec![hebrew()],
+            }]),
+            Block::Paragraph(vec![Inline::Code("שלום".to_owned())]),
+            Block::Paragraph(vec![Inline::Image(Image {
+                src: "https://example.test/i.png".to_owned(),
+                alt: Some("שלום".to_owned()),
+            })]),
+            Block::Code {
+                lang: None,
+                text: "שלום".to_owned(),
+            },
+            Block::List {
+                ordered: false,
+                items: vec![vec![Block::Paragraph(vec![hebrew()])]],
+            },
+            Block::Quote {
+                blocks: vec![Block::Paragraph(vec![hebrew()])],
+                cite: None,
+            },
+            Block::Figure {
+                image: Image {
+                    src: "https://example.test/i.png".to_owned(),
+                    alt: None,
+                },
+                caption: Some(vec![hebrew()]),
+            },
+            Block::Table {
+                headers: vec![vec![hebrew()]],
+                rows: vec![],
+            },
+            Block::Table {
+                headers: vec![vec![latin()]],
+                rows: vec![vec![vec![hebrew()]]],
+            },
+            Block::Thread(vec![crate::ir::Comment {
+                author: None,
+                timestamp: None,
+                depth: 0,
+                id: None,
+                blocks: vec![Block::Paragraph(vec![hebrew()])],
+            }]),
+            Block::Entries(vec![crate::ir::Entry {
+                title: vec![hebrew()],
+                href: None,
+                published: None,
+                summary: vec![],
+                image: None,
+                address: None,
+                icon: None,
+            }]),
+            Block::Entries(vec![crate::ir::Entry {
+                title: vec![latin()],
+                href: None,
+                published: None,
+                summary: vec![Block::Paragraph(vec![hebrew()])],
+                image: None,
+                address: None,
+                icon: None,
+            }]),
+        ];
+        for block in cases {
+            let d = crate::ir::Document {
+                url: "https://example.test/".to_owned(),
+                title: None,
+                byline: None,
+                published: None,
+                site_name: None,
+                favicon: None,
+                lang: None,
+                blocks: vec![block.clone()],
+            };
+            assert!(carries_rtl(&d), "missed the right-to-left run in {block:?}");
+        }
+
+        // And says no when there is none to find, in the same shapes.
+        let d = crate::ir::Document {
+            url: "https://example.test/".to_owned(),
+            title: Some("A Latin title".to_owned()),
+            byline: None,
+            published: None,
+            site_name: None,
+            favicon: None,
+            lang: None,
+            blocks: vec![
+                Block::Paragraph(vec![Inline::Emph(vec![latin()])]),
+                Block::Rule,
+                Block::Embed {
+                    kind: crate::ir::EmbedKind::Video,
+                    url: "https://example.test/v".to_owned(),
+                },
+                Block::Paragraph(vec![Inline::Break]),
+            ],
+        };
+        assert!(!carries_rtl(&d));
     }
 }
