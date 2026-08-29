@@ -475,6 +475,48 @@ fn catalog(port: u16) -> Vec<Scene> {
             settle_ms: 400,
             volatile: true,
             ..scene(
+                "bookmarks-kept",
+                "the bookmarks opened a second time: every mark off the disk, no host asked",
+                // The one scene that photographs `reader::iconcache` doing its job, and the only
+                // way to do it: the store is filled by the first open and read by the second, in
+                // one process, so both halves have to be in one scene. A second open is not a
+                // repeat of the `bookmarks` scene — `ImageStore::clear_page` drops every texture
+                // and every counter when the page in between commits, so without the store on
+                // disk this would be two full rounds of requests to both hosts, which is the
+                // shape this whole feature exists to remove.
+                //
+                // Page info rather than the column, because the column looks identical either
+                // way — the bytes are the same bytes. What differs is the row: `Site icons — 2
+                // from disk, 0 fetched`, over no `Images loaded` row at all, because nothing was.
+                // A picture of the marks would pass with the store deleted.
+                //
+                // The page in between is deliberate and not a detour. It is what commits, and
+                // committing is what clears `icons_asked` and the textures; going straight from
+                // the list to the list would re-draw the same page and prove nothing.
+                //
+                // Volatile for the `bookmarks` scene's two reasons: an entry says the day it was
+                // kept, and the fixture server's port is ephemeral.
+                vec![
+                    Step::Nav(format!("http://127.0.0.1:{port}/marked-one")),
+                    Step::Wait(30),
+                    Step::Run(Command::BookmarkPage),
+                    Step::Nav(format!("http://127.0.0.1:{port}/marked-two")),
+                    Step::Wait(30),
+                    Step::Run(Command::BookmarkPage),
+                    Step::Run(Command::OpenBookmarks),
+                    Step::Wait(40),
+                    Step::Nav(format!("http://127.0.0.1:{port}/marked-one")),
+                    Step::Wait(30),
+                    Step::Run(Command::OpenBookmarks),
+                    Step::Wait(20),
+                    Step::Run(Command::TogglePageInfo),
+                ],
+            )
+        },
+        Scene {
+            settle_ms: 400,
+            volatile: true,
+            ..scene(
                 "reading-list",
                 "the reading list: links marked to read later, addresses under their words",
                 // Three real marks and a real open, through `ReaderApp::read_later` — the hook
@@ -1896,6 +1938,20 @@ fn main() -> ExitCode {
     // through `Command::BookmarkPage`, so a file left behind by the previous run would leave the
     // bookmarks scene showing a list that grows every time the catalog is run.
     let _ = std::fs::remove_file(scratch.join("archive.json"));
+    // And the marks kept for it, for the sharper version of the same reason. A run that started
+    // with yesterday's icons would draw a column without making the requests that fill it, so a
+    // scene could pass while the fetch it exists to photograph was broken. `iconcache::Cache`
+    // sweeps whatever the archive no longer names at launch and would take these anyway; doing
+    // it here says so, and covers the launch where the archive is not yet empty.
+    //
+    // **Scenes still share the store inside one run**, which they must: it is one process and
+    // one `ReaderApp`. So the `bookmarks` scene fills it and a later scene on the same fixture
+    // origin may draw its masthead mark from disk rather than from the server — visually the
+    // same picture, since the bytes are the same, but a different page-info row. Both scenes
+    // that photograph that panel over a fixture page are `volatile`, which is why this is a note
+    // and not a defect; a new scene that photographs page info over the fixture server has to
+    // read this paragraph first.
+    let _ = std::fs::remove_dir_all(scratch.join("icons"));
     // Safety: before any thread that reads the environment exists.
     unsafe { std::env::set_var("HWW_CONFIG_DIR", &scratch) };
 

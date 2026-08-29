@@ -48,9 +48,11 @@
 //! extractor caps its own recursion (`html::MAX_DEPTH`) instead of relying on this.
 
 use crate::fetch::FetchError;
+use crate::reader::iconcache;
 use crate::reader::image_decode::{self, DecodeLimits, Decoded};
 use crate::session::{LoadError, LoadOptions, Loaded, Rewrite, Session};
 use eframe::egui;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use url::Url;
@@ -115,13 +117,76 @@ pub enum Job {
         /// Queued by `ImagePolicy::Auto` rather than by a click, `i`, or `Shift+I`, and so
         /// discardable when the page it belongs to stops being current. See the module doc.
         automatic: bool,
+        /// Where these bytes may be kept, or `None` — which is every article picture, and every
+        /// site mark for an address hww's own lists do not name.
+        ///
+        /// **The decision is made on the UI thread and carried here, never taken here.** A
+        /// worker sees a `Job::Image` and cannot tell an article picture from a favicon, and it
+        /// cannot see the archive, so it cannot know whether an address is one a marked row
+        /// names. A worker that decided for itself would cache page content, and would write a
+        /// favicon for every host the masthead ever asked — a trail of everywhere the reader has
+        /// been, outliving *forget history*. See `reader::iconcache`.
+        cache_as: Option<PathBuf>,
+    },
+    /// A site mark read from `reader::iconcache` instead of from a host.
+    ///
+    /// Its own variant rather than a flag on [`Job::Image`], because it is the one image job
+    /// that contacts nobody: no URL, no referrer, no cookie count, no `Referer`, and nothing for
+    /// `ImageStore::record_request` to have recorded. It is on a worker at all only so the file
+    /// read and the decode stay off the frame.
+    KeptIcon {
+        req: ReqId,
+        page: ReqId,
+        /// What `ImageStore` keys this mark by, so the reply lands on the widget that asked.
+        src: String,
+        /// The address the file is for, and what its header has to name.
+        ///
+        /// Not always [`Job::KeptIcon::src`], which is the difference that makes it a second
+        /// field: a list row's `src` is already `archive::icon_address`'s output, while the
+        /// masthead's is whatever `html::favicon_of` joined against the page — credentials and
+        /// all. Checked in [`iconcache::read`], because the filename is a non-cryptographic
+        /// hash and this is what stops one site's mark being drawn beside another's name.
+        key: String,
+        path: PathBuf,
+        max_width: u32,
     },
 }
 
 impl Job {
     fn req(&self) -> ReqId {
         match self {
-            Job::Load { req, .. } | Job::Image { req, .. } => *req,
+            Job::Load { req, .. } | Job::Image { req, .. } | Job::KeptIcon { req, .. } => *req,
+        }
+    }
+
+    /// The page a job may be thrown away for, or `None` if it may not be.
+    ///
+    /// A picture the reader clicked, or `i`, or `Shift+I`, is a thing somebody asked for and is
+    /// fetched whatever page it belongs to; see the module doc. What is discardable is what
+    /// nobody asked for: the automatic policy's pictures, the site marks, and a mark being read
+    /// off the disk.
+    fn discardable_page(&self) -> Option<ReqId> {
+        match self {
+            Job::Image {
+                page,
+                automatic: true,
+                ..
+            }
+            | Job::KeptIcon { page, .. } => Some(*page),
+            _ => None,
+        }
+    }
+
+    /// The `src` of a job [`Job::discardable_page`] answered for, so the reply can name it.
+    fn discardable_src(&self) -> Option<String> {
+        match self {
+            Job::Image {
+                src,
+                automatic: true,
+                ..
+            }
+            | Job::KeptIcon { src, .. } => Some(src.clone()),
+            _ => None,
         }
     }
 
@@ -130,7 +195,7 @@ impl Job {
     fn page(&self) -> ReqId {
         match self {
             Job::Load { req, .. } => *req,
-            Job::Image { page, .. } => *page,
+            Job::Image { page, .. } | Job::KeptIcon { page, .. } => *page,
         }
     }
 }
@@ -160,6 +225,19 @@ pub enum Msg {
         /// the untrusted-input path most likely to fail.
         cookies: usize,
         result: Result<Decoded, ImageError>,
+        /// What the icon cache did for this reply. See [`Kept`].
+        kept: Kept,
+    },
+    /// A [`Job::KeptIcon`] whose file was not there, not readable, or not for this address.
+    ///
+    /// **Never a fetch from the worker.** Falling through to the network here would put a
+    /// third-party request on the wire that `ImageStore::record_request` never counted, because
+    /// the UI took the cache path precisely to avoid touching it — the panel would then name
+    /// hosts it had reported contacting nobody at. So the miss comes back, the UI drops the
+    /// index entry, and the ordinary door goes out and discloses it.
+    IconMissed {
+        page: ReqId,
+        src: String,
     },
     /// An image job that was still queued when its page stopped being the current one, and so
     /// was never dispatched.
@@ -177,6 +255,23 @@ pub enum Msg {
         req: ReqId,
         page: ReqId,
     },
+}
+
+/// What `reader::iconcache` did for one image reply.
+///
+/// One field on the reply rather than two messages, because both halves are things only the
+/// worker knows and both have to reach the UI's in-memory index: without [`Kept::Written`] that
+/// index would only ever describe the directory as it was at launch, and the second open of a
+/// list in one session would refetch every mark the first open had just written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    /// Nothing: an article picture, or a mark for an address hww's lists do not name.
+    No,
+    /// These bytes came off this machine. No host was contacted, so no counter moved.
+    Read,
+    /// These bytes were fetched and written, stamped at this second. An empty body was written
+    /// when the address answered and served nothing usable; see `iconcache`'s module doc.
+    Written(u64),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -294,18 +389,15 @@ fn spawn_worker(
                 // queued on a page that is no longer current is answered, not fetched. A
                 // picture somebody asked for is fetched whatever page it belongs to. See the
                 // module doc for why those differ.
-                if let Job::Image {
-                    page,
-                    src,
-                    automatic: true,
-                    ..
-                } = &job
+                // A kept icon joins the automatic ones: nobody asked for it either, and a
+                // read for a page the reader has left is a texture uploaded for a document that
+                // is not on screen. `Msg::ImageDropped` is the right answer for both — nothing
+                // was requested and nothing was disclosed, which is true of a disk read twice
+                // over.
+                if let (Some(page), Some(src)) = (job.discardable_page(), job.discardable_src())
                     && page.raw() != respawn.page.load(Ordering::Relaxed)
                 {
-                    let _ = respawn.msg_tx.send(Msg::ImageDropped {
-                        page: *page,
-                        src: src.clone(),
-                    });
+                    let _ = respawn.msg_tx.send(Msg::ImageDropped { page, src });
                     respawn.ctx.request_repaint();
                     continue;
                 }
@@ -465,18 +557,111 @@ fn run_job(session: &Session, job: Job, tx: &mpsc::Sender<Msg>, ctx: &egui::Cont
             max_width,
             send_referer,
             automatic: _,
+            cache_as,
         } => {
-            let (cookies, result) = load_image(session, &url, &referrer, max_width, send_referer);
+            let keep = cache_as.as_deref().map(|path| Keep { path, src: &src });
+            let (cookies, result, kept) =
+                load_image(session, &url, &referrer, max_width, send_referer, keep);
             let _ = tx.send(Msg::Image {
                 req,
                 page,
                 src,
                 cookies,
                 result,
+                kept,
             });
+        }
+        Job::KeptIcon {
+            req,
+            page,
+            src,
+            key,
+            path,
+            max_width,
+        } => {
+            let msg = match read_kept_icon(&path, &key, max_width) {
+                Some(result) => Msg::Image {
+                    req,
+                    page,
+                    src,
+                    // A file on this machine set no cookie and answered no request.
+                    cookies: 0,
+                    result,
+                    kept: Kept::Read,
+                },
+                None => Msg::IconMissed { page, src },
+            };
+            let _ = tx.send(msg);
         }
     }
     ctx.request_repaint();
+}
+
+/// Decode the bytes kept for `src`, or `None` when this file is not them.
+///
+/// `None` covers the file having been deleted, truncated, or written for another address between
+/// the UI consulting its index and this worker opening it — and an empty body, which records that
+/// the address served nothing and is a state the UI answers without ever queuing a job. All three
+/// are the same instruction to the caller: the index is wrong, go and ask properly.
+fn read_kept_icon(
+    path: &std::path::Path,
+    src: &str,
+    max_width: u32,
+) -> Option<Result<Decoded, ImageError>> {
+    let bytes = iconcache::read(path, src)?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let _serialized = DECODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let limits = DecodeLimits {
+        max_width,
+        ..DecodeLimits::default()
+    };
+    // The same decoder the fetch path uses, on the same untrusted bytes. A store is not a
+    // source of trust: these bytes came off a disk a reader can write to, and the last program
+    // to write them was a network fetch.
+    Some(
+        image_decode::decode(&bytes, &crate::fetch::Truncation::Complete, &limits)
+            .map_err(ImageError::from),
+    )
+}
+
+/// Permission to keep one fetched mark, and where.
+///
+/// Carried into [`load_image`] rather than applied to its result, because the bytes worth keeping
+/// are the ones that were fetched and `Decoded` does not hold them: it holds pixels, already
+/// scaled to sixty-four across. Keeping those instead would be a second, unaudited decode path
+/// on the way back out, which `reader::image_decode`'s whole placement exists to prevent.
+struct Keep<'a> {
+    path: &'a std::path::Path,
+    src: &'a str,
+}
+
+/// Keep what came back, and say when. A failure to write is silent: the mark still draws.
+///
+/// Two things are worth keeping. The obvious one is the bytes. The other is a **refusal**: an
+/// address that answered and served nothing usable is the ordinary case on the reading list,
+/// where the mark is `archive::well_known_icon`'s guess rather than anything a page declared,
+/// and without a record of it every open of that list re-asks every one of those hosts. Recorded
+/// as an empty body with its own shorter expiry.
+///
+/// Only a refusal that is *about the address*. A timeout, a reset, a 429 or a 5xx are about the
+/// attempt, and writing those down would turn one bad minute into a week of a blank column —
+/// which is the question `ImageError::offers_retry` already answers for the reader's own retry
+/// control, asked here for the store instead.
+fn keep_icon(keep: Keep<'_>, fetched: &[u8], result: &Result<Decoded, ImageError>) -> Kept {
+    let at = iconcache::now();
+    let wrote = match result {
+        // The bytes as they arrived, never an error body: this arm is the one that decoded.
+        Ok(_) => iconcache::write(keep.path, keep.src, at, fetched),
+        Err(e) if !e.offers_retry() => iconcache::write(keep.path, keep.src, at, b""),
+        Err(_) => return Kept::No,
+    };
+    if wrote.is_ok() {
+        Kept::Written(at)
+    } else {
+        Kept::No
+    }
 }
 
 /// Returns the cookie attempts alongside the result rather than inside it.
@@ -490,30 +675,173 @@ fn load_image(
     referrer: &Url,
     max_width: u32,
     send_referer: bool,
-) -> (usize, Result<Decoded, ImageError>) {
+    keep: Option<Keep<'_>>,
+) -> (usize, Result<Decoded, ImageError>, Kept) {
     let fetched = match session.fetch_image(url, referrer, send_referer) {
+        // Nothing arrived, so there is nothing to write down — not even a refusal. See
+        // [`keep_icon`] for why an attempt that failed is not an answer about the address.
+        Err(e) => return (0, Err(e.into()), Kept::No),
         Ok(f) => f,
-        Err(e) => return (0, Err(e.into())),
     };
     let cookies = fetched.cookie_attempts;
-    // Before the decoder, and before the lock it would queue behind. An error body is not a
-    // picture in any format, so letting it through would spend a decode slot to arrive at
-    // `UnknownFormat` — the one classification that promises a retry is worth pressing.
-    if !(200..300).contains(&fetched.status) {
-        return (cookies, Err(ImageError::Status(fetched.status)));
-    }
-    let _serialized = DECODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let limits = DecodeLimits {
-        max_width,
-        ..DecodeLimits::default()
+    let result = if !(200..300).contains(&fetched.status) {
+        // Before the decoder, and before the lock it would queue behind. An error body is not a
+        // picture in any format, so letting it through would spend a decode slot to arrive at
+        // `UnknownFormat` — the one classification that promises a retry is worth pressing.
+        Err(ImageError::Status(fetched.status))
+    } else {
+        let _serialized = DECODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let limits = DecodeLimits {
+            max_width,
+            ..DecodeLimits::default()
+        };
+        image_decode::decode(&fetched.bytes, &fetched.partial, &limits).map_err(ImageError::from)
     };
-    let decoded = image_decode::decode(&fetched.bytes, &fetched.partial, &limits);
-    (cookies, decoded.map_err(ImageError::from))
+    // After the decode rather than beside the fetch, so nothing is kept that could not be drawn:
+    // a body that arrives with a 200 and is not an image in any format hww reads is not worth a
+    // file, and a reader who opens the store later should find pictures in it.
+    let kept = keep.map_or(Kept::No, |k| keep_icon(k, &fetched.bytes, &result));
+    (cookies, result, kept)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real PNG, so the store's round trip goes through the real decoder.
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255])
+        });
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("a PNG encodes");
+        buf
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hww-net-{}-{name}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const MARK: &str = "https://kept.example/mark.png";
+
+    /// The worker half of the read: bytes on this machine become a texture, and anything that is
+    /// not those bytes becomes a miss rather than a fetch.
+    ///
+    /// The miss is the half that matters. A worker that fell through to the network here would
+    /// put a third-party request on the wire that `ImageStore::record_request` never counted,
+    /// because the UI took this path precisely to avoid touching it — the panel would then be
+    /// naming no host for a request that went out. `Msg::IconMissed` exists for that, and this is
+    /// the function that has to answer `None` for it to be sent.
+    #[test]
+    fn a_kept_mark_decodes_and_anything_else_is_a_miss() {
+        let dir = scratch("read");
+        let path = dir.join("mark.icon");
+        iconcache::write(&path, MARK, iconcache::now(), &png(32, 32)).unwrap();
+
+        let decoded = read_kept_icon(&path, MARK, 64)
+            .expect("the file is there")
+            .expect("and it decodes");
+        assert_eq!((decoded.source_width, decoded.source_height), (32, 32));
+
+        // Written for another address: the filename is a non-cryptographic hash, so this is what
+        // stops one site's mark being drawn beside another's name.
+        assert!(read_kept_icon(&path, "https://other.example/mark.png", 64).is_none());
+        // The refusal record. The UI answers this from its own index and never queues a job for
+        // it, so reaching here means the index is stale — which is a miss like any other.
+        iconcache::write(&path, MARK, iconcache::now(), b"").unwrap();
+        assert!(read_kept_icon(&path, MARK, 64).is_none());
+        // And gone entirely, which is the race the whole message exists for.
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_kept_icon(&path, MARK, 64).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What may be written down, and — sharply — what may not.
+    ///
+    /// A refusal that is about the *address* is worth keeping: it is the ordinary answer on the
+    /// reading list, where the mark is a guess, and without it every open re-asks every one of
+    /// those hosts. A failure that is about the *attempt* is not: writing a timeout down would
+    /// turn one bad minute into a week of blank column, and `ImageError::offers_retry` is
+    /// already the program's answer to that question for the reader's own retry control.
+    #[test]
+    fn only_a_refusal_about_the_address_is_written_down() {
+        let dir = scratch("write");
+        let bytes = png(16, 16);
+        let decoded = image_decode::decode(
+            &bytes,
+            &crate::fetch::Truncation::Complete,
+            &DecodeLimits::default(),
+        )
+        .unwrap();
+
+        let kept = dir.join("kept.icon");
+        assert!(matches!(
+            keep_icon(
+                Keep {
+                    path: &kept,
+                    src: MARK
+                },
+                &bytes,
+                &Ok(decoded)
+            ),
+            Kept::Written(_)
+        ));
+        assert_eq!(
+            iconcache::read(&kept, MARK).as_deref(),
+            Some(&bytes[..]),
+            "the bytes as fetched, not the pixels"
+        );
+
+        // A 404 is about the address, and is kept as an empty body.
+        let missing = dir.join("missing.icon");
+        assert!(matches!(
+            keep_icon(
+                Keep {
+                    path: &missing,
+                    src: MARK
+                },
+                b"<html>not found</html>",
+                &Err(ImageError::Status(404))
+            ),
+            Kept::Written(_)
+        ));
+        assert_eq!(
+            iconcache::read(&missing, MARK).as_deref(),
+            Some(&b""[..]),
+            "the error body is never what is kept"
+        );
+
+        // A 503 and a timeout are about the attempt, and are not kept at all.
+        for transient in [
+            ImageError::Status(503),
+            ImageError::Status(429),
+            ImageError::Fetch(FetchError::Timeout(std::time::Duration::from_secs(30))),
+        ] {
+            let path = dir.join("transient.icon");
+            assert_eq!(
+                keep_icon(
+                    Keep {
+                        path: &path,
+                        src: MARK
+                    },
+                    b"",
+                    &Err(transient)
+                ),
+                Kept::No
+            );
+            assert!(!path.exists(), "nothing was written");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The reader draws its retry control on this, so an arm that answers wrongly is a button
     /// that re-issues a third-party request and re-fails for as long as the page is open.

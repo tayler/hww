@@ -33,6 +33,11 @@ pub mod desktop;
 /// Which face an inline style is set in. No egui types, so the fast CI job tests it.
 pub mod face;
 pub mod history;
+/// Site-icon bytes on disk, for addresses the archive already names. No egui types and no
+/// network, so the fast CI job tests it. Read `archive`'s doctrine and then this module's own
+/// before writing anything else to disk: this is the one exception to the rule that nothing hww
+/// fetches is kept, and it argues for itself there.
+pub mod iconcache;
 pub mod inline;
 /// How tall each block of the page was last time it was laid out, so a page longer than the
 /// window costs a window's worth of layout. No egui types, so the fast CI job tests it.

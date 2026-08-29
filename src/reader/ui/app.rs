@@ -43,12 +43,13 @@ use crate::reader::archive::{self, Archive, Stored, Visited};
 use crate::reader::autoload;
 use crate::reader::desktop;
 use crate::reader::history::{EntryId, History};
+use crate::reader::iconcache;
 use crate::reader::image_decode;
 use crate::reader::measure::{self, Heights};
 use crate::reader::menu::{self, Command};
 use crate::reader::notice::{
     self, Button, IMAGES_ALL_FAILED, IMAGES_ARE_DECLINED, IMAGES_ARE_DECLINED_OR_FAILED,
-    IMAGES_ARE_OFF, Notice,
+    IMAGES_ARE_OFF, NO_SITE_ICON, Notice,
 };
 use crate::reader::outline::{self, OutlineEntry};
 use crate::reader::pagecache::{PageCache, stash_under};
@@ -57,16 +58,41 @@ use crate::reader::prefs;
 use crate::reader::settings::{self, Settings};
 use crate::reader::thread_tree::CommentKey;
 use crate::reader::title;
-use crate::reader::ui::images::{Failure, ImageStore};
+use crate::reader::ui::images::{Failure, ImageStore, Source};
 use crate::reader::ui::{
     Action, Launch, RenderCtx, blocks, fonts, menu_ui, net, notice_ui, pageinfo_ui, prefs_ui, theme,
 };
 use crate::session::{self, LoadError, LoadOptions, Loaded, Rewrite, Target};
 use eframe::egui::{self, Align, Key, Layout, Modifiers, RichText, Ui};
-use net::{Job, Msg, Net, ReqId};
+use net::{Job, Kept, Msg, Net, ReqId};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use url::Url;
+
+/// The width every site mark is decoded to, in physical pixels.
+///
+/// One number, so the masthead's mark, a list row's, and one read back out of
+/// `reader::iconcache` cannot drift apart — a stored icon decoded at another size would be a
+/// second, subtly different picture for the same address.
+const ICON_PX: u32 = 64;
+
+/// What one image request is, to the store on disk.
+///
+/// Three answers and not a bool, because "may be drawn from the store" and "may be written to
+/// the store" are different permissions and the middle case is the one that matters:
+/// `ReaderApp::ensure_favicon` fires on every page hww shows and so may only ever read, while
+/// `ReaderApp::load_site_icons` is handed addresses a marked list still names and so may write.
+/// A bool would have collapsed those two into whichever answer was written first, and the
+/// collapse in the permissive direction is a favicon on disk for every host the reader visited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// Not a mark: an article picture, which never touches the store in either direction.
+    No,
+    /// A mark that may be drawn from the store and never written to it.
+    Read,
+    /// A mark for a row of a marked list: drawn from the store, and written to it.
+    Kept,
+}
 
 const URL_BAR_ID: &str = "hww-url-bar";
 const FIND_ID: &str = "hww-find";
@@ -358,6 +384,13 @@ pub struct ReaderApp {
     /// sentence describes: an attempt spent on the page going away must not count against the
     /// page arriving.
     icons_asked: HashSet<String>,
+    /// The site marks kept on this machine, and where each one's bytes are.
+    ///
+    /// Consulted before anything is recorded, which is the disclosure and not an optimisation:
+    /// `ImageStore::record_request` moves the host tally and the Referer count ahead of the
+    /// request leaving, so a mark that is already here must take a path that never reaches it.
+    /// See `reader::iconcache` for what may go in and why it is allowed at all.
+    icons: iconcache::Cache,
     /// How tall each block was the last time it was laid out, so the blocks off the window can
     /// be skipped. See `reader::measure` for why, and `ready_screen` for when it is ignored.
     heights: Heights,
@@ -599,6 +632,7 @@ impl ReaderApp {
         // settings' in the status strip rather than replacing it: two files failed to parse is
         // two things the reader is owed.
         let (archive, archive_note) = archive::load();
+        let archive_icons: Vec<String> = archive.marked_icons().collect();
         let opening_note = {
             let both: Vec<String> = [launch.settings_note, archive_note]
                 .into_iter()
@@ -630,6 +664,13 @@ impl ReaderApp {
             image_blocks_budget: 0,
             auto_attempts: HashMap::new(),
             icons_asked: HashSet::new(),
+            // Handed the addresses the two marked lists name, so the sweep it does on the way
+            // in deletes anything else it finds. That is what keeps an entry for a host nobody
+            // marked from surviving a launch, whatever wrote it.
+            icons: iconcache::Cache::open(
+                archive::icons_path(),
+                &archive_icons.iter().cloned().collect(),
+            ),
             heights: Heights::default(),
             collapsed: HashSet::new(),
             collapsed_changes: 0,
@@ -861,6 +902,11 @@ impl ReaderApp {
         // http(s) address; see `archive::icon_to_store`.
         let icon = page.loaded.doc.favicon.clone();
         if self.archive.forget(&url) {
+            // Before the write and whatever it answers: the row is gone from the store either
+            // way, and a mark kept for a page hww has stopped remembering is a file with no
+            // reason to exist. Another row may still name the same address, which is why this
+            // asks the archive rather than deleting one file.
+            self.prune_icons();
             if self.save_archive() {
                 self.flash(notice::FORGOTTEN.to_owned());
             }
@@ -937,6 +983,7 @@ impl ReaderApp {
         // Off before on, as `bookmark_page` does: the removal half runs whatever the switch says, so
         // turning the reading list off can never be a way to trap what is already on it.
         if self.archive.forget_next(&url) {
+            self.prune_icons();
             if self.save_archive() {
                 self.flash(notice::READ_LATER_REMOVED.to_owned());
             }
@@ -1035,6 +1082,7 @@ impl ReaderApp {
         // Asked before the forget, which is what lifts the seal; see the bookmarks' arm.
         let replaced = self.archive.refuses_to_be_written();
         let n = self.archive.forget_all_next();
+        self.prune_icons();
         if self.save_archive() {
             self.flash(if replaced {
                 notice::UNREADABLE_FILE_REPLACED.to_owned()
@@ -1043,6 +1091,24 @@ impl ReaderApp {
             });
         }
         self.rebuild_builtin_view();
+    }
+
+    /// Drop every kept site mark no marked row still names.
+    ///
+    /// Called wherever a marked address goes: un-bookmarking with the bookmark key, either
+    /// forget button for the two chosen lists, and the reading list's own per-row `remove`.
+    /// Those four are not the only ways an entry becomes an orphan — re-bookmarking a page whose
+    /// `<link rel=icon>` changed leaves the old one, and a hand-edited `archive.json` orphans
+    /// whatever it likes — which is why `iconcache::Cache::open` sweeps the directory at every
+    /// launch as well. This is the immediate half, so a reader who forgets a page does not have
+    /// to relaunch before its mark is gone from the disk.
+    ///
+    /// By "no marked row still names this address" and never per tenant, because one icon serves
+    /// rows on both lists: the same site can be bookmarked and queued to read again, and asking
+    /// which of the two a file belongs to is a question with no answer.
+    fn prune_icons(&mut self) {
+        let keep = self.archive.marked_icons().collect();
+        self.icons.prune(&keep);
     }
 
     /// Write the bookmarks now, and say so if it could not be written.
@@ -1376,7 +1442,7 @@ impl ReaderApp {
             self.flash(IMAGES_ARE_OFF.to_owned());
             return;
         }
-        self.request_image(src, self.column_texture_width(ctx), true, false);
+        self.request_image(src, self.column_texture_width(ctx), true, false, Mark::No);
     }
 
     /// The width every article image is decoded to: the reading column, in physical pixels.
@@ -1423,60 +1489,123 @@ impl ReaderApp {
             // already in flight, and an entry that never resolves must not be planned again on
             // the next frame. `Msg::ImageDropped` is the one thing that takes a count back.
             *self.auto_attempts.entry(src.clone()).or_default() += 1;
-            self.request_image(&src, max_width, false, true);
+            self.request_image(&src, max_width, false, true, Mark::No);
         }
-    }
-
-    /// The masthead favicon: same path as an article image, but quiet and small. Kicked from
-    /// [`Self::ensure_favicon`] once a page is on screen; a toast would fire on every
-    /// navigation, and a column-width decode is wasted on a 16-px mark.
-    fn load_favicon(&mut self, src: &str) {
-        self.load_favicon_job(src, false);
     }
 
     /// The one place an icon's request size is chosen, so the masthead's mark and a bookmarks list
     /// row's are decoded to the same 64 px and cannot drift apart.
-    fn load_favicon_job(&mut self, src: &str, automatic: bool) {
-        self.request_image(src, 64, false, automatic);
+    fn load_favicon_job(&mut self, src: &str, automatic: bool, mark: Mark) {
+        self.request_image(src, ICON_PX, false, automatic, mark);
     }
 
-    /// Start the favicon fetch for the page on screen, once. Failures stay silent: the eyebrow
-    /// label does not need a retry control for a missing mark.
+    /// Draw a mark from `reader::iconcache` if it is there, and say whether that settled it.
     ///
-    /// This is the one image request the reader makes without being asked, which is why it is
-    /// the one `ImagePolicy::NoRequests` exists to stop. `Never` deliberately does not: it turns
-    /// off *article* images, and it meant that before the third policy arrived. A reader who
-    /// wants nothing contacted now has a way to say so, and until this guard was here there was
-    /// no such way at all — the mark went out on every page whatever the setting said.
-    fn ensure_favicon(&mut self) {
-        if !self.settings.read.images.allows_any_request() {
-            return;
+    /// **The one place a request is decided against before a request is recorded.** It has to be
+    /// synchronous, and that is not an optimisation: `ImageStore::record_request` moves the host
+    /// tally and the Referer count ahead of the bytes leaving, so a mark already on this machine
+    /// has to take a path that never reaches it. A cached mark counted there would have page
+    /// info naming hosts nobody was contacted at, which is precisely the bug the `Referer sent`
+    /// row was carrying when it counted the reader's setting instead of what
+    /// `fetch::page_origin` would actually send.
+    ///
+    /// Answers under **every** policy, `ImagePolicy::NoRequests` included. Nothing here contacts
+    /// anybody, so nothing here breaks that promise — and it strengthens it, because until this
+    /// existed the reader who asked for no requests got a permanently empty column and no way to
+    /// have one that was not.
+    ///
+    /// `Known::Nothing` settles it too, and is why this returns a bool rather than an
+    /// `Option<Job>`: an address hww has already asked and found empty must not be asked again
+    /// for the rest of the week, and a permanent `Failure` is how the rest of this file already
+    /// says "do not re-request this". The words never reach a reader — neither `images::favicon`
+    /// nor `images::site_icon` draws anything but a ready texture — which is `notice`'s problem
+    /// and not this door's.
+    fn kept_mark(&mut self, src: &str) -> bool {
+        if self.icons.is_empty() {
+            return false;
         }
+        let Some(page_req) = self.shown().map(|r| r.req) else {
+            return false;
+        };
+        // Through the archive's own door, so a key can never be built from an address that
+        // skipped the scheme test or kept its credentials. A list row's `src` is already this
+        // string; the masthead's is whatever `html::favicon_of` joined, and normalising here is
+        // what lets a bookmarked page draw its own mark off the disk.
+        let Some(key) = archive::icon_address(src) else {
+            return false;
+        };
+        match self.icons.known(&key) {
+            iconcache::Known::Kept(path) => {
+                self.images.begin(src, Source::Disk);
+                self.net.submit(Job::KeptIcon {
+                    req: self.net.mint(),
+                    page: page_req,
+                    src: src.to_owned(),
+                    key,
+                    path,
+                    max_width: ICON_PX,
+                });
+                true
+            }
+            iconcache::Known::Nothing => {
+                self.images
+                    .fail(src, Failure::permanent(NO_SITE_ICON.to_owned()));
+                true
+            }
+            iconcache::Known::Unknown => false,
+        }
+    }
+
+    /// Put the mark of the page on screen beside its eyebrow, once.
+    ///
+    /// Two doors in one, in this order and not the other: the store first, under every policy,
+    /// and the network second, under `allows_any_request` alone. Failures stay silent either
+    /// way; the eyebrow label does not need a retry control for a missing mark.
+    ///
+    /// The fetch is the one image request the reader makes without being asked, which is why it
+    /// is the one `ImagePolicy::NoRequests` exists to stop. `Never` deliberately does not: it
+    /// turns off *article* images, and it meant that before the third policy arrived.
+    ///
+    /// **Reads, and never writes** ([`Mark::Read`]). This fires on every page hww shows, marked
+    /// or not, so a write here would put a favicon on disk for every host the reader has visited
+    /// — a record that outlives *forget history*, exists with `keep_history` off, and has no
+    /// switch over it. What it may still do is draw a bookmarked site's own mark from the file
+    /// the bookmarks list already wrote. See `reader::iconcache`.
+    fn ensure_favicon(&mut self) {
         let Some(src) = self.shown().and_then(|r| r.loaded.doc.favicon.clone()) else {
             return;
         };
-        if self.images.state(&src).is_some() {
+        if self.images.state(&src).is_some() || self.kept_mark(&src) {
             return;
         }
-        self.load_favicon(&src);
+        if !self.settings.read.images.allows_any_request() {
+            return;
+        }
+        self.load_favicon_job(&src, false, Mark::Read);
     }
 
-    /// Fetch the site marks the bookmarks just drew, for the rows near the window.
+    /// Draw the site marks a marked list just laid out, for the rows near the window.
     ///
     /// The fifth door onto [`Self::request_image`], and the second one the reader did not push:
-    /// `ensure_favicon` fetches the mark of the page on screen and this fetches the mark of each
-    /// page a row on it points at. Same policy, answered here in the door's own name, and the
-    /// same silence on failure — a column with a gap in it is what a site that serves no icon
-    /// looks like, and there is nothing for the reader to retry.
+    /// `ensure_favicon` handles the mark of the page on screen and this handles the mark of each
+    /// page a row on it points at. Same silence on failure — a column with a gap in it is what a
+    /// site that serves no icon looks like, and there is nothing for the reader to retry.
+    ///
+    /// **Two doors, asked in that order.** The store answers under every policy, because a read
+    /// contacts nobody; the network answers under `allows_any_request` alone, in this door's own
+    /// name as before. So `ImagePolicy::NoRequests` on a list whose marks are already kept draws
+    /// a full column and makes no request, which is the shape that policy always wanted.
+    ///
+    /// **Rows here are the only marks written down** ([`Mark::Kept`]), and that is the whole of
+    /// the doctrine's *write* half: every `src` reaching this function came from
+    /// `archive::mark_beside`, so every one of them is an address a bookmark or a reading-list
+    /// row still names. `ensure_favicon` fires on every page instead, so it may only read.
     ///
     /// `srcs` is already bounded to the layout band by `RenderCtx::note_icon`, which is what
     /// makes this a screenful of requests on a two-thousand-row bookmarks rather than two
     /// thousand. `automatic: true`, so a worker that reaches a queued mark after the reader has
     /// navigated away drops it instead of contacting a host for a page nobody is looking at.
     fn load_site_icons(&mut self, srcs: &[String]) {
-        if !self.settings.read.images.allows_any_request() {
-            return;
-        }
         // The same guard `autoload` carries, for the same reason and against a sharper failure.
         // While a navigation is in flight the pool answers an automatic job for the outgoing
         // page with `Msg::ImageDropped`, and the handler hands the `src` back by forgetting its
@@ -1486,7 +1615,30 @@ impl ReaderApp {
         if self.current != self.shown().map(|r| r.req) {
             return;
         }
+        let may_fetch = self.settings.read.images.allows_any_request();
         for src in srcs {
+            // Asked once per page, and this is the line that stops the LRU from becoming a
+            // request loop: an in-band mark evicted by a later one drops back to no state at
+            // all, `note_icon` records it again, and without this record hww would re-fetch it
+            // from a third-party host for as long as the bookmarks is on screen. A disk cache
+            // makes that refetch cheap and not free, so the guard stays.
+            if self.icons_asked.contains(src) {
+                continue;
+            }
+            // Ahead of the throttle, deliberately: `MAX_OUTSTANDING` bounds how many *hosts* may
+            // be mid-request at once, and reading a file on this machine contacts none of them.
+            // Counting these against it drew a thirty-row band eight rows to a frame, waiting on
+            // a ceiling that was never about them.
+            if self.kept_mark(src) {
+                self.icons_asked.insert(src.clone());
+                continue;
+            }
+            if !may_fetch {
+                // Not recorded as asked: nothing was, and a reader who turns the policy back on
+                // while the list is open should see the column fill in rather than have to
+                // reload for it.
+                continue;
+            }
             // Bounded like the automatic policy's, and by the same constant: the band is three
             // window-heights of rows, so a tall window on a long bookmarks would otherwise open
             // thirty connections in one frame. What is left over is recorded again next frame,
@@ -1494,18 +1646,19 @@ impl ReaderApp {
             if self.images.pending() >= autoload::MAX_OUTSTANDING {
                 break;
             }
-            // Asked once per page, and this is the line that stops the LRU from becoming a
-            // request loop: an in-band mark evicted by a later one drops back to no state at
-            // all, `note_icon` records it again, and without this record hww would re-fetch it
-            // from a third-party host for as long as the bookmarks is on screen.
-            if !self.icons_asked.insert(src.clone()) {
-                continue;
-            }
-            self.load_favicon_job(src, true);
+            self.icons_asked.insert(src.clone());
+            self.load_favicon_job(src, true, Mark::Kept);
         }
     }
 
-    fn request_image(&mut self, src: &str, max_width: u32, announce: bool, automatic: bool) {
+    fn request_image(
+        &mut self,
+        src: &str,
+        max_width: u32,
+        announce: bool,
+        automatic: bool,
+        mark: Mark,
+    ) {
         // The visible page, and *its* request id rather than `self.current`: see `Ready::req`.
         let Some(ready) = self.shown() else {
             return;
@@ -1542,7 +1695,13 @@ impl ReaderApp {
             return;
         }
         let host = url.host_str().unwrap_or("?").to_owned();
-        self.images.begin(src);
+        // Where these bytes may be kept, decided here and carried to the worker. A worker sees
+        // one kind of image job and cannot see the archive, so it can neither tell a mark from a
+        // picture nor tell a marked address from a merely visited one. See `reader::iconcache`.
+        let cache_as = (mark == Mark::Kept)
+            .then(|| archive::icon_address(src).and_then(|k| self.icons.place_for(&k)))
+            .flatten();
+        self.images.begin(src, Source::Network);
         // Recorded here, where the host is known and where the reader is told it, and taken
         // back by `ImageStore::forget` if the pool answers `Msg::ImageDropped` for it. A
         // counter moved for a request that never left is the panel claiming a disclosure that
@@ -1552,7 +1711,8 @@ impl ReaderApp {
         // an opaque origin, so the bookmarks' site marks carry no Referer however the setting is
         // set, and a panel that counted the setting would report a disclosure that never left.
         let referer = self.settings.send_image_referer && fetch::page_origin(&base).is_some();
-        self.images.record_request(src, &host, referer);
+        self.images
+            .record_request(src, &host, referer, mark != Mark::No);
         // Decode straight to the reading column: without this, "load images" on a photo-heavy
         // page is a GPU-memory denial of service driven by untrusted input.
         self.net.submit(Job::Image {
@@ -1564,6 +1724,7 @@ impl ReaderApp {
             max_width,
             send_referer: self.settings.send_image_referer,
             automatic,
+            cache_as,
         });
         if announce {
             self.flash(format!("loading one image from {host}"));
@@ -1687,8 +1848,19 @@ impl ReaderApp {
                     src,
                     cookies,
                     result,
+                    kept,
                     ..
                 } => {
+                    // Before the staleness test, and the only thing here that is: a file was
+                    // written on this machine whether or not the reader is still looking at the
+                    // page that asked for it, and an index that did not learn about it would
+                    // have the second open of a list in one session refetch every mark the
+                    // first open had just kept.
+                    if let Kept::Written(at) = kept
+                        && let Some(key) = archive::icon_address(&src)
+                    {
+                        self.icons.note(&key, at, result.is_err());
+                    }
                     // Against the page the request was made *from*, not the navigation in
                     // flight: see `Ready::req`. A picture whose page has been replaced is
                     // dropped, which is the whole reason the id is stamped there.
@@ -1699,7 +1871,7 @@ impl ReaderApp {
                     // a thing that happened whether or not the picture ever decoded.
                     self.images.cookie_attempts += cookies;
                     match result {
-                        Ok(decoded) => self.images.insert(ctx, &src, decoded),
+                        Ok(decoded) => self.images.insert(ctx, &src, decoded, kept == Kept::Read),
                         Err(e) => {
                             let why = e.to_string();
                             self.images.fail(
@@ -1731,6 +1903,25 @@ impl ReaderApp {
                     // arm is the navigation that failed and put the reader back where they
                     // were, and the bookmarks they are still looking at should draw its column.
                     self.auto_attempts.remove(&src);
+                    self.icons_asked.remove(&src);
+                }
+                Msg::IconMissed { page, src } => {
+                    // The index said this mark was on the disk and the worker found it gone,
+                    // unreadable, or written for another address. Dropped from the index here,
+                    // *before* anything else, so the retry below cannot come back to the same
+                    // wrong answer and ping-pong at frame rate.
+                    if let Some(key) = archive::icon_address(&src) {
+                        self.icons.forget(&key);
+                    }
+                    if self.shown().map(|r| r.req) != Some(page) {
+                        continue;
+                    }
+                    // Handed back exactly as a dropped job is: nothing was requested and nothing
+                    // was disclosed, so the mark goes back to having no state and `note_icon`
+                    // records it again next frame. What it reaches then is the ordinary door,
+                    // which asks the policy and records the request — which is the whole reason
+                    // a worker answers a miss instead of fetching one itself.
+                    self.images.forget(&src);
                     self.icons_asked.remove(&src);
                 }
                 Msg::Panicked { req, page } => {
@@ -2726,6 +2917,7 @@ impl ReaderApp {
                     // read the file, so "already empty" is what it saw and not what happened.
                     let replaced = self.archive.refuses_to_be_written();
                     let n = self.archive.forget_all();
+                    self.prune_icons();
                     if self.save_archive() {
                         self.flash(if replaced {
                             notice::UNREADABLE_FILE_REPLACED.to_owned()

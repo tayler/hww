@@ -146,7 +146,7 @@ pub struct RenderCtx<'a> {
     /// blocks touch the band" answers *the whole page* for exactly the two shapes that carry
     /// the most pictures — which is the bound `reader::autoload` exists to keep.
     pub autoload_srcs: Vec<String>,
-    /// Where a list row's site mark may be fetched from, set on every page whatever the policy.
+    /// Where a list row's site mark may be drawn from, set on every page whatever the policy.
     ///
     /// A second band rather than [`RenderCtx::autoload_band`], because the two answer different
     /// questions: that one is `None` unless the reader chose `ImagePolicy::Auto`, and a site
@@ -224,15 +224,19 @@ impl RenderCtx<'_> {
 
     /// Record a site mark about to be drawn at `y` that hww does not have yet.
     ///
-    /// The policy is asked here, in the recorder, as well as at `ReaderApp::load_site_icons`,
-    /// which is the door: a reader who set `NoRequests` should not have a list of hosts built
-    /// every frame for a request nobody is going to make.
+    /// **The policy is not asked here.** It used to be, as a way of not building a list of hosts
+    /// for a request nobody would make — and that stopped being harmless when the marks grew a
+    /// store on disk: under `ImagePolicy::NoRequests` this returned before recording anything,
+    /// so `ReaderApp::load_site_icons` was handed an empty list and the one policy that most
+    /// wants a column drawn without contacting anybody was the one policy that could not have
+    /// one. The question belongs to the door, which asks it in its own name, and which can now
+    /// answer it differently for a mark that is already on this machine.
     ///
     /// Only a mark with no state at all is recorded. One that failed has a state, so a dead
     /// icon address is asked for once and not once per frame, which is the difference between
     /// a column with a hole in it and a host contacted sixty times a second.
     pub fn note_icon(&mut self, y: f32, src: &str) {
-        if !self.opts.images.allows_any_request() || self.images.state(src).is_some() {
+        if self.images.state(src).is_some() {
             return;
         }
         if let Some(band) = self.icon_band

@@ -58,7 +58,9 @@
 //! **Deletion.** [`Archive::forget`] for one kept page, [`Archive::forget_next`] for one link on
 //! the reading list, [`Archive::forget_all`] for the bookmarks, [`Archive::forget_all_next`] for the
 //! reading list, [`Archive::forget_visits`] for the history, and the file itself is deleted with
-//! the config directory by the uninstall commands in README. Each of them leaves the other tenants
+//! the config directory by the uninstall commands in README. Each of the four that can take a
+//! marked address away also prunes the icons kept for it (`ReaderApp::prune_icons`), by "no
+//! marked row still names this" and never per tenant: one icon serves rows on both lists. Each of them leaves the other tenants
 //! alone: forgetting the history must not empty a bookmarks list the reader chose page by page, and
 //! forgetting the bookmarks must not look like a way to erase a trail.
 //!
@@ -84,6 +86,19 @@
 //! are full and keep what is there; the history forgets its oldest page and says nothing, which is
 //! what a reader expects of the thing that is already forgetting for them. Which side of that line
 //! a tenant falls on is the only question a new one has to answer.
+//!
+//! **Derived bytes.** The rule below is about *tenants* — things the reader chose, that they
+//! cannot retype, that need a switch and a way to be forgotten. It is not about everything hww
+//! writes. Data that is derived, reconstructible, and byte-valued lives **beside** this file and
+//! not in it: [`icons_path`] is the first and so far the only case, and `reader::iconcache` is
+//! where the argument for its existence is. The concrete reason it may not come inside is
+//! arithmetic rather than taste — the history rewrites this file on every navigation, so base64
+//! icons in it would rewrite kilobytes per page drawn.
+//!
+//! The rule it *does* answer to is the one below it: it holds bytes only for addresses this file
+//! already names, on the two lists the reader chose, so it is emptied by the same two buttons and
+//! discloses its path under the same two groups. What it is not is a fourth tenant, and the test
+//! of that is that nothing in it is lost by deleting it.
 //!
 //! **Future tenants.** Feed subscriptions, and whatever follows them, are new [`Kind`]s in this
 //! file, not new files. That is why an item carries a kind at all. The reading list was the first
@@ -116,6 +131,22 @@
 //! page `Arrival::Built` says fetched no document. The reading list pays it twice over, because
 //! a mark there is a guess that may 404, and README's promise about that list is amended to say
 //! so: no *page* on it is fetched until the reader opens one, and that is still true.
+//!
+//! **The mark's bytes are kept, and the address is why that is allowed.** `reader::iconcache`
+//! holds them, and holds the argument; the short form is that the rule against writing what hww
+//! fetched separates bytes revealing *what you read* from bytes revealing *which sites you
+//! already wrote down*. Page content and article images are the first kind and stay off disk. A
+//! site icon for an address this file already names is the second — the address is on disk
+//! already, written by the same feature, one directory entry over — so keeping its bytes adds no
+//! local disclosure at all, and it removes a repeated contact with a third party, which is a
+//! privacy cost the other way. That is the whole trade and it is lopsided.
+//!
+//! Three things follow, and [`Archive::marked_icons`] is where the first is enforced: only an
+//! address one of these two lists still names may be kept, never one the history holds; reading
+//! from that store is allowed on any page under any policy while writing to it is not, because
+//! the masthead's mark fires on every page and a write there would be a trail of everywhere the
+//! reader went; and a bad file there is deleted without a word, which is the exact opposite of
+//! [`load`]'s contract for this one and is the contrast that explains both.
 //!
 //! What the old argument got right is kept where it still holds: nothing is stored for a page hww
 //! merely watched ([`Archive::visit`]), and the history draws no column ([`Mark`]). It is
@@ -517,6 +548,29 @@ impl Archive {
 
     pub fn is_empty(&self) -> bool {
         self.bookmarks().next().is_none()
+    }
+
+    /// Every icon address a marked row still names, bookmarks and reading list alike.
+    ///
+    /// **Never the history**, which is the same rule [`Mark`] states for drawing, restated for
+    /// keeping: a cached mark for a page hww merely watched would be a record of somewhere the
+    /// reader went, on disk, outliving *forget history* and with no switch over it. The two
+    /// lists here are the two whose addresses are already in this file by the reader's own act.
+    ///
+    /// One iterator over both rather than one per tenant, because an icon can serve a row on
+    /// each: `example.org/favicon.ico` is the mark of a bookmark and of a reading-list row
+    /// pointing at the same site, and "which tenant does this file belong to" is a question with
+    /// no answer. What `reader::iconcache` needs is "does any marked row still name this", and
+    /// that is what this yields the set for.
+    ///
+    /// Through [`mark_beside`], so what comes out is what the view would actually draw: an
+    /// address that fails [`icon_to_store`] on the way out yields the well-known guess or
+    /// nothing at all, exactly as the column does.
+    pub fn marked_icons(&self) -> impl Iterator<Item = String> + '_ {
+        self.items
+            .iter()
+            .filter(|i| matches!(i.kind, Kind::Bookmark | Kind::ReadNext))
+            .filter_map(|i| mark_beside(i, Mark::Shown))
     }
 
     /// Whether this page is already kept, fragment ignored.
@@ -1046,6 +1100,17 @@ fn icon_to_store(icon: &str) -> Option<String> {
     Some(url.to_string())
 }
 
+/// The address a site mark may be requested and kept at, or `None`.
+///
+/// [`icon_to_store`] under a name that says what the *reader* of this function wants, which is
+/// not always storage: `reader::iconcache` keys its files by this, and `ui::app` normalises the
+/// masthead's own `<link rel=icon>` through it before asking whether the bytes are on disk. One
+/// door, so a cache key can never be built from an address that skipped the scheme test or kept
+/// its credentials — which is the trap `icon_to_store`'s own comment describes.
+pub fn icon_address(icon: &str) -> Option<String> {
+    icon_to_store(icon)
+}
+
 /// Whether a stored address and a live one are the same page, fragment aside.
 ///
 /// A stored address that will not parse is compared as text. It cannot have come from
@@ -1085,6 +1150,20 @@ fn now() -> u64 {
 
 pub fn path() -> Option<PathBuf> {
     settings::archive_path()
+}
+
+/// Where the kept site icons live: a directory beside this file, never inside it.
+///
+/// **Derived, reconstructible, byte-valued data lives beside `archive.json` and not in it.** The
+/// module doc's rule about tenants — a new one is a new [`Kind`] in the one file, never a second
+/// file — is about things the reader chose and cannot retype. Icon bytes are neither: every one
+/// of them is a fetch away from coming back, and none of them was chosen. The concrete reason is
+/// arithmetic rather than taste: the history rewrites this file on every navigation, so
+/// base64 icons inside it would rewrite kilobytes per page drawn.
+///
+/// `reader::iconcache` holds the doctrine for what may go in there and why it is allowed at all.
+pub fn icons_path() -> Option<PathBuf> {
+    settings::icons_dir()
 }
 
 /// Load, or fall back to an empty bookmarks list with a reason.
@@ -2149,6 +2228,46 @@ mod tests {
 
     /// A mark never carries a credential, whichever of the two doors it came through.
     ///
+    /// What `reader::iconcache` may keep, and — sharply — what it may not.
+    ///
+    /// The history is the whole test. It draws no column and stores no icon, so a mark cached
+    /// for a page hww merely watched would be a record of somewhere the reader went, on disk,
+    /// outliving *forget history* and with no switch over it. `Cache::open` deletes everything
+    /// this iterator does not name, so an address missing from here is an address that cannot
+    /// be kept whatever writes it.
+    #[test]
+    fn only_a_marked_row_names_an_icon_worth_keeping() {
+        let mut a = Archive::new();
+        a.bookmark(
+            &on(),
+            &u("https://kept.example/page"),
+            Some("Kept"),
+            Some("https://kept.example/mark.png"),
+        );
+        a.add_next_at(&u("https://next.example/link"), Some("Read more"), 86_400);
+        a.visit(&on(), &u("https://watched.example/page"), Some("Watched"));
+
+        let icons: Vec<String> = a.marked_icons().collect();
+        assert!(icons.contains(&"https://kept.example/mark.png".to_owned()));
+        // The reading list's guess, which is the only mark it has: see `well_known_icon`.
+        assert!(icons.contains(&"https://next.example/favicon.ico".to_owned()));
+        assert_eq!(icons.len(), 2);
+        assert!(
+            !icons.iter().any(|i| i.contains("watched.example")),
+            "a visited page names no icon: {icons:?}"
+        );
+
+        // And the guess is what the column would actually draw, so what is kept and what is
+        // fetched are the same set rather than two that agree today.
+        let ir::Block::Entries(rows) = &reading_list_document(&a, &on()).blocks[0] else {
+            panic!("expected one Entries block");
+        };
+        assert_eq!(
+            rows[0].icon.as_deref(),
+            Some("https://next.example/favicon.ico")
+        );
+    }
+
     /// The row's own address may hold one — `Archive::bookmark` allows it, because a keypress
     /// put that page there — and following it is a click. The mark is not: hww requests it by
     /// itself when the view is drawn, so a userinfo left on it would be an automatic

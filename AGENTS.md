@@ -9,13 +9,15 @@ ledger. This file contains only rules useful across tasks. Reference symbols, no
 
 hww is a second browser for stripped, non-app HTML, with text and GUI renderers. RSS 2.0 and
 Atom ship; feed autodiscovery, JSON Feed, RSS 1.0/RDF, gemini, gopher, and Markdown are not
-started. Nothing writes page content to disk. Two files survive a run, both in
+started. Nothing writes page content to disk. Two files and one directory survive a run, all in
 `settings::config_dir()`: `settings.json`, and `archive.json`, which holds the three things hww is
 allowed to remember — a bookmark also carrying the address of its site's icon — and nothing
 else. It is named after the module and the doctrine rather than after any one of its three
-tenants; see `settings::archive_path`. **Read `src/reader/archive.rs` before
-adding anything that writes to disk** — the archive doctrine is there, and it is the rule, not
-this paragraph.
+tenants; see `settings::archive_path`. Beside it is one directory, `icons/`, holding the bytes of
+the site marks those lists draw — derived, reconstructible, and deleted with the lists that named
+them; `reader::iconcache` argues why that is allowed and is the only exception. **Read
+`src/reader/archive.rs` before adding anything that writes to disk** — the archive doctrine is
+there, and it is the rule, not this paragraph.
 
 Everything maps through `ir::Document`. Formats produce the IR and renderers consume it.
 Never put colour, fonts, dimensions, alignment, spacing, or other presentation in `src/ir.rs`.
@@ -173,7 +175,15 @@ stealing. They are three tenants of one file, with `keep_bookmarks`, `keep_readi
 `keep_history` over them, and the doctrine that governs all three is in `reader::archive` — read
 it before changing any of them. A new tenant is a new `archive::Kind` in the one file, never a
 second file, and it arrives with its own switch, its own row in `prefs::fields`, its own way to be
-forgotten, and its own line in README's uninstall paragraphs.
+forgotten, and its own line in README's uninstall paragraphs. That rule is about tenants and not
+about everything hww writes: **derived, reconstructible, byte-valued data lives beside the file,
+not in it** — `reader::iconcache` is the one case, and the reason is arithmetic, since history
+rewrites `archive.json` on every navigation and base64 icons in it would rewrite kilobytes per
+page drawn. Such a store is not a fourth tenant and gets no switch of its own: it holds bytes only
+for addresses the file already names, the two forget buttons empty it with the lists that filled
+it, and `ImagePolicy` already governs whether anything is fetched. What it owes is the disclosure
+— its path under both groups in `prefs_ui::group_footer`, and a `pageinfo` row — and the test of
+whether it is really derived is that deleting it loses nothing.
 
 The bookmarks and the reading list are both chosen and are still not the same tenant: a bookmark
 holds pages that were read, so its rows carry a fetched `<title>` and print no address; the
@@ -220,10 +230,26 @@ prefetch, or load on hover. Site icons are the automatic exception and are ident
 the page's own favicon, and the marks the bookmarks and the reading list draw in a left column,
 fetched for the rows in the layout band. A bookmark stores the address the page declared; a
 reading-list row has none, because hww never fetched it, so `archive::well_known_icon` guesses
-`/favicon.ico` at its origin and the guess stays out of the file. All answer `allows_any_request`,
-all are counted, and page info reports them on a built page, which is why `Arrival::Built` no
-longer claims no third party was contacted. The history neither stores an icon nor draws a
-column: it is thousands of rows nobody chose.
+`/favicon.ico` at its origin and the guess stays out of the file. A *fetch* answers
+`allows_any_request`, is counted, and page info reports it on a built page, which is why
+`Arrival::Built` no longer claims no third party was contacted. The history neither stores an icon
+nor draws a column: it is thousands of rows nobody chose.
+
+Site icons are also the one picture kept on disk, in `reader::iconcache`, and the read/write
+asymmetry there is load-bearing: **any** mark may be drawn from that store under **every** policy,
+`NoRequests` included, because a read contacts nobody; only a mark for a row of a marked list may
+be written to it, because `ReaderApp::ensure_favicon` fires on every page hww shows and a write
+there would be a favicon on disk for every host visited, outliving *forget history*. The write
+permission is decided on the UI thread and carried to the worker in `Job::Image`'s `cache_as` — a
+worker cannot see the archive and must never decide. A cache hit must not reach
+`ImageStore::record_request`, which moves the host tally ahead of the request leaving; it takes
+`ReaderApp::kept_mark`, which is synchronous for exactly that reason, and lands in
+`Counts::icons_from_cache` rather than `Counts::images`. `net::Msg::IconMissed` exists so a worker
+that finds the file gone answers instead of fetching, because a fetch there would be a request
+nothing disclosed. Keep `RenderCtx::note_icon` free of the policy test: asking it there left
+`NoRequests` unable to draw a column it makes no request for. Keys come from
+`archive::icon_address` and never from a raw `Item::icon`, and a filename is a hash and never a
+page-chosen string.
 
 Keep `referer(false)` on the client. Document requests carry no Referer. Image requests alone
 may set an origin-only Referer built from `Url::origin()`, never a path. The setting remains
@@ -284,8 +310,10 @@ failure is otherwise invisible, but make that argument at the test rather than c
 Do not relax tests that enforce IR purity, hostname boundaries, profile soundness, origin-only
 Referer, parser word boundaries, shared inline flattening, font registration, glyph coverage,
 contrast, settings exposure, menu and help agreement, iterative thread traversal, layout-band
-boundaries, the archive's per-item tolerance and refusing cap, the scheme gate that keeps page
-content out of hww's own views, or the exact set of addresses `builtin_view` claims.
+boundaries, the archive's per-item tolerance and refusing cap, the set of addresses a kept icon
+may be held for, the icon store's refusal to name a file after a page-chosen string, the scheme
+gate that keeps page content out of hww's own views, or the exact set of addresses `builtin_view`
+claims.
 
 ## Portability and style
 
