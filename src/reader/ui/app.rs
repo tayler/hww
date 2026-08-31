@@ -2339,6 +2339,33 @@ impl ReaderApp {
             return;
         }
 
+        // Pointer side buttons: "typically corresponds to the Browser back/forward button".
+        //
+        // Ahead of the `typing` return below, because a thumb button is not text: a browser goes
+        // back from a focused address bar, and reading these after that guard meant the mouse
+        // stopped working the moment the reader clicked into the URL field.
+        //
+        // `button_pressed` and not `button_clicked`. egui only calls a release a click when the
+        // pointer has moved less than `max_click_dist` (6 points) since the press and the button
+        // was held for less than `max_click_duration` (0.8s). Both are written for a button under
+        // a finger that is aiming at a widget; a side button is under the thumb of the hand
+        // holding the mouse, so pressing it nudges the pointer, and the first press of a run is
+        // the slow deliberate one. Either condition drops the whole click silently, which is the
+        // "nothing happened, click it again" this fixes. Nothing here is aimed at a widget, so
+        // neither condition buys anything: the press is the whole gesture.
+        let (extra1, extra2) = ctx.input(|i| {
+            (
+                i.pointer.button_pressed(egui::PointerButton::Extra1),
+                i.pointer.button_pressed(egui::PointerButton::Extra2),
+            )
+        });
+        if extra1 {
+            self.go_back();
+        }
+        if extra2 {
+            self.go_forward();
+        }
+
         let esc = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
         if esc {
             // Never the status strip.
@@ -2363,20 +2390,6 @@ impl ReaderApp {
                 self.open_find();
             }
             return;
-        }
-
-        // Pointer side buttons: "typically corresponds to the Browser back/forward button".
-        let (extra1, extra2) = ctx.input(|i| {
-            (
-                i.pointer.button_clicked(egui::PointerButton::Extra1),
-                i.pointer.button_clicked(egui::PointerButton::Extra2),
-            )
-        });
-        if extra1 {
-            self.go_back();
-        }
-        if extra2 {
-            self.go_forward();
         }
 
         let step = scroll_step(&self.settings);
