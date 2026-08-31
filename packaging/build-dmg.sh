@@ -121,13 +121,23 @@ chmod 0644 "$app/Contents/Info.plist"
 
 # The icon, built here rather than committed: `iconutil` exists only on macOS, and generating it
 # on the runner from the committed rasters keeps a Mac out of the loop for anyone regenerating
-# the logo. Every entry is *copied* from the `hww-N.png` drawn at that size rather than
-# resampled from a larger one, which is the rule `assets/logo/README.md` already states for the
-# `.ico` and holds here for the same reason: the 16 and the 32 are redrawn on their own grids.
+# the logo. Every entry is *copied* from the raster drawn at that size rather than resampled
+# from a larger one, which is the rule `assets/logo/README.md` already states for the `.ico`
+# and holds here for the same reason: the 16 and the 32 are redrawn on their own grids.
+#
+# The `hww-macos-N.png` rasters and not the `hww-N.png` ones every other format takes. macOS
+# masks nothing: what an `.icns` draws is what a bundle icon is, corners included, so a
+# full-bleed square raster is a square in the Dock beside rounded neighbours, and one filling
+# its canvas reads as larger than they do because theirs stop at Apple's grid. Those rasters
+# carry the corner and the padding themselves — a rounded tile of 824 on a canvas of 1024, the
+# proportion every macOS 11 icon is drawn to. Windows and the hicolor theme want the square: a
+# taskbar entry and a launcher tile are drawn edge to edge, and there the padding would be the
+# defect. This is the one format that gets the other set.
 #
 # If `iconutil` ever refuses these rasters, the cause to check first is that they are colour
-# type 2 — truecolour, no alpha — and the smallest fix is `sips -s format png` on each staged
-# copy, which normalises the encoding and leaves the committed rasters untouched.
+# type 6 — truecolour with alpha, which is what the transparent corners need — and the smallest
+# fix is `sips -s format png` on each staged copy, which normalises the encoding and leaves the
+# committed rasters untouched.
 iconset=$stage/hww.iconset
 mkdir -p "$iconset"
 for entry in \
@@ -143,7 +153,7 @@ for entry in \
     1024:icon_512x512@2x; do
     size=${entry%%:*}
     name=${entry#*:}
-    cp "assets/logo/hww-${size}.png" "$iconset/${name}.png"
+    cp "assets/logo/hww-macos-${size}.png" "$iconset/${name}.png"
     chmod 0644 "$iconset/${name}.png"
 done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/hww.icns"
