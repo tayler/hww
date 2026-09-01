@@ -39,6 +39,15 @@ eframe = { version = "0.36.1", default-features = false, features = ["wgpu", "x1
 winit = { version = "0.30", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico"], optional = true }
 
+# The Apple Event that carries a link into a bundled application, and nothing else; see
+# `reader::mac_open` for why `argv` is not enough on that platform. A target table rather than
+# a feature, because it is not optional on macOS and cannot build anywhere else: `objc2` is
+# already in the graph under `winit` on that platform, so this adds an edge rather than a
+# dependency. Not gated on `gui` as well, so that a `cargo build` with no window still compiles
+# the module the windowed build depends on.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
 # The Windows icon resource only; see `build.rs`. Declared unconditionally rather than under
 # `[target.'cfg(windows)'.build-dependencies]`, because which platform a target table is
 # matched against for build dependencies is a corner of cargo not worth depending on. The

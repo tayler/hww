@@ -107,7 +107,7 @@ Delete the `hww-<version>` folder and `%APPDATA%\hww`.
 
 ### Opening links in hww
 
-The Ubuntu package and the macOS bundle register hww as a handler for `http` and `https`, so it appears in **Open with…** on Ubuntu and **Open With** in Finder, and in the default-browser list on both. That makes hww **choosable, not default.** Do not set it as your default browser: single-page applications render blank in hww by design, and every link you click anywhere on the machine would land in a reader that cannot run them. Choose hww for the link you want to read in it.
+The Ubuntu package and the macOS bundle register hww as a handler for `http` and `https`, so it appears in **Open with…** on Ubuntu and **Open With** in Finder, and in the default-browser list on both. A link you choose it for opens in the window you already have, or in a new one if hww is not running. That makes hww **choosable, not default.** Do not set it as your default browser: single-page applications render blank in hww by design, and every link you click anywhere on the machine would land in a reader that cannot run them. Choose hww for the link you want to read in it.
 
 Windows has no door yet. It ships as a zip with no installer, and registering a browser there means writing under `HKLM\Software\Clients\StartMenuInternet`, which is an installer's job. Run `hww.exe <url>` instead.
 

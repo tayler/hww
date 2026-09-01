@@ -1741,6 +1741,7 @@ dependencies = [
  "ego-tree",
  "encoding_rs",
  "image",
+ "objc2 0.6.4",
  "reqwest",
  "roxmltree",
  "scraper",

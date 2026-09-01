@@ -30,7 +30,7 @@ version=${HWW_DMG_VERSION:-"${cargo_version}-git${revision}.${short_sha}"}
 short_version=$cargo_version
 build_version=$revision
 
-for tool in iconutil codesign hdiutil lipo python3; do
+for tool in iconutil tiffutil codesign hdiutil lipo python3; do
     if ! command -v "$tool" >/dev/null; then
         printf '%s is not on PATH; a macOS bundle cannot be built without it\n' "$tool" >&2
         exit 1
@@ -48,9 +48,22 @@ if [[ "$arch" != arm64 ]]; then
 fi
 
 # The image's root, laid out the way it will be seen when it mounts: the application beside a
-# symlink to /Applications, which is the drag-to-install gesture every Mac reader already knows.
+# symlink to /Applications, which is the drag-to-install gesture every Mac reader already knows,
+# and a hidden picture behind the pair naming the gesture for a reader who does not.
+#
+# `work` is a second directory and not a subdirectory of the first, because everything under
+# `stage` ends up inside the image and the read-write image being built is not something to ship
+# a copy of inside itself.
 stage=$(mktemp -d)
-trap 'rm -rf "$stage"' EXIT
+work=$(mktemp -d)
+mnt=
+cleanup() {
+    if [[ -n "$mnt" ]]; then
+        hdiutil detach "$mnt" -quiet 2>/dev/null || hdiutil detach "$mnt" -force -quiet 2>/dev/null || true
+    fi
+    rm -rf "$stage" "$work"
+}
+trap cleanup EXIT
 chmod 0755 "$stage"
 
 # Named once. The window layout below records icon positions against this name, and a name it
@@ -121,13 +134,23 @@ chmod 0644 "$app/Contents/Info.plist"
 
 # The icon, built here rather than committed: `iconutil` exists only on macOS, and generating it
 # on the runner from the committed rasters keeps a Mac out of the loop for anyone regenerating
-# the logo. Every entry is *copied* from the `hww-N.png` drawn at that size rather than
-# resampled from a larger one, which is the rule `assets/logo/README.md` already states for the
-# `.ico` and holds here for the same reason: the 16 and the 32 are redrawn on their own grids.
+# the logo. Every entry is *copied* from the raster drawn at that size rather than resampled
+# from a larger one, which is the rule `assets/logo/README.md` already states for the `.ico`
+# and holds here for the same reason: the 16 and the 32 are redrawn on their own grids.
+#
+# The `hww-macos-N.png` rasters and not the `hww-N.png` ones every other format takes. macOS
+# masks nothing: what an `.icns` draws is what a bundle icon is, corners included, so a
+# full-bleed square raster is a square in the Dock beside rounded neighbours, and one filling
+# its canvas reads as larger than they do because theirs stop at Apple's grid. Those rasters
+# carry the corner and the padding themselves — a rounded tile of 824 on a canvas of 1024, the
+# proportion every macOS 11 icon is drawn to. Windows and the hicolor theme want the square: a
+# taskbar entry and a launcher tile are drawn edge to edge, and there the padding would be the
+# defect. This is the one format that gets the other set.
 #
 # If `iconutil` ever refuses these rasters, the cause to check first is that they are colour
-# type 2 — truecolour, no alpha — and the smallest fix is `sips -s format png` on each staged
-# copy, which normalises the encoding and leaves the committed rasters untouched.
+# type 6 — truecolour with alpha, which is what the transparent corners need — and the smallest
+# fix is `sips -s format png` on each staged copy, which normalises the encoding and leaves the
+# committed rasters untouched.
 iconset=$stage/hww.iconset
 mkdir -p "$iconset"
 for entry in \
@@ -143,7 +166,7 @@ for entry in \
     1024:icon_512x512@2x; do
     size=${entry%%:*}
     name=${entry#*:}
-    cp "assets/logo/hww-${size}.png" "$iconset/${name}.png"
+    cp "assets/logo/hww-macos-${size}.png" "$iconset/${name}.png"
     chmod 0644 "$iconset/${name}.png"
 done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/hww.icns"
@@ -170,25 +193,64 @@ codesign --force --sign - --timestamp=none "$app"
 
 ln -s /Applications "$stage/Applications"
 
-# Last thing into the folder, because it names what is already in it. Without this the volume
+# The window's background, hidden by the leading dot the way every disk image hides it. One TIFF
+# holding both rasters rather than two files: `-cathidpicheck` stacks them into a single image
+# with two representations and refuses the pair unless the second is exactly twice the first,
+# which is how a Retina Mac gets the sharp one and a 2015 display does not get a downscale.
+# `tiffutil` ships with macOS, so this is `iconutil`'s argument again — the rasters are committed
+# and assembled here rather than committed already assembled.
+mkdir -p "$stage/.background"
+tiffutil -cathidpicheck assets/dmg/background.png assets/dmg/background@2x.png \
+    -out "$stage/.background/background.tiff" >/dev/null
+chmod 0644 "$stage/.background/background.tiff"
+
+# From here the image is built twice, and the reason is the background picture. Finder does not
+# name it by path: the `.DS_Store` carries a Carbon alias identifying it by volume name, volume
+# creation date, and catalogue node ID, and none of those exist until there is a volume. So a
+# read-write image is created, attached, written into, detached, and converted to the compressed
+# one that ships. This is `create-dmg`'s dance minus the part that needs a Mac with a screen:
+# nothing here talks to Finder over Apple events, so it runs on a CI runner with no GUI session.
+#
+# `-size` overrides the size `-srcfolder` would compute, which is tight enough that a new 10K
+# file might not fit. Twenty megabytes of slack costs nothing in the shipped image: `hdiutil
+# convert` compresses free space to almost nothing and copies only what is used.
+size=$(( $(du -sk "$stage" | awk '{ print $1 }') / 1024 + 20 ))
+rw=$work/rw.dmg
+hdiutil create -srcfolder "$stage" -volname hww -format UDRW -fs HFS+ -size "${size}m" \
+    -quiet "$rw"
+
+# `-nobrowse` keeps the volume out of the Finder sidebar of whoever is building, `-noautoopen`
+# keeps a window from opening on a developer's machine, and `-noverify` skips a checksum pass
+# over an image that is about to be thrown away. The mount point is read back rather than
+# demanded: a machine with an hww image already open gets `/Volumes/hww 1`, and the alias below
+# records whatever it actually got, alongside the volume name, so Finder resolves the picture
+# either way.
+attached=$(hdiutil attach -readwrite -noverify -noautoopen -nobrowse -plist "$rw")
+mnt=$(python3 -c 'import plistlib, sys
+entities = plistlib.loads(sys.stdin.buffer.read())["system-entities"]
+print(next(e["mount-point"] for e in entities if e.get("mount-point")))' <<<"$attached")
+
+# Last thing onto the volume, because it names what is already on it. Without this the image
 # opens at whatever size and view Finder last used for an unknown folder, with the sidebar and
-# toolbar showing. See packaging/build-DS_Store.py for the records and for why Finder is not
-# asked to lay the window out itself.
-python3 packaging/build-DS_Store.py "$stage" "$bundle"
-chmod 0644 "$stage/.DS_Store"
+# toolbar showing and nothing in the panel saying what to do. See packaging/build-DS_Store.py for
+# the records, the alias, and for why Finder is not asked to lay the window out itself.
+python3 packaging/build-DS_Store.py "$mnt" hww "$bundle" .background/background.tiff
+chmod 0644 "$mnt/.DS_Store"
+
+hdiutil detach "$mnt" -quiet
+mnt=
 
 mkdir -p "$out_dir"
 dmg="$out_dir/hww-${version}-aarch64-macos.dmg"
 dmg_abs="$(cd "$out_dir" && pwd)/hww-${version}-aarch64-macos.dmg"
 rm -f "$dmg_abs"
 
-# `-srcfolder` still needs no attach step: the window layout is a file staged into the folder
-# above, not Finder state that has to be applied to a mounted volume, so there is no attach,
-# arrange, detach, convert dance here and no GUI session in the requirements. Unlike `zip`, it
-# copies `Contents/_CodeSignature/CodeResources` intact, so the signature survives the trip.
+# UDZO is the format that ships: read-only and compressed. Unlike `zip`, the image carries
+# `Contents/_CodeSignature/CodeResources` intact, so the signature survives the trip.
 #
-# The volume name is bare `hww` rather than `hww $version`: HFS+ caps a volume name at 27
-# characters and a development version already spends 24 of them. The version is in the filename.
-hdiutil create -srcfolder "$stage" -volname hww -format UDZO -fs HFS+ -quiet "$dmg_abs"
+# The volume name was set at creation and is bare `hww` rather than `hww $version`: HFS+ caps a
+# volume name at 27 characters and a development version already spends 24 of them. The version
+# is in the filename.
+hdiutil convert "$rw" -format UDZO -quiet -o "$dmg_abs"
 
 printf '%s\n' "$dmg"

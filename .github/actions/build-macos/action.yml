@@ -130,6 +130,15 @@ runs:
         # missing file here means every reader gets Finder's default window instead.
         test -f "$mnt/.DS_Store"
 
+        # The background picture, and the `.DS_Store` naming it. The second check is the one
+        # worth having: the alias in that file is built from the volume this job mounted, and if
+        # `build-dmg.sh` ever writes the window before staging the picture, or stages it under
+        # another name, the record still parses and Finder silently falls back to a blank panel.
+        # A name matching here does not prove Finder resolves the alias — nothing short of a Mac
+        # with a screen proves that — but a name missing here proves it cannot.
+        test -f "$mnt/.background/background.tiff"
+        grep -qa 'background\.tiff' "$mnt/.DS_Store"
+
         # The signature is sealed over `Contents`, so this is also what proves the icon and the
         # license texts were staged before `codesign` ran rather than after it. `--strict`
         # refuses a bundle whose sealed resources no longer match. The second check is that the
