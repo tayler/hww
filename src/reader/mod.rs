@@ -39,6 +39,11 @@ pub mod history;
 /// fetches is kept, and it argues for itself there.
 pub mod iconcache;
 pub mod inline;
+/// The link macOS hands a bundled application, which it sends as an Apple Event rather than
+/// putting in `argv`. macOS only, and the one module in the crate no CI job on another platform
+/// compiles; it decides nothing about the address it receives, for that reason.
+#[cfg(target_os = "macos")]
+pub mod mac_open;
 /// How tall each block of the page was last time it was laid out, so a page longer than the
 /// window costs a window's worth of layout. No egui types, so the fast CI job tests it.
 pub mod measure;

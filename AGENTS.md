@@ -337,6 +337,19 @@ none: the floor comes from the environment rather than the runner, and `cc-rs` c
 `aws-lc-sys` separately, so a C object built against a newer SDK silently raises it. That is the
 macOS counterpart to `+crt-static` below.
 
+`CFBundleURLTypes` in that bundle is half a door. macOS does not put the address in `argv` the
+way the `.desktop` file's `%u` does — Launch Services sends a `'GURL'` Apple Event — so the
+other half is `reader::mac_open`, which is called from three `cfg`-gated lines in `reader::ui`
+and from nowhere a test can reach. It is not dead code, and the two halves ship together or the
+packaging claims a capability the binary does not have. What it receives goes through
+`ReaderApp::follow_link`, so an address off an Apple Event meets `session::classify_link` like
+any `href`; do not let it grow a second opinion about schemes.
+
+The macOS window keys are the system's, not hww's. `Cmd+M` and `Cmd+W` are Window-menu key
+equivalents and winit builds only the application menu, so `handle_keys` binds them and
+`menu::keyspec` does not spell them: the tables say what hww binds, and these are what the
+platform would have bound. The same reasoning as `Cmd+H`, one step further on.
+
 Every distribution stages its license texts through `hww_install_licenses` in
 `packaging/licenses.sh`; no packaging script names a license file itself. The binary embeds
 every face in `fonts/` with `include_bytes!`, so the OFL and Bitstream Vera texts have to travel

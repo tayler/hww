@@ -969,6 +969,74 @@ pub fn elapsed_fraction(elapsed: Duration) -> f32 {
     (elapsed.as_secs_f32() / TIMEOUT.as_secs_f32()).clamp(0.0, 1.0)
 }
 
+/// The name in the window title, and the title of a window with no page in it. Also what
+/// `ui::run` opens the window under, so the first frame does not rename it.
+pub const WINDOW_NAME: &str = "hww";
+
+/// What the window itself is called: the name a task list, macOS's Window menu, the app
+/// switcher, and a screenshot of the frame all read.
+///
+/// It was `hww` from launch to quit, which is a window a reader cannot tell from the other two
+/// they have open, and comments here and in `search` were already written as though the page's
+/// title reached it. Every browser puts the page there; this does the same, with the name after
+/// it, so the window is still identifiable as hww's when the page has no useful title.
+///
+/// `None` is the idle window and the bare name. So is a title that is only spaces, which is a
+/// `<title>` a page can write.
+///
+/// **The page's own words, leaving the reader.** This is the one string hww hands to somebody
+/// else's chrome, drawn by a window manager with none of the guards the reading column has, so
+/// [`one_line`] takes control characters and the bidi overrides out: a title that reorders the
+/// text *around* it in a task list is a page writing on furniture it does not own. The cap is
+/// the same argument in the other direction — a window title is one line in a layout hww does
+/// not control, and a page can write a paragraph into it.
+pub fn window_title(page: Option<&str>) -> String {
+    match page.map(one_line).filter(|line| !line.is_empty()) {
+        Some(line) => format!("{line} \u{2014} {WINDOW_NAME}"),
+        None => WINDOW_NAME.to_owned(),
+    }
+}
+
+/// How much of a page's title the window keeps. Long enough for a headline, short enough that
+/// what follows it — the name, and whatever the desktop adds — survives the truncation the
+/// task list does next.
+const WINDOW_TITLE_MAX: usize = 80;
+
+/// One line of untrusted text: no control characters, no bidi overrides, runs of whitespace
+/// collapsed to one space, and capped with an ellipsis.
+///
+/// The bidi marks go rather than being balanced, because there is nothing here to balance them
+/// against: the string is dropped into a strip of other applications' titles, and an unclosed
+/// override runs until something else closes it.
+fn one_line(s: &str) -> String {
+    // A control character becomes the space it stood for and a bidi mark is dropped, which is
+    // the difference between what each one is: a newline in a `<title>` separates two words and
+    // deleting it runs them together, while an override separates nothing and means only what
+    // it does to the text after it.
+    let kept: String = s
+        .chars()
+        .filter(|c| !is_bidi_control(*c))
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let mut line = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() > WINDOW_TITLE_MAX {
+        line = line.chars().take(WINDOW_TITLE_MAX).collect::<String>();
+        line = line.trim_end().to_owned();
+        line.push('\u{2026}');
+    }
+    line
+}
+
+/// The bidirectional marks, embeddings, overrides, and isolates. `char::is_control` does not
+/// cover them: they are formatting characters, which is exactly what makes them a problem in a
+/// string somebody else lays out.
+fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
 /// `example.com/a/b`, or bare `example.com` for a root path.
 ///
 /// A wording decision, so it lives with the other wording decisions rather than in `ui/`.
@@ -995,6 +1063,39 @@ mod tests {
 
     fn url(s: &str) -> Url {
         Url::parse(s).unwrap()
+    }
+
+    /// The window is hww's until a page has a name, and the page's after that.
+    #[test]
+    fn the_window_takes_the_page_name() {
+        assert_eq!(window_title(None), "hww");
+        assert_eq!(window_title(Some("A headline")), "A headline \u{2014} hww");
+        // A `<title>` of nothing but spaces is a page a reader would otherwise see named by
+        // whitespace in their task list.
+        assert_eq!(window_title(Some("   ")), "hww");
+    }
+
+    /// The one string hww hands to somebody else's chrome, so the page does not get to write a
+    /// second line, a tab stop, or a right-to-left override into a strip of other windows.
+    #[test]
+    fn a_page_cannot_write_control_characters_into_the_window_title() {
+        let hostile = "Quiet\nweb\ttitle\u{202e}reversed\u{2066}isolated";
+        let got = window_title(Some(hostile));
+        assert_eq!(got, "Quiet web titlereversedisolated \u{2014} hww");
+        assert!(!got.chars().any(|c| c.is_control() || is_bidi_control(c)));
+    }
+
+    /// A title long enough to be a paragraph is cut, and what follows the cut — the name the
+    /// window is identified by — survives it.
+    #[test]
+    fn a_long_title_is_cut_and_the_name_survives() {
+        let long = "word ".repeat(60);
+        let got = window_title(Some(&long));
+        assert!(got.ends_with("\u{2026} \u{2014} hww"), "{got}");
+        assert!(
+            got.chars().count() <= WINDOW_TITLE_MAX + " \u{2014} hww".chars().count() + 1,
+            "{got}"
+        );
     }
 
     /// The shape `session` builds when a rewrite lands somewhere the rule did not aim at.

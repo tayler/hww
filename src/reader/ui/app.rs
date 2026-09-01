@@ -99,12 +99,17 @@ const FIND_ID: &str = "hww-find";
 const APP_ID: &str = "hww";
 
 pub fn run(launch: Launch) -> eframe::Result {
+    // Before the event loop, because the event that carries a link into a bundled application
+    // on macOS is dispatched as soon as that loop turns. See `reader::mac_open`, which is also
+    // where the argument for why `argv` is not enough on that platform lives.
+    #[cfg(target_os = "macos")]
+    crate::reader::mac_open::install();
     let icon =
         eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/logo/hww-256.png"))
             .expect("embedded hww icon is valid PNG");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("hww")
+            .with_title(notice::WINDOW_NAME)
             .with_inner_size([900.0, 800.0])
             .with_min_inner_size([420.0, 320.0])
             .with_app_id(APP_ID)
@@ -121,6 +126,15 @@ pub fn run(launch: Launch) -> eframe::Result {
             // in the new palette.
             let ctx = cc.egui_ctx.clone();
             app.desktop_theme = desktop::watch(move || ctx.request_repaint());
+            // The second half of `mac_open`, now that there is a window to wake: a link chosen
+            // in Finder while hww is already open arrives as an Apple Event, which is no reason
+            // for the event loop to draw, so without this the page would open on the reader's
+            // next keystroke instead of on their click.
+            #[cfg(target_os = "macos")]
+            {
+                let ctx = cc.egui_ctx.clone();
+                crate::reader::mac_open::wake_with(move || ctx.request_repaint());
+            }
             Ok(Box::new(app))
         }),
     )
@@ -556,6 +570,9 @@ pub struct ReaderApp {
     /// *ahead* of the cursor. By id rather than index, because a link followed in that window
     /// truncates that entry away and puts the arriving page's entry at the same index.
     shown_entry: Option<EntryId>,
+    /// What the window is currently called, so the title is sent when it changes and not on
+    /// every frame. See [`ReaderApp::sync_window_title`].
+    window_title: String,
     /// The desktop's light/dark preference, followed while the window is open, for
     /// `Theme::System`. See `reader::desktop`.
     ///
@@ -747,6 +764,9 @@ impl ReaderApp {
             focus_find: false,
             top_block: None,
             shown_entry: None,
+            // What `ui::run` opened the window under. Equal by construction so the first frame
+            // sends nothing.
+            window_title: notice::window_title(None),
             desktop_theme: None,
         };
         match launch.start {
@@ -792,6 +812,7 @@ impl ReaderApp {
     /// them at dispatch is what used to clear the textures, collapse state, and scroll offset of
     /// the page the reader was still looking at.
     fn navigate(&mut self, url: Url, opts: LoadOptions, push: bool) {
+        self.close_url_bar();
         // **The chokepoint**, and it has to be here rather than at any caller. `navigate` is
         // reached by `reload`, by `follow`, and — the case that actually bites — by `arrive`,
         // which falls through to it whenever a history entry is not in the page cache. A built
@@ -1369,6 +1390,11 @@ impl ReaderApp {
     /// directly. A check inside `navigate` would have needed a flag argument at every call site
     /// and would have been the wrong shape.
     fn arrive(&mut self) {
+        // Here as well as in `navigate`, and not instead of it: this is the one navigation that
+        // can finish without dispatching anything, so a Back onto a page still in
+        // `reader::pagecache` would keep the bar that a Back onto a page that has to be fetched
+        // closes.
+        self.close_url_bar();
         let Some(id) = self.history.current_id() else {
             return;
         };
@@ -2366,6 +2392,36 @@ impl ReaderApp {
             self.go_forward();
         }
 
+        // Minimize and Close, which on macOS are the Window menu's key equivalents rather than
+        // anything a window handles for itself — and winit builds only the application menu:
+        // About, Services, Hide, Hide Others, Show All, Quit. With no Window menu in the bar,
+        // `Cmd+M` and `Cmd+W` reach the window like any other chord and nothing answered them,
+        // so a Mac reader pressed the two keys every application on the system answers and hww
+        // sat there.
+        //
+        // Bound here rather than by building an `NSMenu`, because hww's menu bar is its own and
+        // is drawn in the window; and absent from `menu::keyspec` and the help card, because
+        // these are the platform's keys and not hww's grammar. The tables spell what hww binds,
+        // and no browser lists Minimize in its own help either — the same reason `keyspec`
+        // describes `Cmd+H` as a key the system takes rather than as one hww offers.
+        //
+        // Above the typing guard, for the reason the side buttons are: a window key is not
+        // text. Every other application on the system minimizes with the caret in a text field,
+        // and hww is where it is *most* likely to be, since the address bar takes focus on an
+        // empty start. `Cmd+W` closes rather than hiding, because hww is one window and the
+        // window going away is the session ending — what `Cmd+W` does to a browser holding a
+        // single tab.
+        #[cfg(target_os = "macos")]
+        {
+            let mac = |mods, key| ctx.input_mut(|i| i.consume_key(mods, key));
+            if mac(Modifiers::COMMAND, Key::M) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+            if mac(Modifiers::COMMAND, Key::W) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+
         let esc = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
         if esc {
             // Never the status strip.
@@ -2567,6 +2623,23 @@ impl ReaderApp {
         }
     }
 
+    /// Put the address bar away, because the address in it is about to stop being the address
+    /// of the page in the column.
+    ///
+    /// Every browser does this, and hww did it only for the one navigation the bar starts
+    /// itself. So the mouse's Back button — which reads *ahead* of the typing guard on purpose,
+    /// since going back from a focused address bar is what a thumb button is for — left the
+    /// reader on a new page with the old page's address in a field that still owned the
+    /// keyboard, and so did the strip's arrows and the menu's Back.
+    ///
+    /// Nothing surrenders focus here. egui drops focus at the end of the pass in which the
+    /// focused widget was not drawn, and this runs before any panel is drawn, so the field is
+    /// gone from this frame's layout and its focus with it.
+    fn close_url_bar(&mut self) {
+        self.chrome.url_bar = None;
+        self.focus_url_bar = false;
+    }
+
     fn open_url_bar(&mut self) {
         let current = self
             .history
@@ -2735,6 +2808,15 @@ impl eframe::App for ReaderApp {
         // reload, so it is re-derived rather than trusted from startup.
         apply_scroll_speed(&ctx, &self.settings);
         self.drain(&ctx);
+        // A link the desktop sent, which on macOS is the only way one arrives after launch.
+        // Through `follow_link` and so through `session::classify_link`, because an address off
+        // an Apple Event is exactly as much somebody else's string as an `href` on a page is:
+        // the bundle claims `http` and `https`, and what actually arrives is whatever the
+        // sender put in the descriptor.
+        #[cfg(target_os = "macos")]
+        if let Some(href) = crate::reader::mac_open::take() {
+            self.follow_link(&href);
+        }
         self.ensure_favicon();
         self.handle_keys(&ctx);
 
@@ -2797,6 +2879,7 @@ impl eframe::App for ReaderApp {
         if let Some(text) = self.pending_copy.take() {
             ctx.copy_text(text);
         }
+        self.sync_window_title(&ctx);
         self.persist(&ctx);
 
         // While anything is in flight, keep repainting so the elapsed-time indicator animates
@@ -2835,6 +2918,35 @@ impl ReaderApp {
     /// How long `[`/`]` can be held down before a write lands, and how long a page waits to
     /// reach the history.
     const SAVE_DEBOUNCE: Duration = Duration::from_millis(1500);
+
+    /// Name the window after the page in it.
+    ///
+    /// Read off the state at the end of the frame rather than sent from the transitions that
+    /// change it, and that is the point: `install` is one door and `fail` is another, but a
+    /// page also arrives by `restore` out of `reader::pagecache` and leaves by a navigation that
+    /// has not answered yet, and a title sent from each of those is four places to forget one.
+    /// Comparing against the name the window already carries is what makes reading it every
+    /// frame cost nothing: winit is told only when the string actually changes.
+    ///
+    /// The page **on screen**, through `shown`, so the outgoing article keeps naming the window
+    /// for the length of a fetch — the same rule the reading column follows, and the reason
+    /// `Page::Loading` is not a case here. A failure names the address instead: there is no
+    /// title, and an error screen that left the previous page's name in the task list would be
+    /// the one place hww's chrome said the reader was somewhere they are not.
+    fn sync_window_title(&mut self, ctx: &egui::Context) {
+        let page = match &self.page {
+            Page::Failed { url, .. } => Some(notice::host_and_path(url)),
+            _ => self.shown().map(|r| {
+                title::display(&r.loaded.doc)
+                    .unwrap_or_else(|| notice::host_and_path(&r.loaded.prov.final_url))
+            }),
+        };
+        let want = notice::window_title(page.as_deref());
+        if want != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(want.clone()));
+            self.window_title = want;
+        }
+    }
 
     /// Persist settings, but not on every keystroke of `[`/`]`, and the history, but not on the
     /// frame the page it records appears.
