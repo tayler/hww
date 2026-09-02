@@ -82,6 +82,7 @@ mod keyspec {
     pub const BOOKMARK_PAGE: &str = "Ctrl+D";
     pub const READ_LATER: &str = "Shift+L";
     pub const BOOKMARKS: &str = "Ctrl+Shift+B";
+    pub const BOOKMARK_SIDEBAR: &str = "Ctrl+B";
     pub const HISTORY: &str = "Ctrl+H";
     pub const OUTLINE: &str = "Ctrl+Shift+O";
     pub const PAGE_INFO: &str = "Ctrl+I";
@@ -129,6 +130,7 @@ mod keyspec {
     /// place a later change to it would be found.
     pub const READ_LATER: &str = "Shift+L";
     pub const BOOKMARKS: &str = "Cmd+Shift+B";
+    pub const BOOKMARK_SIDEBAR: &str = "Cmd+B";
     /// The second spec that is not a modifier swap, and for a harder reason than `BACK`'s.
     /// `Cmd+H` hides the application on macOS: the system takes it before any window sees it,
     /// so a Mac told to press it would watch hww vanish instead of listing what it had drawn.
@@ -192,6 +194,7 @@ pub enum Command {
     SetImages(usize),
     ToggleLinkAddresses,
     ToggleOutline,
+    ToggleBookmarkSidebar,
     TogglePageInfo,
     ToggleMenuBar,
     CollapseAllReplies,
@@ -213,6 +216,9 @@ pub enum Checked {
     Outline,
     PageInfo,
     MenuBar,
+    /// The bookmarks sidebar is drawn. Unlike its neighbours this one is a saved setting
+    /// rather than session state, so it is the same bit the settings panel offers.
+    BookmarkSidebar,
 }
 
 /// When an item is greyed out.
@@ -496,6 +502,17 @@ fn build() -> Vec<Menu> {
                     needs: N::Page,
                 },
                 Item::Check {
+                    label: "Bookmarks sidebar",
+                    keys: BOOKMARK_SIDEBAR,
+                    command: C::ToggleBookmarkSidebar,
+                    checked: Checked::BookmarkSidebar,
+                    // Not `N::Page`, unlike the outline above it. The outline is a table of
+                    // contents *of* the page and means nothing without one; this strip is drawn
+                    // from `archive.json` and is the same list whatever is on screen, so it stays
+                    // reachable from the splash and from an error page.
+                    needs: N::Nothing,
+                },
+                Item::Check {
                     label: "Page info",
                     keys: PAGE_INFO,
                     command: C::TogglePageInfo,
@@ -587,6 +604,7 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     ("i / I", "load focused image · load all, naming their hosts"),
     (OUTLINE, "outline"),
+    (BOOKMARK_SIDEBAR, "the bookmarks sidebar"),
     (PAGE_INFO, "page info: how this page arrived"),
     (HELP_FIND, "find in page · next / previous match"),
     ("z / Z", "collapse focused reply · collapse all"),
@@ -689,6 +707,7 @@ mod tests {
             Command::Wider,
             Command::ToggleLinkAddresses,
             Command::ToggleOutline,
+            Command::ToggleBookmarkSidebar,
             Command::TogglePageInfo,
             Command::ToggleMenuBar,
             Command::CollapseAllReplies,

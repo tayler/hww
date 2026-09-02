@@ -72,6 +72,7 @@ pub struct Checks {
     pub outline: bool,
     pub page_info: bool,
     pub menu_bar: bool,
+    pub bookmark_sidebar: bool,
 }
 
 impl Checks {
@@ -82,6 +83,7 @@ impl Checks {
             Checked::Outline => self.outline,
             Checked::PageInfo => self.page_info,
             Checked::MenuBar => self.menu_bar,
+            Checked::BookmarkSidebar => self.bookmark_sidebar,
         }
     }
 }

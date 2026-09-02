@@ -110,6 +110,18 @@ edit the settings panel offers, put where the thing being edited is. A control i
 allowed only there, only for a document hww assembled, and only through `RenderCtx::reading_list`,
 which `builtin_view` sets from one exact address so no fetched page can be drawn holding one.
 
+The bookmarks sidebar is chrome and not a built view, and the distinction is worth keeping: it
+draws `Archive::bookmark_marks` in a `Panel::left` beside the page rather than assembling a
+document, so it needs no address, no `View` variant and no `Provenance`. Its visibility is a
+`Settings` bool and not a `Chrome` flag, because a surface summoned by a key has to be remembered
+between runs — which is also why `Escape` must not close it, as `Escape` clears session chrome and
+would otherwise rewrite the settings file. It is registered before `CentralPanel` and so precedes
+the page in the Tab cycle, which the strip being off until a key asks for it is what bounds. Its
+band bounds what is *built* — a row's label, its mark's address, its request — and never which rows
+are laid out: a control that is not drawn is not in egui's focus cycle, so a band-bounded strip
+gave a pointer the whole list and a keyboard the top of it. `tab_frames` and AccessKit widen it to
+every row, as `lays_out_whole_page` does one panel over.
+
 A built view goes through `ReaderApp::install`/`commit` like every other page, never a fourth
 `Page` variant, so it inherits find, Tab, the outline, and menu gating. Adding a view is a
 `View` variant, an address in `builtin_view`, an arm in `show_builtin`, and a row in the test
@@ -235,11 +247,29 @@ reading-list row has none, because hww never fetched it, so `archive::well_known
 `Arrival::Built` no longer claims no third party was contacted. The history neither stores an icon
 nor draws a column: it is thousands of rows nobody chose.
 
+The bookmarks sidebar is the third surface that draws marks and adds no permission to the two
+above: its rows are bookmarks, so `Mark::Kept` already covers them, and it reaches the network
+through `ReaderApp::load_site_icons` like the lists do. It is also the one surface that draws
+marks with no page under it, which `ReaderApp::mark_owner` answers with `net::ReqId::CHROME`: a
+reply that no navigation makes stale, matched by `reply_is_wanted` against the store rather than
+against the column. That owner reaches the *disk* half of the door only. A read contacts nobody,
+so `NoRequests` may have it too; a fetch with no page on screen is a request no page-info panel
+could ever report, since the counters are the page's and the next commit resets them, so the
+strip asks for nothing new until there is a page to account for it. What it adds is a surface that outlives
+the page under it, and the answer to that is in `ImageStore`: a *settled* mark survives
+`clear_page` and is evicted against `MARK_CAPACITY` rather than the pictures' `LRU_CAPACITY`, or a
+photo-heavy page would evict the strip and have it re-read on every navigation. A *pending* mark
+is dropped with the page, because its reply is matched against the page being left and a retained
+`Loading` entry would strand that row for the session.
+
 Site icons are also the one picture kept on disk, in `reader::iconcache`, and the read/write
 asymmetry there is load-bearing: **any** mark may be drawn from that store under **every** policy,
 `NoRequests` included, because a read contacts nobody; only a mark for a row of a marked list may
 be written to it, because `ReaderApp::ensure_favicon` fires on every page hww shows and a write
-there would be a favicon on disk for every host visited, outliving *forget history*. The write
+for every page would be a favicon on disk for every host visited, outliving *forget history*. The
+rule is about the address and not the door: a page the archive names is one whose favicon *is* a
+row's mark, and `ReaderApp::favicon_mark` asks the archive rather than assuming from which door
+the request came, so a bookmarked page being read writes its own mark and no other page can. The write
 permission is decided on the UI thread and carried to the worker in `Job::Image`'s `cache_as` — a
 worker cannot see the archive and must never decide. A cache hit must not reach
 `ImageStore::record_request`, which moves the host tally ahead of the request leaving; it takes
@@ -253,7 +283,14 @@ page-chosen string.
 
 Keep `referer(false)` on the client. Document requests carry no Referer. Image requests alone
 may set an origin-only Referer built from `Url::origin()`, never a path. The setting remains
-disableable and the disclosure remains reported.
+disableable and the disclosure remains reported. A site mark sends none whatever the setting says
+(`sends_referer`): those rows were drawn from `hww:bookmarks` and `hww:reading-list` before the
+sidebar existed, and a built page's origin is opaque, so the header went out empty — the strip
+draws the same rows over an ordinary page, and taking that page's origin would tell each
+bookmarked host's icon server what its reader is reading now. `Mark::Read` is refused with it
+rather than kept, because `favicon_mark` makes one address either kind: send the header for the
+unbookmarked page and withhold it for the kept one, and the header that is missing is the reader's
+bookmarks, told to the host watching for it.
 
 ## Site rules
 

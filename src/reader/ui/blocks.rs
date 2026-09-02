@@ -165,7 +165,7 @@ fn entries_ui(ui: &mut Ui, entries: &[ir::Entry], ctx: &mut RenderCtx<'_>) {
     let icon = entries
         .iter()
         .any(|e| e.icon.is_some())
-        .then(|| theme::snap(ctx.opts.base_size_pt * 1.25));
+        .then(|| theme::mark_box(ctx.opts));
     // `None` inside a card's summary or a list item, and the window rule is off for the whole
     // run when it is: the heights are keyed by top-level block, a nested run has no such index,
     // and borrowing the containing block's would have the two runs overwriting each other's

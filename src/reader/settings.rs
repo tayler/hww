@@ -79,6 +79,22 @@ pub struct Settings {
     /// panels), and a menu bar that cannot costs a row of every page forever. `F10` reveals it
     /// again, so turning it off is never a way to lose the reader's own controls.
     pub show_menu_bar: bool,
+    /// Whether the bookmarks sidebar is drawn.
+    ///
+    /// The second chrome decision in this struct, and it is here for the same reason
+    /// [`Settings::show_menu_bar`] is: a surface the reader can summon has to be remembered
+    /// between runs, or the key that summons it is a key they press every launch.
+    ///
+    /// Off by default, which is the opposite of its neighbour and deliberately so. The menu bar
+    /// is where a reader who knows nothing else about hww finds its controls, so it is on until
+    /// they say otherwise; a strip of site marks is worth a column of the reading measure only to
+    /// a reader who asked for it. An untouched install draws exactly what it drew before this
+    /// existed.
+    ///
+    /// It is a *sidebar* and never a "bookmarks bar" in anything a reader sees: the other
+    /// browsers' bookmarks bar is a horizontal strip on the key hww already spends on opening the
+    /// list. See `reader::menu::BOOKMARK_SIDEBAR`.
+    pub show_bookmark_sidebar: bool,
 }
 
 /// A `search_engine` this binary does not know falls back to the default, for exactly the
@@ -159,6 +175,7 @@ impl Default for Settings {
             keep_history: true,
             open_on: OpenOn::default(),
             show_menu_bar: true,
+            show_bookmark_sidebar: false,
         }
     }
 }
@@ -385,6 +402,20 @@ fn sync_dir(_dir: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// Serializes the two tests that move `HWW_CONFIG_DIR`.
+    ///
+    /// The variable is process-wide and `cargo test` is one process, so
+    /// `the_config_directory_is_the_one_the_platform_defines` — which has to *unset* it to see
+    /// what the platform would answer — and `settings_round_trip_and_survive_a_corrupt_file`
+    /// were racing. Losing the race is not a flaky assertion: with the variable gone,
+    /// `settings_path` resolves to the developer's own `config_dir()`, so the round-trip test
+    /// reads their real settings and, on the other side of the window, `save` writes a fixture
+    /// over them.
+    ///
+    /// A lock rather than merging the two into one test, because they are about different
+    /// things and the second is already three tests in a trench coat for this same reason.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The per-platform directory, spelled out where a test can read it.
     ///
     /// `cfg`-selected, so each of these runs on exactly one CI job and the other two arms are
@@ -394,6 +425,7 @@ mod tests {
     /// kind of constant that no local reasoning protects: it has to be pinned.
     #[test]
     fn the_config_directory_is_the_one_the_platform_defines() {
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: single-threaded test; the variable is restored before it returns.
         let saved = std::env::var_os("HWW_CONFIG_DIR");
         unsafe { std::env::remove_var("HWW_CONFIG_DIR") };
@@ -421,6 +453,7 @@ mod tests {
     /// `HWW_CONFIG_DIR` is process-wide, so these run as one test rather than racing.
     #[test]
     fn settings_round_trip_and_survive_a_corrupt_file() {
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("hww-settings-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         // SAFETY: single-threaded within this test, and the variable is read-only elsewhere.
@@ -437,6 +470,7 @@ mod tests {
         want.send_image_referer = false;
         want.scroll_lines = 5.0;
         want.show_menu_bar = false;
+        want.show_bookmark_sidebar = true;
         want.keep_bookmarks = false;
         want.keep_reading_list = false;
         want.keep_history = false;
@@ -477,6 +511,10 @@ mod tests {
         // to `false` would hide the menu bar for everybody who already has a settings file,
         // which is precisely the population that would not know `F10` brings it back.
         assert!(s.show_menu_bar);
+        // The other way round, and for the mirror-image reason: a reader with an existing
+        // settings file did not ask for a strip of site marks, so an upgrade must not hand them
+        // one and take a column of the reading measure to do it.
+        assert!(!s.show_bookmark_sidebar);
     }
 
     /// A hand-edited file is the only way in, so the accessor and not the field is what the

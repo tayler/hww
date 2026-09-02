@@ -151,6 +151,7 @@ pub enum FieldId {
     ReplyIndent,
     StopIndentingAfter,
     ShowMenuBar,
+    ShowBookmarkSidebar,
     SearchEngine,
     KeepBookmarks,
     OpenOn,
@@ -162,7 +163,7 @@ pub enum FieldId {
 impl FieldId {
     /// Every field. Walked by the tests, and by nothing else: the panel walks [`fields`],
     /// which carries the order and the grouping.
-    pub const ALL: [FieldId; 20] = [
+    pub const ALL: [FieldId; 21] = [
         FieldId::LineWidth,
         FieldId::TextSize,
         FieldId::LineSpacing,
@@ -177,6 +178,7 @@ impl FieldId {
         FieldId::ReplyIndent,
         FieldId::StopIndentingAfter,
         FieldId::ShowMenuBar,
+        FieldId::ShowBookmarkSidebar,
         FieldId::SearchEngine,
         FieldId::KeepBookmarks,
         FieldId::OpenOn,
@@ -209,6 +211,7 @@ impl FieldId {
             FieldId::Zoom => (None, "zoom_factor"),
             FieldId::ScrollStep => (None, "scroll_lines"),
             FieldId::ShowMenuBar => (None, "show_menu_bar"),
+            FieldId::ShowBookmarkSidebar => (None, "show_bookmark_sidebar"),
             FieldId::SearchEngine => (None, "search_engine"),
             FieldId::KeepBookmarks => (None, "keep_bookmarks"),
             FieldId::OpenOn => (None, "open_on"),
@@ -645,6 +648,18 @@ pub fn fields() -> Vec<Field> {
             control: Toggle,
         },
         Field {
+            id: F::ShowBookmarkSidebar,
+            group: G::Window,
+            label: "Show the bookmarks sidebar",
+            note: Some(
+                "A narrow strip down the left edge with the site mark of every page you have \
+                 bookmarked; click one to open it. It draws the marks hww has already kept and \
+                 asks the sites on screen for the ones it has not.",
+            ),
+            keys: crate::reader::menu::BOOKMARK_SIDEBAR,
+            control: Toggle,
+        },
+        Field {
             id: F::SearchEngine,
             group: G::Search,
             label: "Search with",
@@ -769,6 +784,7 @@ pub fn get(s: &Settings, id: FieldId) -> Value {
         FieldId::ReplyIndent => Value::Num(s.read.indent_per_depth),
         FieldId::StopIndentingAfter => Value::Num(f32::from(s.read.max_thread_indent)),
         FieldId::ShowMenuBar => Value::Bool(s.show_menu_bar),
+        FieldId::ShowBookmarkSidebar => Value::Bool(s.show_bookmark_sidebar),
         FieldId::SendImageReferer => Value::Bool(s.send_image_referer),
     }
 }
@@ -900,6 +916,11 @@ pub fn set(s: &mut Settings, id: FieldId, v: Value) {
         FieldId::ShowMenuBar => {
             if let Some(b) = v.boolean() {
                 s.show_menu_bar = b;
+            }
+        }
+        FieldId::ShowBookmarkSidebar => {
+            if let Some(b) = v.boolean() {
+                s.show_bookmark_sidebar = b;
             }
         }
         FieldId::SendImageReferer => {
@@ -1048,6 +1069,7 @@ mod tests {
                 | FieldId::ReplyIndent
                 | FieldId::StopIndentingAfter
                 | FieldId::ShowMenuBar
+                | FieldId::ShowBookmarkSidebar
                 | FieldId::SearchEngine
                 | FieldId::KeepBookmarks
                 | FieldId::OpenOn

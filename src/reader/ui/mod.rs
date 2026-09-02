@@ -396,6 +396,47 @@ pub fn follow_focus(resp: &egui::Response) {
     }
 }
 
+/// Hand the focus on to the widget after `resp`, as Tab would, when a key was what pressed it.
+///
+/// For a control that removes itself when it is used, which every one of the picture-loading
+/// controls is: the placeholder redraws as "loading from host…" the moment the request goes
+/// out, the button carrying the focus is not among that frame's widgets, and egui's
+/// dead-man's-switch clears the focus rather than guessing where it should go. The reader who
+/// tabbed to the twentieth picture on a page pressed Enter and found the next Tab starting
+/// again at the first link. So the press moves the focus itself: surrender it and ask for the
+/// next widget, which the one laid out after this one claims later in the same frame.
+///
+/// Same frame, because a frame later the button is gone and there is nothing left to move
+/// focus *from*; the next widget is drawn in this one wherever the reading column's band
+/// reaches, which is a windowful past the picture the reader is looking at. A control that is
+/// the last focusable widget of the frame hands the focus to nobody and loses it, which is
+/// what it did before this existed.
+///
+/// The key test is egui's own condition for a keyboard press standing in for a click. A mouse
+/// click leaves the focus where it was — egui gives none to a clicked button — and moving the
+/// ring onto the following link would answer a question the pointer never asked.
+pub fn advance_focus(resp: &egui::Response) {
+    if !resp.has_focus() {
+        return;
+    }
+    // Consumed, not merely read. egui turns Enter and Space into a click on whatever holds the
+    // focus when it computes that widget's response, and the widget this hands the focus to is
+    // drawn later in this same frame — so leaving the press in the events would fire it too,
+    // and the one after that, down the rest of the page. With the next control that is a second
+    // picture loaded unasked; with an ordinary link it is a navigation the reader never chose.
+    let by_key = resp.ctx.input_mut(|i| {
+        i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+            || i.consume_key(egui::Modifiers::NONE, egui::Key::Space)
+    });
+    if !by_key {
+        return;
+    }
+    resp.ctx.memory_mut(|m| {
+        m.surrender_focus(resp.id);
+        m.move_focus(egui::FocusDirection::Next);
+    });
+}
+
 pub use app::{ReaderApp, run};
 
 /// Launch arguments, kept out of `app` so `bin/hww.rs` stays a thin main.

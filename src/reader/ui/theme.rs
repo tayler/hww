@@ -496,6 +496,17 @@ pub fn wordmark_font(opts: &ReadOpts) -> FontId {
 }
 
 /// Vertical padding inside a notice bar, in points. Integer because `egui::Margin` is `i8`.
+/// One site mark's box, square, in points.
+///
+/// A function and not two constants, because a mark is drawn in three places — the entries
+/// column of a built list, the bookmarks sidebar, and whatever the next surface is — and a
+/// reader who meets the same site in two of them should meet the same square. Scaled off the
+/// reading size for the reason everything else here is: a mark beside a headline is sized
+/// against the headline.
+pub fn mark_box(opts: &ReadOpts) -> f32 {
+    snap(opts.base_size_pt * 1.25)
+}
+
 pub fn bar_pad(opts: &ReadOpts) -> i8 {
     (opts.base_size_pt * 0.5).round().clamp(6.0, 24.0) as i8
 }
