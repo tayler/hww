@@ -132,6 +132,16 @@
 //! a mark there is a guess that may 404, and README's promise about that list is amended to say
 //! so: no *page* on it is fetched until the reader opens one, and that is still true.
 //!
+//! **The bookmarks sidebar is the third surface that draws marks**, and it asks the same two
+//! questions of this module rather than any new one: [`Archive::bookmark_marks`] is what it
+//! reads, so its rows are the same rows in the same order the view draws, and every address it
+//! requests came out of [`mark_beside`] like the column's. What it adds is a surface that is up
+//! while the reader is on some *other* page, and the two answers to that are elsewhere: the band
+//! keeps it to a screenful of requests whatever the list's length, and `ui::images::clear_page`
+//! keeps a settled mark across a navigation so the strip is not refetched on every click. It
+//! stores nothing of its own and is not a fourth tenant; it is a second reader of the first
+//! one's rows.
+//!
 //! **The mark's bytes are kept, and the address is why that is allowed.** `reader::iconcache`
 //! holds them, and holds the argument; the short form is that the rule against writing what hww
 //! fetched separates bytes revealing *what you read* from bytes revealing *which sites you
@@ -531,6 +541,10 @@ impl Archive {
 
     /// How many pages the bookmarks holds. Not `items.len()`, which counts the history and
     /// whatever a later build wrote as well.
+    ///
+    /// A walk of `items` and no allocation, which is also what makes it the right thing for the
+    /// bookmarks sidebar to ask every frame: the strip's length has to be right or its
+    /// scrollbar and every row under its band move as marks arrive.
     pub fn len(&self) -> usize {
         self.bookmarks().count()
     }
@@ -571,6 +585,44 @@ impl Archive {
             .iter()
             .filter(|i| matches!(i.kind, Kind::Bookmark | Kind::ReadNext))
             .filter_map(|i| mark_beside(i, Mark::Shown))
+    }
+
+    /// The bookmarks as the sidebar draws them: address, label, and the site mark beside it.
+    ///
+    /// Most recent first, like [`Archive::bookmarks`] it is built on, because the strip and the
+    /// `hww:bookmarks` view are two windows onto one list and a reader who sees them disagree
+    /// about the order learns not to trust either.
+    ///
+    /// Its own method rather than the caller pairing [`Archive::bookmarks`] with a mark of its
+    /// own devising, and [`mark_beside`] is why: that function is the door where a credential
+    /// comes off an address and where a scheme `fetch` does not speak is refused, and it is
+    /// private so that there is exactly one of it. A second caller deriving `/favicon.ico` for
+    /// itself would be a second door, and the first hand-edited `archive.json` carrying
+    /// `file:///etc/passwd` in an `icon` field would find it.
+    ///
+    /// The mark is an `Option` and the row is yielded either way: a bookmark whose address
+    /// yields nothing still opens, and the strip draws an empty slot rather than dropping the
+    /// row and renumbering everything under it.
+    ///
+    /// **A window and not the list**, because the caller draws a window: `skip` rows are stepped
+    /// over before anything is built for them. Both of the things this yields cost — `label`
+    /// allocates and may parse the address, and `mark_beside` parses one or two more — so the
+    /// strip asking for all of them at repaint rate was a `Url::parse` per bookmark per frame
+    /// against a list capped in the thousands, to draw the thirty rows in its band. Skipping
+    /// before the map rather than after is the whole of the fix: [`Archive::bookmarks`] yields
+    /// borrowed items and allocates nothing.
+    ///
+    /// [`Archive::len`] is what the caller pairs this with to keep the rows it skips as tall as
+    /// the rows it draws.
+    pub fn bookmark_marks(
+        &self,
+        skip: usize,
+        take: usize,
+    ) -> impl Iterator<Item = (&str, String, Option<String>)> + '_ {
+        self.bookmarks()
+            .skip(skip)
+            .take(take)
+            .map(|i| (i.url.as_str(), i.label(), mark_beside(i, Mark::Shown)))
     }
 
     /// Whether any marked row still names this icon address.
@@ -1354,6 +1406,58 @@ mod tests {
     /// Settings with keeping on, which is the default.
     fn on() -> Settings {
         Settings::default()
+    }
+
+    /// The window is the rows it claims to be, because the strip positions everything by index.
+    ///
+    /// `skip`/`take` is the only logic this façade adds — the marks themselves are `mark_beside`,
+    /// pinned by `a_stored_mark_is_checked_again_before_it_is_drawn` and the three tests beside
+    /// it — and it is the half a screenshot cannot catch. The strip pads above and below with
+    /// `first * step` and `(count - last) * step`, so a window off by one row draws every mark
+    /// against the wrong bookmark and the reader clicks a square for a page they did not choose.
+    #[test]
+    fn the_sidebars_window_is_the_slice_of_the_list_it_names() {
+        let mut a = Archive::new();
+        for i in 0..5 {
+            a.bookmark(
+                &on(),
+                &u(&format!("https://example.com/{i}")),
+                Some(&format!("page {i}")),
+                None,
+            );
+        }
+        let all: Vec<&str> = a.bookmarks().map(|i| i.url.as_str()).collect();
+        assert_eq!(all.len(), 5);
+
+        let window: Vec<String> = a
+            .bookmark_marks(1, 2)
+            .map(|(url, _, _)| url.to_owned())
+            .collect();
+        assert_eq!(
+            window,
+            all[1..3].iter().map(|u| u.to_string()).collect::<Vec<_>>(),
+            "the window must be the rows the strip skipped space for"
+        );
+
+        // A window running off the end yields what exists and does not panic; the strip asks
+        // for one row past the band on purpose. See `measure::Band::rows`.
+        assert_eq!(a.bookmark_marks(4, 9).count(), 1);
+        assert_eq!(a.bookmark_marks(9, 9).count(), 0);
+        // And the count the strip pads against is the same list this walks.
+        assert_eq!(a.len(), all.len());
+    }
+
+    /// The label travels with the row, because it is the only name an assistive technology gets
+    /// for a control that carries no text.
+    #[test]
+    fn a_sidebar_row_is_named_even_when_the_page_had_no_title() {
+        let mut a = Archive::new();
+        a.bookmark(&on(), &u("https://example.com/untitled"), None, None);
+        let (_, label, _) = a.bookmark_marks(0, usize::MAX).next().expect("one row");
+        assert!(
+            !label.trim().is_empty(),
+            "a row with no name is an unreachable control"
+        );
     }
 
     #[test]

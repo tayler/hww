@@ -80,10 +80,21 @@ const ICON_PX: u32 = 64;
 ///
 /// Three answers and not a bool, because "may be drawn from the store" and "may be written to
 /// the store" are different permissions and the middle case is the one that matters:
-/// `ReaderApp::ensure_favicon` fires on every page hww shows and so may only ever read, while
-/// `ReaderApp::load_site_icons` is handed addresses a marked list still names and so may write.
-/// A bool would have collapsed those two into whichever answer was written first, and the
-/// collapse in the permissive direction is a favicon on disk for every host the reader visited.
+/// `ReaderApp::load_site_icons` is handed addresses a marked list still names and so may write,
+/// while `ReaderApp::ensure_favicon` fires on every page hww shows and may write only for the
+/// one it can prove the archive names — `ReaderApp::favicon_mark` is that proof, and answers
+/// `Read` for every other page. A bool would have collapsed the two into whichever answer was
+/// written first, and the collapse in the permissive direction is a favicon on disk for every
+/// host the reader visited.
+///
+/// It answers a third question with the same three words, and `Kept` is the only yes to that
+/// one too: whether the entry belongs to a *list* rather than to the page on screen, which is
+/// what decides the ceiling it is evicted against and whether it survives the next commit. See
+/// `ReaderApp::note_list_mark`, and `images::MARK_CAPACITY` for the budget it buys.
+///
+/// The two questions agree on every caller hww has, and they are still asked apart: a later
+/// surface that draws a bookmark's mark without writing one would need the class and not the
+/// permission, and a `Mark` read as a single yes-or-no would hand it both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mark {
     /// Not a mark: an article picture, which never touches the store in either direction.
@@ -92,6 +103,51 @@ enum Mark {
     Read,
     /// A mark for a row of a marked list: drawn from the store, and written to it.
     Kept,
+}
+
+/// Whether one image request may carry a Referer: the reader's setting, and never for a site
+/// mark of any kind.
+///
+/// Until the sidebar existed every [`Mark::Kept`] request was made while a built page was on
+/// screen — `hww:bookmarks` or `hww:reading-list` — and a built page's origin is opaque, so
+/// `fetch::page_origin` answered `None` and the header went out empty however the setting was
+/// set. The strip draws those same rows over an ordinary page, so `base` became whatever the
+/// reader happens to be reading, and every bookmarked host's icon server would have been told it.
+/// That is a cross-site disclosure carried by a request the reader did not make, in exchange for
+/// nothing: a site mark is identity, and no host serves one differently for a referrer.
+///
+/// [`Mark::Read`] is refused for a second reason, and it is the sharper one. A page's own favicon
+/// would carry only that page's origin, which tells its host what it already knows — but
+/// `ReaderApp::favicon_mark` makes the *same* address a `Mark::Kept` request when a bookmark
+/// names it, and a rule that sent the header for one and not the other would put the reader's
+/// bookmarks in the request: a host watching for the missing Referer would learn which of its
+/// pages this reader has kept. One answer for every mark is what closes that, and it costs a
+/// header nobody needed.
+fn sends_referer(setting: bool, mark: Mark) -> bool {
+    setting && mark == Mark::No
+}
+
+/// Who owns a mark drawn with nothing in the reading column, which is only ever the sidebar.
+///
+/// [`Mark::Read`] is a page's own favicon and there is no page to draw it beside; [`Mark::No`]
+/// is an article picture, which belongs to a page by definition. Neither has anything to draw
+/// with no page, so neither gets an owner and neither reaches the door.
+fn chrome_owner(mark: Mark) -> Option<ReqId> {
+    (mark == Mark::Kept).then_some(ReqId::CHROME)
+}
+
+/// [`ReaderApp::awaits`], with the two facts it reads passed in: what is on screen, and whether
+/// the image store is still waiting for this address.
+///
+/// Its own function so the rule can be tested. Getting it wrong is invisible in both directions
+/// and neither shows up in a picture: too strict and the sidebar's marks are dropped on arrival
+/// and the strip stays a column of empty squares, too loose and a texture from a page the reader
+/// left is uploaded over the one they are reading.
+fn reply_is_wanted(page: ReqId, shown: Option<ReqId>, pending: bool) -> bool {
+    if page == ReqId::CHROME {
+        return pending;
+    }
+    shown == Some(page)
 }
 
 const URL_BAR_ID: &str = "hww-url-bar";
@@ -409,6 +465,13 @@ pub struct ReaderApp {
     status: Option<(String, Instant)>,
     /// The link under the pointer right now. Its own slot rather than a status message, or a
     /// moment's hover would bury whatever the reader was actually told.
+    ///
+    /// **One slot for every surface**, page and chrome alike. `ui` clears it before any panel
+    /// runs and each surface writes it as the pointer reaches a link, so the write in `central`
+    /// has to leave a value alone rather than assign over it: the bookmarks sidebar draws
+    /// before the page and an unconditional assignment would erase its row every frame. The
+    /// pointer is only ever in one place, so the surfaces never compete for it, and a later
+    /// chrome surface that reports a hover needs no slot of its own.
     hover_href: Option<String>,
     /// Last frame's status-strip height, so the hover overlay can sit on its top edge.
     strip_height: f32,
@@ -987,6 +1050,7 @@ impl ReaderApp {
             .bookmark(&self.settings, &url, title.as_deref(), icon.as_deref())
         {
             Stored::Added => {
+                self.keep_page_mark();
                 if self.save_archive() {
                     // Named from what was *stored* rather than from the page: that string has
                     // been flattened to one line and capped, so the toast cannot be a paragraph
@@ -1012,6 +1076,46 @@ impl ReaderApp {
             // and saying so is better than an `unreachable!` that a later caller could reach.
             Stored::Refused => self.flash(notice::CANNOT_READ_LATER.to_owned()),
         }
+    }
+
+    /// Put the mark of the page just kept on the disk, if it is not there already.
+    ///
+    /// The other half of [`ReaderApp::favicon_mark`], for the order the reader actually does it
+    /// in: read a page, then keep it. By then its favicon has already been fetched and drawn as
+    /// the page's own — the bytes are a texture and nothing kept the file they came from — and
+    /// every surface that would ask again skips a `src` the store already holds. So the strip's
+    /// new row draws from this session's memory and has nothing to draw from in the next one.
+    ///
+    /// One small request to the host that just served the page, for the icon it just served,
+    /// made when the reader asked hww to remember the page. It is counted and disclosed like
+    /// every other, it is the same request opening the bookmarks would make, and it is skipped
+    /// entirely when the file is already there or when the policy allows no request at all.
+    /// Nothing here is reachable for a page that was not kept: the archive is asked again inside
+    /// `favicon_mark`, so an address it does not name yields `Mark::Read` and no `cache_as`.
+    fn keep_page_mark(&mut self) {
+        let Some(src) = self.shown().and_then(|r| r.loaded.doc.favicon.as_deref()) else {
+            return;
+        };
+        if !self.settings.read.images.allows_any_request() {
+            return;
+        }
+        let src = src.to_owned();
+        // Already answered, either way: the file is here, or this address was asked and served
+        // nothing. `kept_mark` is the door for the first and does not need this one.
+        if archive::icon_address(&src)
+            .is_none_or(|key| !matches!(self.icons.known(&key), iconcache::Known::Unknown))
+        {
+            return;
+        }
+        let mark = self.favicon_mark(&src);
+        if mark != Mark::Kept {
+            return;
+        }
+        // `automatic`, because nobody asked for this picture — the reader asked for the page to
+        // be kept. A worker that reaches it after the reader has navigated away answers
+        // `Msg::ImageDropped` rather than fetching, which is the right answer for a mark whose
+        // row can be drawn again whenever the strip or the list next wants it.
+        self.load_favicon_job(&src, true, mark);
     }
 
     /// `Shift+L`, the context menu's "Read later", and the menu row: put one link on the reading
@@ -1588,6 +1692,76 @@ impl ReaderApp {
         self.request_image(src, ICON_PX, false, automatic, mark)
     }
 
+    /// Whether a subresource reply stamped `page` is still wanted.
+    ///
+    /// Two rules, because [`ReaderApp::mark_owner`] hands out two kinds of owner. A page's reply
+    /// is wanted while that page is the one on screen; that is the test this file has always
+    /// made, and it is what stops a texture being uploaded for a document the reader has left.
+    ///
+    /// A [`net::ReqId::CHROME`] reply belongs to the sidebar, which no navigation makes stale,
+    /// so the question is asked of the store instead: is the strip still waiting for this
+    /// address? It is not, if a page committed in the meantime — `ImageStore::clear_page` drops
+    /// every *pending* mark — and then this is exactly the old answer, the reply is dropped, and
+    /// the row is asked for again through the ordinary door with a page to own it. Without the
+    /// test the same bytes would arrive twice: once here and once for the page that re-asked.
+    fn awaits(&self, page: ReqId, src: &str) -> bool {
+        reply_is_wanted(
+            page,
+            self.shown().map(|r| r.req),
+            self.images.is_pending(src),
+        )
+    }
+
+    /// Which request a mark drawn now belongs to, or `None` when nothing may ask for one.
+    ///
+    /// A page's mark belongs to that page: its reply is wanted while the page is on screen and
+    /// is thrown away when the reader leaves, which is what keeps a texture from being uploaded
+    /// for a document nobody is reading. The bookmarks sidebar is the one surface that draws
+    /// marks with *no* page under it — `OpenOn::Nothing`, and the frames of a launch before the
+    /// first view commits — and it used to draw a column of empty squares there, because the
+    /// reply had no page to be matched against and so the request was never made at all.
+    ///
+    /// [`net::ReqId::CHROME`] is what it belongs to instead: a surface that outlives every page,
+    /// which no navigation makes stale. It is handed out here and nowhere else.
+    ///
+    /// **Only [`Mark::Kept`] gets it, and only the disk half of the door acts on it.** This
+    /// answers for `ReaderApp::kept_mark`, which reads a file and contacts nobody;
+    /// `request_image` still wants a page, so with none on screen the strip draws the marks this
+    /// machine already holds and asks for no new ones. That is the disclosure rule and not
+    /// timidity: a fetch is counted in the page's own account and reported by its page-info
+    /// panel, and a fetch made with no page on screen is one the reader has no panel to read it
+    /// in — the counters are the page's, so the next commit resets them and the request is
+    /// reported nowhere at all. A read of a file needs no such panel, which is the same
+    /// asymmetry `reader::iconcache` argues for the store itself.
+    fn mark_owner(&self, mark: Mark) -> Option<ReqId> {
+        match self.shown() {
+            Some(ready) => Some(ready.req),
+            None => chrome_owner(mark),
+        }
+    }
+
+    /// File this address as a *list's* mark, which is the class question and not the disk one.
+    ///
+    /// [`Mark::Kept`] alone, and the third permission `Mark` carries: a mark drawn from the store
+    /// may be any of the three, a mark written to it must be `Kept`, and a mark that outlives the
+    /// page it was drawn on must be `Kept` as well. `ImageStore::note_mark` is what buys the last
+    /// two of those — a settled entry that survives `clear_page` and is evicted against
+    /// `MARK_CAPACITY` rather than the pictures' ceiling — and both are wrong for the page's own
+    /// favicon, which is what [`Mark::Read`] is.
+    ///
+    /// Wrong twice over, and neither failure is visible. The favicon of every host visited would
+    /// compete for the strip's budget, so a reader who browsed a few dozen sites with the sidebar
+    /// up would have its rows evicted against the very ceiling written to protect them and
+    /// re-read off the disk on the next frame. And a *transient* favicon failure would stick for
+    /// the session: `clear_page` keeps a settled mark, and `ensure_favicon` returns early on an
+    /// address with any state at all, so a host that answered badly once would never be asked
+    /// again. A page's favicon goes with its page, which is what it did before the strip existed.
+    fn note_list_mark(&mut self, src: &str, mark: Mark) {
+        if mark == Mark::Kept {
+            self.images.note_mark(src);
+        }
+    }
+
     /// Draw a mark from `reader::iconcache` if it is there, and say whether that settled it.
     ///
     /// **The one place a request is decided against before a request is recorded.** It has to be
@@ -1609,11 +1783,11 @@ impl ReaderApp {
     /// says "do not re-request this". The words never reach a reader — neither `images::favicon`
     /// nor `images::site_icon` draws anything but a ready texture — which is `notice`'s problem
     /// and not this door's.
-    fn kept_mark(&mut self, src: &str) -> bool {
+    fn kept_mark(&mut self, src: &str, mark: Mark) -> bool {
         if self.icons.is_empty() {
             return false;
         }
-        let Some(page_req) = self.shown().map(|r| r.req) else {
+        let Some(page_req) = self.mark_owner(mark) else {
             return false;
         };
         // Through the archive's own door, so a key can never be built from an address that
@@ -1625,6 +1799,7 @@ impl ReaderApp {
         };
         match self.icons.known(&key) {
             iconcache::Known::Kept(path) => {
+                self.note_list_mark(src, mark);
                 self.images.begin(src, Source::Disk);
                 self.net.submit(Job::KeptIcon {
                     req: self.net.mint(),
@@ -1637,11 +1812,38 @@ impl ReaderApp {
                 true
             }
             iconcache::Known::Nothing => {
+                // Before the `fail`, and this is the arm that would be missed: a settled refusal
+                // never reaches `begin`, so without this a row's mark is filed as a picture and
+                // evicted against the pictures' ceiling.
+                self.note_list_mark(src, mark);
                 self.images
                     .fail(src, Failure::permanent(NO_SITE_ICON.to_owned()));
                 true
             }
             iconcache::Known::Unknown => false,
+        }
+    }
+
+    /// Which kind of mark the page's own favicon is: a row's, if a marked row names that exact
+    /// address, and otherwise the page's alone.
+    ///
+    /// The doctrine's write rule is about the *address*, not the door: what may be kept on disk
+    /// is a mark for a row of a marked list. Until this existed the door stood in for the rule —
+    /// `ensure_favicon` fires on every page hww shows, so it was `Mark::Read` and never wrote —
+    /// and the case that stands between the two is a bookmarked page being read. Its favicon and
+    /// its row's mark are one address and one request, so the reader who kept a page, opened it
+    /// again a week later and had the sidebar draw its mark the whole time still had nothing on
+    /// disk for it: the strip skips a `src` the store already holds, so the request that could
+    /// have written it never came from the list's door at all.
+    ///
+    /// Asking the archive is what makes the rule the rule. No page hww merely *visited* can
+    /// answer yes here, so nothing changes for the host of an ordinary page, and the permission
+    /// is re-asked when the write lands (see `Kept::Written`), because the reader may have
+    /// pressed `Ctrl+D` again while the bytes were in flight.
+    fn favicon_mark(&self, src: &str) -> Mark {
+        match archive::icon_address(src) {
+            Some(key) if self.archive.marks_icon(&key) => Mark::Kept,
+            _ => Mark::Read,
         }
     }
 
@@ -1655,11 +1857,17 @@ impl ReaderApp {
     /// is the one `ImagePolicy::NoRequests` exists to stop. `Never` deliberately does not: it
     /// turns off *article* images, and it meant that before the third policy arrived.
     ///
-    /// **Reads, and never writes** ([`Mark::Read`]). This fires on every page hww shows, marked
-    /// or not, so a write here would put a favicon on disk for every host the reader has visited
-    /// — a record that outlives *forget history*, exists with `keep_history` off, and has no
-    /// switch over it. What it may still do is draw a bookmarked site's own mark from the file
-    /// the bookmarks list already wrote. See `reader::iconcache`.
+    /// **Writes only for an address a marked row names**, which [`ReaderApp::favicon_mark`]
+    /// decides and this function does not. It fires on every page hww shows, marked or not, so a
+    /// write for the page's sake would put a favicon on disk for every host the reader has
+    /// visited — a record that outlives *forget history*, exists with `keep_history` off, and has
+    /// no switch over it. What the archive names is the other half: that address is already
+    /// written down, its file is deleted with the row that named it, and the reader kept the page
+    /// on purpose.
+    ///
+    /// The class question follows the same answer: a `Mark::Read` entry goes with its page and is
+    /// evicted against the pictures' ceiling, a `Mark::Kept` one is the strip's row and outlives
+    /// the commit. See `ReaderApp::note_list_mark`.
     fn ensure_favicon(&mut self) {
         // Asked before it is owned. The clone exists only to end the borrow of `self.page`
         // before `kept_mark` takes `&mut self`, and on every frame but the first the answer
@@ -1672,13 +1880,14 @@ impl ReaderApp {
             return;
         }
         let src = src.to_owned();
-        if self.kept_mark(&src) {
+        let mark = self.favicon_mark(&src);
+        if self.kept_mark(&src, mark) {
             return;
         }
         if !self.settings.read.images.allows_any_request() {
             return;
         }
-        self.load_favicon_job(&src, false, Mark::Read);
+        self.load_favicon_job(&src, false, mark);
     }
 
     /// Draw the site marks a marked list just laid out, for the rows near the window.
@@ -1703,6 +1912,13 @@ impl ReaderApp {
     /// thousand. `automatic: true`, so a worker that reaches a queued mark after the reader has
     /// navigated away drops it instead of contacting a host for a page nobody is looking at.
     fn load_site_icons(&mut self, srcs: &[String]) {
+        // Nothing to ask for is the steady state of every surface that calls this — a list whose
+        // marks have all settled, and every frame of the sidebar after the first few. The walk
+        // below is `Images::pending` over the whole state map, so answering it before the walk
+        // rather than inside the loop is what keeps an open strip off the frame budget.
+        if srcs.is_empty() {
+            return;
+        }
         // The same guard `autoload` carries, for the same reason and against a sharper failure.
         // While a navigation is in flight the pool answers an automatic job for the outgoing
         // page with `Msg::ImageDropped`, and the handler hands the `src` back by forgetting its
@@ -1732,7 +1948,7 @@ impl ReaderApp {
             // be mid-request at once, and reading a file on this machine contacts none of them.
             // Counting these against it drew a thirty-row band eight rows to a frame, waiting on
             // a ceiling that was never about them.
-            if self.kept_mark(src) {
+            if self.kept_mark(src, Mark::Kept) {
                 self.icons_asked.insert(src.clone());
                 continue;
             }
@@ -1825,16 +2041,18 @@ impl ReaderApp {
                 })
             })
             .flatten();
+        self.note_list_mark(src, mark);
         self.images.begin(src, Source::Network);
         // Recorded here, where the host is known and where the reader is told it, and taken
         // back by `ImageStore::forget` if the pool answers `Msg::ImageDropped` for it. A
         // counter moved for a request that never left is the panel claiming a disclosure that
         // did not happen.
+        let send_referer = sends_referer(self.settings.send_image_referer, mark);
         // The setting *and* whether this page can produce an origin at all, through the same
         // function the header is built with (`fetch::page_origin`). A page hww built itself has
-        // an opaque origin, so the bookmarks' site marks carry no Referer however the setting is
+        // an opaque origin, so a built view's site marks carry no Referer however the setting is
         // set, and a panel that counted the setting would report a disclosure that never left.
-        let referer = self.settings.send_image_referer && fetch::page_origin(&base).is_some();
+        let referer = send_referer && fetch::page_origin(&base).is_some();
         self.images
             .record_request(src, &host, referer, mark != Mark::No);
         // Decode straight to the reading column: without this, "load images" on a photo-heavy
@@ -1846,7 +2064,7 @@ impl ReaderApp {
             url,
             referrer: base,
             max_width,
-            send_referer: self.settings.send_image_referer,
+            send_referer,
             automatic,
             cache_as,
         });
@@ -2003,7 +2221,7 @@ impl ReaderApp {
                     // Against the page the request was made *from*, not the navigation in
                     // flight: see `Ready::req`. A picture whose page has been replaced is
                     // dropped, which is the whole reason the id is stamped there.
-                    if self.shown().map(|r| r.req) != Some(page) {
+                    if !self.awaits(page, &src) {
                         continue;
                     }
                     // Counted before the result is looked at: a cookie the CDN tried to set is
@@ -2031,7 +2249,7 @@ impl ReaderApp {
                     // navigation that failed and put the reader back on nothing — where the
                     // placeholder has to go back to offering itself rather than sit on
                     // `Loading` for a request no worker still holds.
-                    if self.shown().map(|r| r.req) != Some(page) {
+                    if !self.awaits(page, &src) {
                         continue;
                     }
                     // Takes back the entry and the disclosure the queued job had recorded.
@@ -2052,7 +2270,7 @@ impl ReaderApp {
                     if let Some(key) = archive::icon_address(&src) {
                         self.icons.forget(&key);
                     }
-                    if self.shown().map(|r| r.req) != Some(page) {
+                    if !self.awaits(page, &src) {
                         continue;
                     }
                     // Handed back exactly as a dropped job is: nothing was requested and nothing
@@ -2506,6 +2724,14 @@ impl ReaderApp {
         if k(Modifiers::COMMAND | Modifiers::SHIFT, Key::B) {
             self.open_bookmarks(true);
         }
+        // After its shifted twin above and not before it: `consume_key` ignores an *extra*
+        // Shift, so a bare `Cmd+B` tested first would swallow `Cmd+Shift+B` and the key that
+        // opens the bookmarks would toggle the sidebar instead. Through `run_command` rather
+        // than flipping the field here, because unlike the outline this is a saved setting and
+        // the arm there is what marks it dirty.
+        if k(Modifiers::COMMAND, Key::B) {
+            self.run_command(ctx, Command::ToggleBookmarkSidebar);
+        }
         if k(Modifiers::COMMAND | Modifiers::SHIFT, Key::O) {
             self.chrome.outline_open = !self.chrome.outline_open;
         }
@@ -2864,6 +3090,9 @@ impl eframe::App for ReaderApp {
         // Under the bars and above the page, docked: the one place a remark about the page
         // cannot scroll away and cannot be mistaken for the page.
         self.notice_bars(ui, &pal);
+        // Outboard of the outline, so the two stack in a fixed order rather than swapping
+        // places depending on which was opened first.
+        self.bookmark_sidebar(ui, &pal);
         self.outline_panel(ui, &pal);
         self.central(ui, &pal);
         // *After* the page, because the page is what discovers the hover. An overlay takes no
@@ -3026,6 +3255,7 @@ impl ReaderApp {
             outline: self.chrome.outline_open,
             page_info: self.chrome.info_open,
             menu_bar: self.settings.show_menu_bar,
+            bookmark_sidebar: self.settings.show_bookmark_sidebar,
         };
         let bar = menu_ui::bar(ui, pal, &self.settings, enable, checks);
         panel_edge(ui, bar.rect, Side::Bottom, pal);
@@ -3112,6 +3342,17 @@ impl ReaderApp {
                 self.settings_dirty = true;
                 if !self.settings.show_menu_bar {
                     self.flash("menu bar hidden; F10 brings it back".to_owned());
+                }
+            }
+            Command::ToggleBookmarkSidebar => {
+                self.settings.show_bookmark_sidebar = !self.settings.show_bookmark_sidebar;
+                self.settings_dirty = true;
+                // Only on the way *on*, and only when there is nothing to draw. The strip is an
+                // icon column with no room for a sentence, so an empty one reads as a fault
+                // rather than as an empty list; this is the one place with width for the answer.
+                // `ToggleMenuBar` above flashes on the way off for the mirror-image reason.
+                if self.settings.show_bookmark_sidebar && self.archive.is_empty() {
+                    self.flash(notice::NO_BOOKMARKS_YET.to_owned());
                 }
             }
             Command::CollapseAllReplies => self.collapse_all(),
@@ -3325,7 +3566,7 @@ impl ReaderApp {
     /// as well, so it cannot take the hover it exists to report.
     fn hover_strip(&mut self, ui: &mut Ui, pal: &theme::Palette) {
         self.hover_height = 0.0;
-        let Some(href) = &self.hover_href else {
+        let Some(href) = self.hover_href.as_ref() else {
             return;
         };
         // A page can hand us an arbitrarily long `data:` href, and the overlay grows upward
@@ -3562,6 +3803,183 @@ impl ReaderApp {
             self.find_scroll = true;
         }
         self.chrome.find = Some(query);
+    }
+
+    /// The bookmarks sidebar: one site mark per bookmark, down the left edge.
+    ///
+    /// Drawn from `archive.json` and not from the page, so unlike [`Self::outline_panel`] it
+    /// needs no `shown()` and stays up across every navigation. That is also what makes its
+    /// textures a different problem from the page's; see `ImageStore::clear_page`.
+    ///
+    /// **It precedes the page in the Tab cycle and there is no way around that**: egui takes a
+    /// side panel's space before `CentralPanel`, and its focus order is registration order. What
+    /// bounds the cost is that the strip is off until asked for and dismissed with one key,
+    /// which is the same answer `show_menu_bar` gives to the same objection.
+    ///
+    /// It is not bounded by the band, and that was the first attempt: with a control only for the
+    /// rows on screen a reader tabs past a screenful rather than past two thousand, and also
+    /// cannot reach row thirty-one by any means, because a widget that is not drawn is not in
+    /// egui's focus cycle and the strip has no scrollbar to say the rest are there. A pointer had
+    /// the whole list and a keyboard had the top of it. So the band bounds what is *built* — the
+    /// labels, the addresses, the requests — and `whole` widens the layout to every row on the
+    /// frames a key is reaching through.
+    ///
+    /// **With no page on screen it draws what this machine already holds.** `OpenOn::Nothing`,
+    /// and the frames of a launch before the first view commits, leave the reading column empty
+    /// and the strip up, and a mark drawn then belongs to no page: `ReaderApp::mark_owner` gives
+    /// it `net::ReqId::CHROME`, which no navigation makes stale, and `kept_mark` reads it off the
+    /// disk. What it does *not* do there is fetch — see `mark_owner` for why a request with no
+    /// page to report it in is one the reader could never read about — so a first run with an
+    /// empty icon store still opens on empty squares, and fills them the moment there is a page
+    /// to account for the requests.
+    fn bookmark_sidebar(&mut self, ui: &mut Ui, pal: &theme::Palette) {
+        if !self.settings.show_bookmark_sidebar {
+            return;
+        }
+        let opts = self.settings.read.clone();
+        // The same box the entries column uses; see `theme::mark_box`.
+        let box_size = theme::mark_box(&opts);
+        let pad = theme::snap(opts.base_size_pt * 0.5);
+        // One row's height including the gap under it, which is what lets the window below be
+        // arithmetic rather than a walk: every row in this strip is the same square.
+        let step = box_size + pad;
+        let count = self.archive.len();
+        // The strip's own half of `lays_out_whole_page`, and it is here for that function's two
+        // keyboard reasons rather than for its four page ones. **Tab**: egui moves focus among
+        // the widgets of the frame the key arrived in, so a row the band left out is a row Tab
+        // cannot reach — without this a reader with no pointer could walk the first screenful of
+        // bookmarks and no further, with nothing on screen to say the rest were there.
+        // **AccessKit**: the tree is built out of the widgets drawn this frame too, so a screen
+        // reader was told the strip held a screenful whatever the archive said.
+        //
+        // The cost is bounded the way the page's is: it is the frames a key is reaching through,
+        // not every frame, and what it builds is a button and a label per bookmark rather than a
+        // document.
+        let whole = self.tab_frames > 0 || accesskit_is_building(ui.ctx());
+        let mut open = None;
+        let mut hovered = None;
+        let mut wanted: Vec<String> = Vec::new();
+        let panel = egui::Panel::left("hww-bookmark-sidebar")
+            // Not resizable, unlike the outline: that panel holds text a reader may want more
+            // room for, and this one holds a square. There is one right width and dragging it
+            // wider would only add margin.
+            .resizable(false)
+            .show_separator_line(false)
+            .exact_size(box_size + pad * 2.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(pal.chrome_bg)
+                    .inner_margin(egui::Margin::symmetric(pad as i8, pad as i8)),
+            )
+            .show(ui, |ui| {
+                ui.style_mut().override_font_id = Some(theme::chrome_font(&opts));
+                egui::ScrollArea::vertical()
+                    .scroll_bar_visibility(
+                        egui::containers::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                    )
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = pad;
+                        // The window the strip will ask marks for, on the same terms the reading
+                        // column asks for its own: touching the band is enough, and the margin
+                        // either side is what makes a small scroll draw from what is already here.
+                        let top = ui.next_widget_position().y;
+                        let clip = ui.clip_rect();
+                        let band = measure::Band::around(clip.top(), clip.bottom());
+                        // Which rows those are, computed rather than discovered. The rows outside
+                        // the window are not built at all — see `Archive::bookmark_marks` — so
+                        // there is no row to ask `Band::skips` about, and every one of them is
+                        // the same height, so there does not need to be.
+                        let (first, last) = if whole {
+                            (0, count)
+                        } else {
+                            band.rows(top, step, count)
+                        };
+                        // The space the rows above the window would have taken, in one
+                        // allocation. Without it the strip is as long as its band and the
+                        // scrollbar, the row positions, and the band itself all move as the
+                        // reader scrolls.
+                        if first > 0 {
+                            ui.allocate_space(egui::vec2(box_size, first as f32 * step - pad));
+                        }
+                        for (url, label, icon) in self.archive.bookmark_marks(first, last - first) {
+                            let resp = ui.add_sized(
+                                egui::vec2(box_size, box_size),
+                                egui::Button::new("").frame(false),
+                            );
+                            // The button carries no text, so this is the only name an assistive
+                            // technology gets for it. The bookmark's own label, which is its
+                            // title or its address; see `archive::Item::label`.
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Link, true, &label)
+                            });
+                            // The strip scrolls itself to the row Tab just reached, exactly as
+                            // the reading column does. `scroll_to_me` is answered by the scroll
+                            // area the widget is inside, which here is the strip's own — the
+                            // objection in `follow_focus` is about a chrome widget that is
+                            // inside none and would have the *page* jump to a rect that is not
+                            // on it. Without this a reader tabbing past the visible rows moves a
+                            // focus ring they cannot see.
+                            super::follow_focus(&resp);
+                            theme::focus_ring(ui, &resp, pal);
+                            let drawn = icon.as_deref().is_some_and(|src| {
+                                super::images::paint_mark(ui, &self.images, src, resp.rect)
+                            });
+                            if !drawn {
+                                // A slot with nothing in it yet. A dim outline rather than a
+                                // glyph: the embedded faces carry no obvious placeholder mark,
+                                // and an empty square still says "a row is here" to a pointer.
+                                ui.painter().rect_stroke(
+                                    resp.rect.shrink(1.0),
+                                    theme::RADIUS,
+                                    egui::Stroke::new(1.0, pal.guide),
+                                    egui::StrokeKind::Inside,
+                                );
+                                // The same two questions `RenderCtx::note_icon` asks for the
+                                // reading column's marks, in the same order and for the same
+                                // reasons. **No state at all**, which is not what `drawn`
+                                // answers: a mark that settled as `Failed` paints nothing, so
+                                // asking `drawn` put it back into `wanted` and `icons_asked`
+                                // is cleared on commit, which re-requested a host that had
+                                // already said no once per navigation for as long as the strip
+                                // was open. **Touching the band**, whatever `whole` widened the
+                                // layout to: a Tab frame must not turn one keypress into a
+                                // request for every mark in the archive.
+                                if let Some(src) = icon
+                                    && self.images.state(&src).is_none()
+                                    && !band.skips(resp.rect.top(), box_size)
+                                {
+                                    // Moved, not cloned: `icon` is owned and is not read again.
+                                    wanted.push(src);
+                                }
+                            }
+                            if resp.clicked() {
+                                open = Some(url.to_owned());
+                            }
+                            if resp.hovered() || resp.has_focus() {
+                                hovered = Some(url.to_owned());
+                            }
+                        }
+                        if last < count {
+                            ui.allocate_space(egui::vec2(
+                                box_size,
+                                (count - last) as f32 * step - pad,
+                            ));
+                        }
+                    });
+            });
+        panel_edge(ui, panel.response.rect, Side::Right, pal);
+        // Written only when there is one, on the same terms `central` writes it: the strip is
+        // the first surface of the frame to answer today, and a bare assignment would make it
+        // the one that has to stay first.
+        if hovered.is_some() {
+            self.hover_href = hovered;
+        }
+        // The one door, so the strip gets the disk-first order, the policy gate, the
+        // `icons_asked` dedupe and the throttle without restating any of them.
+        self.load_site_icons(&wanted);
+        if let Some(url) = open {
+            self.follow_link(&url);
+        }
     }
 
     fn outline_panel(&mut self, ui: &mut Ui, pal: &theme::Palette) {
@@ -4148,7 +4566,12 @@ impl ReaderApp {
         self.focused_image = ctx.focus_image.clone();
         self.focused_comment = ctx.focus_comment.clone();
         self.focused_other = ctx.focus_other;
-        self.hover_href = ctx.hover_href.clone();
+        // Assigned only when the page has one, so a chrome surface that drew earlier in the
+        // frame keeps its own: see the field. The page still wins where both would answer,
+        // which is a case the pointer cannot actually produce.
+        if ctx.hover_href.is_some() {
+            self.hover_href = ctx.hover_href.clone();
+        }
         let action = ctx.action.take();
         let clicked = ctx.clicked_link;
         self.page.restore_shown(ready);
@@ -4249,6 +4672,85 @@ enum StripAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The strip's marks are not dropped for a page it never belonged to.
+    ///
+    /// Both halves of one rule, and the reason it is a function rather than a line at three
+    /// match arms. A reply for the page on screen is wanted and one for the page before it is
+    /// not, which is what keeps a texture off a document nobody is reading. A reply the sidebar
+    /// asked for outlives every page and is answered by the store instead: still pending means
+    /// the strip is still waiting for it, and a commit — which drops every pending mark — is
+    /// what makes it stale. Neither direction is visible in a screenshot: too strict is a column
+    /// of empty squares that never fills, too loose is the same bytes inserted twice.
+    #[test]
+    fn a_reply_belongs_to_what_asked_for_it() {
+        let page = ReqId::for_test(7);
+        let older = ReqId::for_test(6);
+        assert!(reply_is_wanted(page, Some(page), true));
+        assert!(
+            !reply_is_wanted(older, Some(page), true),
+            "a picture for the page the reader left is not wanted, pending or not"
+        );
+        assert!(
+            reply_is_wanted(ReqId::CHROME, None, true),
+            "the sidebar draws with no page under it, which is the whole point of the owner"
+        );
+        assert!(
+            reply_is_wanted(ReqId::CHROME, Some(page), true),
+            "and keeps waiting for it once a page arrives"
+        );
+        assert!(
+            !reply_is_wanted(ReqId::CHROME, Some(page), false),
+            "a commit dropped the pending mark, so the row is asked for again with an owner"
+        );
+    }
+
+    /// Only a list's mark may be drawn with no page, and `mark_owner` is where that is decided.
+    ///
+    /// `Mark::Read` is a page's own favicon and there is no page, so there is nothing to draw it
+    /// beside; `Mark::No` is an article picture, which is a page's by definition. Reachable only
+    /// through this function, so a later caller cannot invent a page-free owner for either.
+    #[test]
+    fn only_a_list_mark_is_owned_by_the_chrome() {
+        assert_eq!(chrome_owner(Mark::Kept), Some(ReqId::CHROME));
+        assert_eq!(
+            chrome_owner(Mark::Read),
+            None,
+            "a page's favicon needs its page"
+        );
+        assert_eq!(
+            chrome_owner(Mark::No),
+            None,
+            "an article picture is a page's"
+        );
+    }
+
+    /// A site mark of either kind carries no Referer, whatever the reader's setting says.
+    ///
+    /// Under `ui/` on the rule's own terms: it needs no `egui::Context`, and its failure is
+    /// invisible everywhere else. Nothing on screen changes, no test of the panel moves — the
+    /// count and the row would agree with each other and both be one line about a header the
+    /// reader never asked to send. What it would cost is a bookmarked host's icon server
+    /// learning, on every navigation with the strip open, which page its reader is on.
+    #[test]
+    fn a_site_mark_never_carries_a_referer() {
+        assert!(!sends_referer(true, Mark::Kept), "the strip must send none");
+        assert!(
+            !sends_referer(true, Mark::Read),
+            "and a page's own favicon must be indistinguishable from one a bookmark names, or \
+             the header that is missing tells the host which of its pages the reader kept"
+        );
+        assert!(
+            sends_referer(true, Mark::No),
+            "an article picture is unchanged"
+        );
+        for mark in [Mark::No, Mark::Read, Mark::Kept] {
+            assert!(
+                !sends_referer(false, mark),
+                "the setting still turns it off"
+            );
+        }
+    }
 
     /// This test belongs under `ui/` because [`APP_ID`] is handed directly to eframe. It needs
     /// no `egui::Context`, and its failure is otherwise invisible to Rust: Ubuntu matches a

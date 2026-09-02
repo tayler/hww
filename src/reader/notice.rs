@@ -99,6 +99,14 @@ pub const IMAGES_ARE_OFF: &str = "hww is set not to load images; change Images i
 /// somebody notices it was never written for a reader.
 pub const NO_SITE_ICON: &str = "this site served no icon at that address.";
 
+/// What the toast says when the bookmarks sidebar is opened with nothing to put in it.
+///
+/// The strip is one icon wide and has no room for a sentence, so an empty one is a bare column
+/// that reads as a rendering fault. The toast is the only surface with width for the answer,
+/// which is why this is said there and not in the panel. Reader-facing, so it lives here with
+/// the rest and is tested for glyph coverage in the default job.
+pub const NO_BOOKMARKS_YET: &str = "no bookmarks yet; the sidebar fills as you bookmark pages.";
+
 /// What the reader says when a key asks for pictures the page has, but in a format this
 /// renderer declines.
 ///

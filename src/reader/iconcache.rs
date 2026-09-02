@@ -24,6 +24,11 @@
 //! already in `archive.json`. Only a mark drawn for a row of a marked list may be written *to*
 //! it. That asymmetry is what keeps the masthead favicon — which fires on every page hww shows,
 //! marked or not — from turning this directory into a list of everywhere you have been.
+//! The bookmarks sidebar is the reader this asymmetry was written for and the one that arrived
+//! after it: it is up while the reader is on any page at all, it draws every mark it can from
+//! here under every policy, and it may still write, because its rows are bookmarks and a
+//! bookmark is a row of a marked list. Nothing about it needed a new permission, which is the
+//! test a fourth reader should be held to as well.
 //!
 //! **A bad entry is deleted, not complained about.** The exact opposite of `archive::load`, and
 //! the contrast is the argument: the archive holds what the reader cannot retype, so a bad parse

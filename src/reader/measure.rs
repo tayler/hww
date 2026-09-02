@@ -171,6 +171,35 @@ impl Band {
     pub fn skips(&self, y: f32, height: f32) -> bool {
         y + height < self.top || y > self.bottom
     }
+
+    /// Which of `count` uniform rows touch the band, given the y of the first and one row's
+    /// pitch. Half-open, and clamped to `count`.
+    ///
+    /// [`Band::skips`]'s counterpart for a list whose rows are all the same height. `skips` is
+    /// asked about a block that exists, one at a time; this is asked *instead of* building the
+    /// rows, so it has to be arithmetic rather than a walk — which it can be, because the pitch
+    /// is fixed. What that saves at the bookmarks sidebar, the caller it was written for, is a
+    /// label and one or two `Url::parse`s per bookmark per frame, against a list capped in the
+    /// thousands, to draw the thirty on screen.
+    ///
+    /// Deliberately generous at the bottom: a row half in the band is a row the reader can see,
+    /// and one row too many costs a square nobody looks at while one row too few is a gap in
+    /// the list and, for a list that draws marks, a mark that is never asked for.
+    pub fn rows(&self, top: f32, step: f32, count: usize) -> (usize, usize) {
+        if step <= 0.0 {
+            return (0, count);
+        }
+        let first = ((self.top - top) / step).floor().max(0.0) as usize;
+        // The `+ 1` is the generosity, and it is inside the test for the band ending above the
+        // first row rather than after it: a list scrolled entirely out of the band otherwise
+        // built its first row to draw it nowhere.
+        let last = if self.bottom < top {
+            0
+        } else {
+            ((self.bottom - top) / step).ceil() as usize + 1
+        };
+        (first.min(count), last.min(count))
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +215,58 @@ mod tests {
             pending_link: None,
             collapsed: 0,
         }
+    }
+
+    /// The window holds every row a reader can see, and the rows it leaves out are the rows
+    /// that are not there.
+    ///
+    /// The other half of not building what is off screen: a window one row short is a permanent
+    /// gap in the list and, at the bookmarks sidebar, a mark that is never requested — which
+    /// looks exactly like a host that serves no icon. Pure arithmetic, invisible to a
+    /// screenshot, and the reason this is a method rather than four lines inside a closure.
+    #[test]
+    fn a_window_covers_every_uniform_row_the_band_touches() {
+        let step = 30.0;
+        // Rows at y = 0, 30, 60, … and a window over the middle of the list.
+        let band = Band {
+            top: 100.0,
+            bottom: 190.0,
+        };
+        let (first, last) = band.rows(0.0, step, 100);
+        assert!(
+            first as f32 * step + step > band.top,
+            "the first row must reach the band"
+        );
+        assert!(
+            (first as f32 * step) <= band.top,
+            "and must not start below it"
+        );
+        assert!(
+            last as f32 * step >= band.bottom,
+            "the last row must reach past the band"
+        );
+        // A band above the list yields nothing, not a panic and not the whole list.
+        let above = Band {
+            top: -900.0,
+            bottom: -600.0,
+        };
+        assert_eq!(
+            above.rows(0.0, step, 100),
+            (0, 0),
+            "nothing of the list is on screen, so no row is built to draw off it"
+        );
+        // And one below it stops at the end.
+        let below = Band {
+            top: 9000.0,
+            bottom: 9600.0,
+        };
+        assert_eq!(
+            below.rows(0.0, step, 100),
+            (100, 100),
+            "clamped to the rows that exist"
+        );
+        // An empty list is a window of nothing at all.
+        assert_eq!(band.rows(0.0, step, 0), (0, 0));
     }
 
     #[test]

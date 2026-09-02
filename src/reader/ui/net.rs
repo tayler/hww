@@ -71,6 +71,20 @@ static DECODE_LOCK: Mutex<()> = Mutex::new(());
 pub struct ReqId(u64);
 
 impl ReqId {
+    /// The owner of a subresource that belongs to no page: the bookmarks sidebar, drawing its
+    /// marks with nothing in the reading column.
+    ///
+    /// A reserved value rather than a minted one, because it must mean the same thing in a
+    /// worker, which cannot ask the reader anything. [`ReqId::next`] counts up from one, so
+    /// nothing can ever be minted equal to this, and it is not zero either — that is what a
+    /// fresh [`Net`] publishes as its current page, and a mark stamped zero would be spared
+    /// before the first navigation and discarded after it.
+    ///
+    /// It is only ever a *reader's* id: the pool never publishes it, so a job that carries it is
+    /// stale for no page, which is the whole of what it is for. See
+    /// [`Job::discardable_page`], and `ReaderApp::mark_owner` for the one door that hands it out.
+    pub const CHROME: ReqId = ReqId(u64::MAX);
+
     /// An id without a [`Net`], which needs an `egui::Context` and therefore a window. Only the
     /// ordering and the equality matter to anything that takes one.
     #[cfg(test)]
@@ -183,6 +197,11 @@ impl Job {
     /// fetched whatever page it belongs to; see the module doc. What is discardable is what
     /// nobody asked for: the automatic policy's pictures, the site marks, and a mark being read
     /// off the disk.
+    ///
+    /// [`ReqId::CHROME`] is none of those, because the question this asks is "has the reader
+    /// left the thing that wanted it". The sidebar is what wanted this one, it is still on
+    /// screen, and no navigation makes it stale — dropping it would leave the strip holding an
+    /// empty square for a file it had already found on this machine.
     fn discardable_page(&self) -> Option<ReqId> {
         match self {
             Job::Image {
@@ -190,7 +209,7 @@ impl Job {
                 automatic: true,
                 ..
             }
-            | Job::KeptIcon { page, .. } => Some(*page),
+            | Job::KeptIcon { page, .. } => Some(*page).filter(|p| *p != ReqId::CHROME),
             _ => None,
         }
     }
@@ -754,6 +773,42 @@ mod tests {
     }
 
     const MARK: &str = "https://kept.example/mark.png";
+
+    /// A mark the sidebar asked for is not thrown away for a page it never belonged to.
+    ///
+    /// The pool discards what nobody asked for once the reader leaves the page it was queued
+    /// on, and it has to: a worker cannot ask the UI anything, so the published page is the only
+    /// thing it can test a job against. [`ReqId::CHROME`] is the case that test gets wrong. It
+    /// matches no published page and never will, so a strip drawing with nothing in the reading
+    /// column had every one of its marks answered with `Msg::ImageDropped` before the file was
+    /// opened — a column of empty squares for files already on this machine.
+    #[test]
+    fn a_mark_the_chrome_owns_survives_every_navigation() {
+        let kept = |page| Job::KeptIcon {
+            req: ReqId::for_test(1),
+            page,
+            src: MARK.to_owned(),
+            key: MARK.to_owned(),
+            path: PathBuf::from("/nonexistent"),
+            max_width: 64,
+        };
+        assert_eq!(
+            kept(ReqId::for_test(9)).discardable_page(),
+            Some(ReqId::for_test(9)),
+            "a page's mark goes with its page"
+        );
+        assert_eq!(
+            kept(ReqId::CHROME).discardable_page(),
+            None,
+            "the sidebar is still on screen, whatever the reader navigated to"
+        );
+        assert_ne!(
+            ReqId::CHROME.raw(),
+            0,
+            "zero is what a fresh Net publishes, so it would be spared until the first \
+             navigation and discarded after it"
+        );
+    }
 
     /// The worker half of the read: bytes on this machine become a texture, and anything that is
     /// not those bytes becomes a miss rather than a fetch.

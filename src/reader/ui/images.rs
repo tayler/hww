@@ -44,6 +44,26 @@
 //! (`RenderCtx::note_icon`). Page info reports the hosts, on a page that otherwise reports no
 //! request at all.
 //!
+//! # Two classes, and why the page's cache has something in it that is not the page's
+//!
+//! Everything here is a picture and most of them belong to the page on screen, arriving with it
+//! and going with it. Site marks do not. A mark belongs to a *list* — the bookmarks, the reading
+//! list, the sidebar down the left edge — and those surfaces outlive any page: the sidebar in
+//! particular is up while the reader navigates under it. So a mark is filed apart by
+//! [`ImageStore::note_mark`] and treated differently in exactly two places, both of which are
+//! about that difference and neither of which is about the bytes.
+//!
+//! [`ImageStore::clear_page`] keeps a settled mark, because dropping it would blank the strip on
+//! every navigation and rebuild it from the disk. [`MARK_CAPACITY`] evicts marks against a
+//! ceiling of their own, because the two classes share one recency queue and a page of
+//! photographs would otherwise push out every mark on screen — and then be asked for again, and
+//! evicted again, for as long as the panel is open. Recency is the right question to ask of a
+//! picture the reader scrolled past and the wrong one to ask of a mark that is on screen because
+//! a panel is.
+//!
+//! What does *not* change is the account: the counters are the page's and are reset with it, and
+//! a surviving texture makes no request, so it cannot be counted twice.
+//!
 //! # Which heights an image invalidates
 //!
 //! Every state transition here re-sizes the block the picture sits in, so [`ImageStore`] keeps
@@ -58,7 +78,7 @@ use crate::reader::image_decode::Decoded;
 use crate::reader::pageinfo::Counts;
 use crate::reader::ui::{Action, RenderCtx, theme};
 use eframe::egui::{self, RichText, TextureHandle, Ui};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Textures held at once.
 ///
@@ -78,6 +98,20 @@ const LRU_CAPACITY: usize = 48;
 /// nothing but declines and `clear_page` still takes them all at the next commit.
 const DECLINES_KEPT: usize = LRU_CAPACITY;
 
+/// Textures held for site marks, budgeted apart from [`LRU_CAPACITY`].
+///
+/// A separate ceiling and not a share of the same one, because the two compete on a page where
+/// the reader can least afford it. The bookmarks sidebar is on screen for the whole session while
+/// article pictures churn under it, and one recency-ordered queue would let a photo-heavy page
+/// evict every mark in the strip: `RenderCtx::note_icon` would record each evicted mark again,
+/// the strip would re-read them off the disk, and the page's next pictures would evict them
+/// again. Recency is the wrong question to ask of a mark, which is on screen because a panel is
+/// open rather than because it was scrolled past.
+///
+/// Sized to a screenful and a bit: the strip only ever asks for the rows in its band, so this is
+/// the working set with room for the reader to scroll and come back.
+const MARK_CAPACITY: usize = 64;
+
 pub enum State {
     Offered,
     Loading(Source),
@@ -96,6 +130,16 @@ pub enum State {
 pub enum Source {
     Network,
     Disk,
+}
+
+/// Which ceiling an entry is evicted against.
+///
+/// Not a property of the bytes — a mark and a thumbnail are the same kind of picture — but of
+/// what put it on screen and what takes it off. See [`MARK_CAPACITY`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    Picture,
+    Mark,
 }
 
 /// Why a picture is not on screen, and whether asking again could change that.
@@ -196,6 +240,16 @@ pub struct ImageStore {
     /// Site marks asked of a host, counted beside `hosts` in `record_request`'s own call — where
     /// the request is disclosed — so the two can never disagree about whether one went out.
     pub icons_requested: usize,
+    /// Which `src`s are site marks rather than pictures in a page.
+    ///
+    /// Two things hang off this and both are about a surface that outlives the page: the marks a
+    /// list or the sidebar drew survive [`Self::clear_page`], and they are evicted against
+    /// [`MARK_CAPACITY`] rather than against the pictures' [`LRU_CAPACITY`].
+    ///
+    /// Recorded by the caller through [`Self::note_mark`] rather than inferred from anything
+    /// here, for the reason `ui::app::Mark` exists: whether an address is a mark is a question
+    /// about the archive, and this module cannot see it.
+    marks: HashSet<String>,
 }
 
 impl ImageStore {
@@ -220,6 +274,16 @@ impl ImageStore {
         self.set(src, State::Loading(source));
         self.touch(src);
         self.evict();
+    }
+
+    /// Record that `src` is a site mark and not a picture in a page.
+    ///
+    /// Call it before the state is set, at every door that knows the answer — which is every
+    /// caller holding a `ui::app::Mark` other than `Mark::No`, the settled `Known::Nothing`
+    /// refusal included, because that one never reaches [`Self::begin`] at all and would
+    /// otherwise be filed and evicted as a picture.
+    pub fn note_mark(&mut self, src: &str) {
+        self.marks.insert(src.to_owned());
     }
 
     /// The only writer that *adds* to `entries`, so the record cannot be forgotten at a new
@@ -259,6 +323,9 @@ impl ImageStore {
             self.changed.push(src.to_owned());
         }
         self.order.retain(|s| s != src);
+        // With the entry, so a mark handed back keeps no claim on the marks' budget. It is
+        // recorded again by the door that re-asks for it.
+        self.marks.remove(src);
     }
 
     pub fn is_pending(&self, src: &str) -> bool {
@@ -391,16 +458,44 @@ impl ImageStore {
     /// disclosed.
     ///
     /// Dropped when a new page commits, not when one is asked for: the outgoing page stays on
-    /// screen for the length of the fetch and its pictures have to stay with it. `dims` alone
+    /// screen for the length of the fetch and its pictures have to stay with it. `dims`
     /// survives, because it is layout memory rather than a claim about the network — a revisit
     /// reserves the right box before the bytes arrive.
     ///
     /// The counters go with the textures because the panel that reads them answers how *this
     /// page* arrived. A running session total is an answer to a question the panel does not
     /// ask, and it reads as this page's number to anyone who misses the qualifier.
+    ///
+    /// **A settled site mark survives too**, and that is not an exception to the paragraph
+    /// above so much as the same reasoning applied to a surface that is not the page. The
+    /// bookmarks sidebar is drawn from `archive.json` and stays on screen across every
+    /// navigation, so marks dropped here would blank the whole strip on each one and rebuild it
+    /// from the disk — visible flicker, and a decode per row per navigation, for a picture that
+    /// did not change and was never about the outgoing page. The counters are still reset, and
+    /// they stay honest for free: a surviving texture issues no request, so it cannot be counted
+    /// twice.
+    ///
+    /// **Settled, though — not pending.** A mark still `Loading` is dropped with the pictures.
+    /// Its reply is matched against the outgoing page's `ReqId` and will be discarded, so a
+    /// retained `Loading` entry would be a mark that is permanently mid-flight: `note_icon`
+    /// skips a `src` that has any state at all, so nothing would ever ask for it again and the
+    /// row would stay empty for the rest of the session. Dropped, it is re-asked on the next
+    /// frame, off the disk.
     pub fn clear_page(&mut self) {
-        self.entries.clear();
-        self.order.clear();
+        // Destructured rather than read through `self`: `retain`'s closure cannot borrow a
+        // field of the same struct it is draining, and naming the three fields is what lets the
+        // first pass consult `marks` while the second and third follow `entries`.
+        let Self {
+            entries,
+            order,
+            marks,
+            ..
+        } = self;
+        entries.retain(|src, state| {
+            marks.contains(src) && matches!(state, State::Ready(_) | State::Failed(_))
+        });
+        order.retain(|src| entries.contains_key(src));
+        marks.retain(|src| entries.contains_key(src));
         self.hosts.clear();
         self.loaded = 0;
         self.cookie_attempts = 0;
@@ -421,6 +516,17 @@ impl ImageStore {
         self.order.push(src.to_owned());
     }
 
+    /// How many entries of one class the queue is holding. Test-only, and beside `evict` rather
+    /// than in the test module: what it counts is `order` and `class_of`, which are this
+    /// module's business, and a test that walked them itself would pass by restating the bug.
+    #[cfg(test)]
+    fn count_of(&self, class: Class) -> usize {
+        self.order
+            .iter()
+            .filter(|s| self.class_of(s) == class)
+            .count()
+    }
+
     /// Never evicts an in-flight request.
     ///
     /// `begin` pushes into `order` without evicting, so `I` on a page with more than
@@ -431,35 +537,71 @@ impl ImageStore {
     /// `referer_requests`, which are the reader's account of what it disclosed. Skipping
     /// pending entries can leave `order` briefly over capacity; it drains as they resolve.
     fn evict(&mut self) {
-        // A settled decline holds no texture, so evicting one frees nothing this cache exists
-        // to free, and it costs the memory `refuses_retry` is. Dropped, the entry reverts to
-        // `None`: the placeholder offers "load from host" again and the next "load all"
-        // re-issues a request whose answer was already known. That is the eviction bug two
-        // functions down, in the one shape the pending guard cannot see.
-        self.trim(LRU_CAPACITY, true);
-        // Sparing them is not keeping them forever. A page can carry more declines than the
-        // cache holds entries, and skipping every one of them left `order` growing with the
-        // page instead of bounded by the cap — the queue that the pass above exists to bound.
-        // Past `DECLINES_KEPT` the oldest goes anyway: an offer to re-request one picture is
-        // the cheaper failure, and it is the one already accepted for a pending entry.
-        self.trim(LRU_CAPACITY + DECLINES_KEPT, false);
+        // Two passes per class, against that class's own ceiling. Both classes share one
+        // `order`, so a ceiling each is a budget rather than a second queue: what it prevents
+        // is a page of photographs pushing a sidebar's worth of marks out of a cache they were
+        // never competing for. See `MARK_CAPACITY`.
+        //
+        // The first pass spares settled declines. One holds no texture, so evicting it frees
+        // nothing this cache exists to free, and it costs the memory `refuses_retry` is:
+        // dropped, the entry reverts to `None`, the placeholder offers "load from host" again
+        // and the next "load all" re-issues a request whose answer was already known. That is
+        // the eviction bug one function down, in the one shape the pending guard cannot see.
+        //
+        // The second pass is why sparing them is not keeping them forever. A page can carry
+        // more declines than the cache holds entries, and skipping every one of them left
+        // `order` growing with the page instead of bounded by the cap. Past `DECLINES_KEPT` the
+        // oldest goes anyway: an offer to re-request one picture is the cheaper failure, and it
+        // is the one already accepted for a pending entry.
+        //
+        // Written as a loop over the classes rather than four calls, so a third class is a row
+        // here and cannot be given one pass and not the other.
+        for (class, cap) in [(Class::Picture, LRU_CAPACITY), (Class::Mark, MARK_CAPACITY)] {
+            self.trim(class, cap, true);
+            self.trim(class, cap + DECLINES_KEPT, false);
+        }
     }
 
-    /// Evict from the front of `order` until it fits `limit`. `spare_declines` is which of the
-    /// two passes in [`evict`](Self::evict) this is; a pending entry is spared by both, because
-    /// re-offering one is a duplicate third-party request rather than a repeated answer.
-    fn trim(&mut self, limit: usize, spare_declines: bool) {
+    /// Evict from the front of `order` until `class` fits `limit`. `spare_declines` is which of
+    /// the two passes in [`evict`](Self::evict) this is; a pending entry is spared by both,
+    /// because re-offering one is a duplicate third-party request rather than a repeated answer.
+    ///
+    /// One queue, walked once per class, so recency still decides *which* entry goes while the
+    /// ceiling it is measured against is its own. The running `have` is what keeps this linear:
+    /// counting the class afresh on every turn of the loop made a full cache quadratic, and this
+    /// runs on every `begin`.
+    fn trim(&mut self, class: Class, limit: usize, spare_declines: bool) {
+        let mut have = self
+            .order
+            .iter()
+            .filter(|s| self.class_of(s) == class)
+            .count();
         let mut i = 0;
-        while self.order.len() > limit && i < self.order.len() {
-            if self.is_pending(&self.order[i])
-                || (spare_declines && self.refuses_retry(&self.order[i]))
+        while have > limit && i < self.order.len() {
+            // The three guards borrow out of `order` and the removal takes ownership out of it,
+            // so nothing is cloned: a pass that cloned every candidate it then skipped
+            // allocated a `String` per entry per pass, four times over, on every `begin`.
+            let src = &self.order[i];
+            if self.class_of(src) != class
+                || self.is_pending(src)
+                || (spare_declines && self.refuses_retry(src))
             {
                 i += 1;
                 continue;
             }
-            let oldest = self.order.remove(i);
-            self.entries.remove(&oldest);
-            self.changed.push(oldest);
+            let src = self.order.remove(i);
+            self.entries.remove(&src);
+            self.marks.remove(&src);
+            self.changed.push(src);
+            have -= 1;
+        }
+    }
+
+    fn class_of(&self, src: &str) -> Class {
+        if self.marks.contains(src) {
+            Class::Mark
+        } else {
+            Class::Picture
         }
     }
 }
@@ -567,6 +709,7 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
                             if *retryable {
                                 let resp = ui.small_button("retry");
                                 super::follow_focus(&resp);
+                                super::advance_focus(&resp);
                                 act = resp.clicked();
                                 focused = resp.has_focus();
                             }
@@ -589,6 +732,7 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
                             .frame(false),
                         );
                         super::follow_focus(&resp);
+                        super::advance_focus(&resp);
                         theme::focus_ring(ui, &resp, &pal);
                         act = resp.clicked();
                         focused = resp.has_focus();
@@ -637,6 +781,7 @@ fn show_ready(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     if partial.is_some() {
         let resp = ui.small_button("retry");
         super::follow_focus(&resp);
+        super::advance_focus(&resp);
         if resp.has_focus() {
             ctx.focus_image = Some(img.src.clone());
         }
@@ -687,22 +832,38 @@ pub fn favicon(ui: &mut Ui, src: &str, ctx: &mut RenderCtx<'_>) {
 /// Requesting is `ctx.note_icon`'s business and, past it, `ReaderApp::load_site_icons`. This
 /// function neither asks the network for anything nor decides whether it may.
 pub fn site_icon(ui: &mut Ui, src: &str, box_size: f32, ctx: &mut RenderCtx<'_>) {
-    if let Some(State::Ready(ready)) = ctx.images.state(src) {
-        // Fitted inside the box rather than stretched to it: a mark that is not square is a
-        // wide wordmark often enough, and a stretched one is worse than a small one.
-        let scale =
-            (box_size / ready.width.max(1) as f32).min(box_size / ready.height.max(1) as f32);
-        let size = egui::vec2(ready.width as f32 * scale, ready.height as f32 * scale);
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(box_size, box_size), egui::Sense::hover());
-        let at = egui::Rect::from_center_size(rect.center(), size);
-        egui::Image::new(&ready.texture)
-            .corner_radius(egui::CornerRadius::same(theme::RADIUS))
-            .paint_at(ui, at);
-        return;
+    // Allocated first and unconditionally, so the fitting arithmetic can be [`paint_mark`]'s
+    // alone: the box is the same square whether or not there are bytes for it, which is what
+    // keeps the rows under a missing mark from re-aligning as the marks arrive. `allocate_space`
+    // and not `allocate_exact_size`, so this stays the widgetless column the doc above claims.
+    let (_, rect) = ui.allocate_space(egui::vec2(box_size, box_size));
+    if !paint_mark(ui, ctx.images, src, rect) {
+        ctx.note_icon(rect.top(), src);
     }
-    ctx.note_icon(ui.next_widget_position().y, src);
-    ui.allocate_space(egui::vec2(box_size, box_size));
+}
+
+/// Paint a ready site mark to fit `rect`, or answer `false` when there is nothing to paint.
+///
+/// Every mark hww draws is fitted here, [`site_icon`]'s included, because the two surfaces
+/// differ only in who allocates and who records a want: the sidebar has already allocated a
+/// control the reader can click and tab to, and it collects its own band rather than going
+/// through `RenderCtx`. Fitted inside the box rather than stretched to it, in the one place:
+/// a mark that is not square is a wide wordmark often enough, and a stretched one is worse
+/// than a small one.
+///
+/// It reads the store and never asks it for anything, which is the same permission
+/// `reader::iconcache` grants every reader of a kept mark.
+pub fn paint_mark(ui: &Ui, store: &ImageStore, src: &str, rect: egui::Rect) -> bool {
+    let Some(State::Ready(ready)) = store.state(src) else {
+        return false;
+    };
+    let box_size = rect.width().min(rect.height());
+    let scale = (box_size / ready.width.max(1) as f32).min(box_size / ready.height.max(1) as f32);
+    let size = egui::vec2(ready.width as f32 * scale, ready.height as f32 * scale);
+    egui::Image::new(&ready.texture)
+        .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+        .paint_at(ui, egui::Rect::from_center_size(rect.center(), size));
+    true
 }
 
 /// The one control an entry's thumbnail gets: a small dim `[image]` beside the time, which
@@ -721,6 +882,7 @@ pub fn load_control(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     let resp =
         ui.add(egui::Button::new(RichText::new("[image]").color(pal.dim).small()).frame(false));
     super::follow_focus(&resp);
+    super::advance_focus(&resp);
     theme::focus_ring(ui, &resp, &pal);
     if resp.has_focus() {
         ctx.focus_image = Some(img.src.clone());
@@ -766,6 +928,7 @@ pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>)
                 egui::Button::new(RichText::new(format!("[{alt}]")).color(pal.dim)).frame(false),
             );
             super::follow_focus(&resp);
+            super::advance_focus(&resp);
             theme::focus_ring(ui, &resp, &pal);
             if resp.has_focus() {
                 ctx.focus_image = Some(img.src.clone());
@@ -780,6 +943,106 @@ pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A settled mark outlives the page; a pending one does not; a picture never does.
+    ///
+    /// Admitted under `ui/` because the failure is otherwise invisible rather than because
+    /// there is precedent above. Every branch here is reachable without an `egui::Context` —
+    /// `note_mark`, `begin`, `fail` and `clear_page` upload nothing — and each way of getting it
+    /// wrong shows up as something no test would catch and a reader would blame on the network:
+    /// dropping settled marks is a sidebar that blanks on every navigation, keeping a pending
+    /// one is a row that stays empty for the rest of the session because `note_icon` skips a
+    /// `src` that has any state at all, and keeping a picture is the page's memory outliving the
+    /// page.
+    #[test]
+    fn a_settled_mark_survives_a_commit_and_a_pending_one_does_not() {
+        let mut store = ImageStore::default();
+
+        store.note_mark("https://a.example/favicon.ico");
+        store.fail(
+            "https://a.example/favicon.ico",
+            Failure::permanent("no icon".to_owned()),
+        );
+        store.note_mark("https://b.example/favicon.ico");
+        store.begin("https://b.example/favicon.ico", Source::Disk);
+        store.begin("/article-photo.jpg", Source::Network);
+
+        store.clear_page();
+
+        assert!(
+            store.state("https://a.example/favicon.ico").is_some(),
+            "a settled mark is what keeps the strip from blanking on every navigation"
+        );
+        assert!(
+            store.state("https://b.example/favicon.ico").is_none(),
+            "a pending mark's reply is matched against the page being left, so keeping the \
+             entry would strand the row for the session"
+        );
+        assert!(
+            store.state("/article-photo.jpg").is_none(),
+            "the page's own pictures still go with the page"
+        );
+    }
+
+    /// A page of photographs must not evict the sidebar.
+    ///
+    /// The two classes share one recency queue, so without a budget of its own every mark in the
+    /// strip is pushed out by the pictures of whatever the reader happens to be looking at — and
+    /// then asked for again, and evicted again, for as long as the panel is open. Recency is the
+    /// wrong question to ask of a mark: it is on screen because a panel is, not because it was
+    /// scrolled past.
+    ///
+    /// The pictures are *transient* declines and `evict` is called per picture, and both of
+    /// those are the test rather than the fixture. `fail` alone never evicts — only `begin` and
+    /// `insert` do — and a permanent decline is spared by the first pass, so a fixture built the
+    /// obvious way passed with every `Class::Mark` line deleted from `evict`: it asserted the
+    /// survival of an entry against a queue nothing had ever trimmed. The picture count below is
+    /// what says the trimming happened at all.
+    #[test]
+    fn a_page_full_of_pictures_does_not_evict_the_marks() {
+        let mut store = ImageStore::default();
+        store.note_mark("https://kept.example/favicon.ico");
+        store.fail(
+            "https://kept.example/favicon.ico",
+            Failure::permanent("no icon".to_owned()),
+        );
+        // Comfortably past the pictures' own ceiling, which is what used to take the mark with
+        // it. Settled failures rather than textures so the test needs no window.
+        for i in 0..LRU_CAPACITY * 2 {
+            let src = format!("/photo-{i}.jpg");
+            store.fail(&src, Failure::transient("reset".to_owned()));
+            store.evict();
+        }
+        assert!(
+            store.count_of(Class::Picture) <= LRU_CAPACITY,
+            "the pictures were never trimmed, so nothing else here is about eviction"
+        );
+        assert!(
+            store.state("https://kept.example/favicon.ico").is_some(),
+            "the mark was evicted against the pictures' ceiling"
+        );
+    }
+
+    /// And the marks are bounded by a ceiling of their own, which is the other half of it.
+    ///
+    /// A budget that only ever spares is not a budget: the strip's entries are settled and
+    /// survive `clear_page`, so with nothing trimming them a long session's worth of bookmarks
+    /// drawn and scrolled past would hold every texture it ever decoded. This is the assertion
+    /// that fails when `evict` stops asking about `Class::Mark`.
+    #[test]
+    fn the_marks_are_bounded_by_their_own_ceiling() {
+        let mut store = ImageStore::default();
+        for i in 0..MARK_CAPACITY * 2 {
+            let src = format!("https://s{i}.example/favicon.ico");
+            store.note_mark(&src);
+            store.fail(&src, Failure::transient("reset".to_owned()));
+            store.evict();
+        }
+        assert!(
+            store.count_of(Class::Mark) <= MARK_CAPACITY,
+            "a mark is spared the pictures' ceiling, not every ceiling"
+        );
+    }
 
     /// The second test under `ui/`, admitted on the same argument as the first.
     ///
@@ -990,5 +1253,98 @@ mod tests {
         let counts = store.counts();
         assert_eq!(counts.hosts, vec!["cdn.example.net"]);
         assert_eq!(counts.referer_requests, 1);
+    }
+
+    /// Enter on a load control moves the focus on, the way Tab would.
+    ///
+    /// The control removes itself when it is pressed — the placeholder redraws as "loading
+    /// from host…" — so egui's dead-man's switch used to clear the focus, and the next Tab
+    /// began again at the first link on the page. A reader loading the pictures of a long
+    /// article paid one press per picture and then a press per link above it.
+    ///
+    /// It needs an `egui::Context` and no display, and it belongs here on `inline_ui`'s
+    /// argument rather than on its precedent: what it pins is egui's focus machinery, and the
+    /// failure is invisible to everything else. Where the focus is after a key is not a value
+    /// any function returns, and `hww-shot` photographs one frame and cannot say a key moved
+    /// anything. The bug looked, in a screenshot, like a placeholder that had started loading.
+    #[test]
+    fn enter_on_a_load_control_hands_the_focus_to_the_next_one() {
+        let ctx = egui::Context::default();
+        crate::reader::ui::fonts::install(&ctx);
+        let opts = crate::reader::opts::ReadOpts::default();
+        let collapsed = HashSet::new();
+        let threads = HashMap::new();
+        let base = url::Url::parse("https://example.com/").unwrap();
+        let pal = theme::palette(crate::reader::opts::Theme::Light, false);
+        let first = ir::Image {
+            src: "https://cdn.example.net/first.jpg".to_owned(),
+            alt: Some("the first picture".to_owned()),
+        };
+        let second = ir::Image {
+            src: "https://cdn.example.net/second.jpg".to_owned(),
+            alt: Some("the second picture".to_owned()),
+        };
+        let mut images = ImageStore::default();
+        // Where the focus was found in each frame, and what the last of them acted on.
+        let mut landed = Vec::new();
+        let mut last_action = None;
+        for key in [
+            None,
+            None,
+            Some(egui::Key::Tab),
+            None,
+            Some(egui::Key::Enter),
+        ] {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            if let Some(key) = key {
+                for pressed in [true, false] {
+                    input.events.push(egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+            }
+            let mut rctx =
+                RenderCtx::new(pal, &opts, base.clone(), &mut images, &collapsed, &threads);
+            let mut out = ctx.run_ui(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    placeholder(ui, &first, &mut rctx);
+                    placeholder(ui, &second, &mut rctx);
+                });
+            });
+            // The test never uploads them, and epaint panics on a delta dropped unhandled.
+            out.textures_delta.clear();
+            landed.push(rctx.focus_image.clone());
+            last_action = rctx.action.take();
+            eprintln!(
+                "frame key={key:?} focus_image={:?} mem={:?}",
+                rctx.focus_image,
+                ctx.memory(|m| m.focused())
+            );
+        }
+        assert_eq!(
+            landed[3].as_deref(),
+            Some(first.src.as_str()),
+            "Tab lands on the first picture's control"
+        );
+        assert_eq!(
+            landed[4].as_deref(),
+            Some(second.src.as_str()),
+            "Enter loads the first picture and leaves the focus on the next control, not nowhere"
+        );
+        assert!(
+            matches!(&last_action, Some(Action::LoadImage(src)) if src == &first.src),
+            "the press belongs to the control it was aimed at: the one it hands the focus to \
+             must not read the same key as a click on itself"
+        );
     }
 }

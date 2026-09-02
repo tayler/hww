@@ -104,6 +104,21 @@ struct Scene {
     /// The picture cannot be the same twice: the loading notice counts the seconds it has been
     /// waiting, which is the point of it. Photographed, never compared, never baselined.
     volatile: bool,
+    /// Steps run after the shutter, before the next scene begins.
+    ///
+    /// For a scene that leaves something *saved* behind it. The catalog is one process and one
+    /// `ReaderApp`, so a scene's chrome flags are cleared by the next `Step::Page` and its
+    /// settings are not: `Command::ToggleBookmarkSidebar` writes `show_bookmark_sidebar` to the
+    /// settings file, and the scene that turned the strip on drew a thirty-pixel band down the
+    /// left edge of every scene photographed after it — and, once the debounced save landed, of
+    /// every scene in the *next* run, the ones ordered before it included. A picture of a page
+    /// with the wrong margin is what a stale baseline looks like, so the failure arrives as
+    /// thirty scenes disagreeing at once and none of them saying why.
+    ///
+    /// Runs whether or not the picture was captured, because the state has to come back either
+    /// way. Same `Step`s and the same driver: a scene puts a setting back through the command
+    /// that set it, rather than through a second way of reaching one.
+    after: Vec<Step>,
 }
 
 fn scene(name: &str, what: &'static str, steps: Vec<Step>) -> Scene {
@@ -113,6 +128,7 @@ fn scene(name: &str, what: &'static str, steps: Vec<Step>) -> Scene {
         steps,
         settle_ms: 0,
         volatile: false,
+        after: Vec::new(),
     }
 }
 
@@ -292,6 +308,25 @@ nothing about a list. Both marks are read back in the same open, and the page-in
 them apart from anything fetched.</p>
 <p>Deleting the directory these came from loses nothing: the next open asks both hosts again and
 the column looks exactly as it does here.</p>
+</article></body></html>
+"#;
+
+/// The page the `bookmark-sidebar` scene keeps, served at `/marked-five`.
+///
+/// Its own page and its own mark, for the reason `MARKED_THREE` spells out at length: the
+/// catalog runs every scene against one `archive.json` and `Command::BookmarkPage` is a toggle,
+/// so a scene that keeps a page an earlier scene already kept takes it back off. Keeping one of
+/// its own is also what lets this scene photograph a strip when it is run alone against an empty
+/// scratch directory, which is how anybody looking at the sidebar will actually run it.
+const MARKED_FIVE: &str = r#"
+<html lang="en"><head><title>A row in the sidebar</title>
+<link rel="icon" href="/mark-e.png"></head><body>
+<article>
+<h1>A row in the sidebar</h1>
+<p>The strip down the left edge draws one mark for every bookmark, off the same store the list
+itself draws from. Hovering a mark, or tabbing to it, names the address it opens.</p>
+<p>It is a saved setting rather than a mode: closing it with the same key that opened it is
+remembered, and an install that never asks for it draws exactly what it drew before.</p>
 </article></body></html>
 "#;
 
@@ -586,6 +621,44 @@ fn catalog(port: u16) -> Vec<Scene> {
                     Step::Run(Command::OpenBookmarks),
                     Step::Wait(20),
                     Step::Run(Command::TogglePageInfo),
+                ],
+            )
+        },
+        Scene {
+            settle_ms: 400,
+            volatile: true,
+            // The one scene that changes a *saved* setting, and so the one that has to put it
+            // back: `show_bookmark_sidebar` outlives the scene, the process, and the run. See
+            // `Scene::after`. Through the same command that opened it, so a strip that stops
+            // closing on that key fails this scene rather than the thirty after it.
+            after: vec![Step::Run(Command::ToggleBookmarkSidebar)],
+            ..scene(
+                "bookmark-sidebar",
+                "the bookmarks sidebar: a mark per bookmark down the left edge",
+                // Keeps a page of its own first, so the strip has a row to draw whether this runs
+                // alone or after the scenes that filled the archive already. `Step::Run` and not
+                // a key for the keeping, as every other archive scene does it; the toggle itself
+                // goes through its real chord, because the whole claim of the feature is that one
+                // key puts the strip up.
+                //
+                // The page stays on screen under it. That is deliberate: the strip is not a view
+                // the reader navigates to, and a picture of it over the bookmarks list would not
+                // show the one thing that distinguishes it from the list — that it is up *while
+                // you are reading something else*.
+                //
+                // Volatile for the same two reasons every archive scene is: a row is stamped with
+                // the day it was kept, and the fixture server's port is ephemeral.
+                vec![
+                    // `Step::Page` and `Step::Fail` press this for themselves; `Step::Nav` does
+                    // not, and the scene before this one ends with page info open. Escape does
+                    // not touch the strip — it clears the `Chrome` flags, and this is a saved
+                    // setting — so it is safe here and would not be a way to close it anyway.
+                    key(Key::Escape),
+                    Step::Nav(format!("http://127.0.0.1:{port}/marked-five")),
+                    Step::Wait(30),
+                    Step::Run(Command::BookmarkPage),
+                    Step::Run(Command::ToggleBookmarkSidebar),
+                    Step::Wait(40),
                 ],
             )
         },
@@ -1110,6 +1183,8 @@ enum Stage {
     Shutter,
     /// Frames left to wait for the reply before giving up on this scene.
     Await(u32),
+    /// [`Scene::after`], walked with the same driver as [`Stage::Steps`].
+    After,
 }
 
 struct Runner {
@@ -1136,6 +1211,23 @@ impl Runner {
         self.step = 0;
         self.wait = 0;
         self.stage = Stage::Steps;
+    }
+
+    /// The shutter is done with this scene: put back whatever it changed, then move on.
+    ///
+    /// Between the picture and the next scene, and not before the picture: what [`Scene::after`]
+    /// undoes is the very thing the scene was photographing. It runs on the failure path too —
+    /// a scene whose screenshot never came back has still left the setting on.
+    fn finish(&mut self) {
+        let after = std::mem::take(&mut self.scenes[self.scene].after);
+        if after.is_empty() {
+            self.advance();
+            return;
+        }
+        self.scenes[self.scene].steps = after;
+        self.step = 0;
+        self.wait = 0;
+        self.stage = Stage::After;
     }
 
     /// A page arriving clears the chrome first: the launch opens the URL bar over an empty
@@ -1181,6 +1273,59 @@ impl Runner {
         }
     }
 
+    /// Apply at most one step of the list the scene is walking, and say whether it is still
+    /// walking it.
+    ///
+    /// The driver for both [`Stage::Steps`] and [`Stage::After`]: the step a scene runs to put a
+    /// saved setting back is the step it ran to change it, and a second copy of this loop for
+    /// them is a second place for the two to disagree.
+    fn pump(&mut self, ctx: &egui::Context) -> bool {
+        if self.wait > 0 {
+            self.wait -= 1;
+            return true;
+        }
+        let i = self.scene;
+        if self.step < self.scenes[i].steps.len() {
+            let step = std::mem::replace(&mut self.scenes[i].steps[self.step], Step::Wait(0));
+            self.step += 1;
+            match step {
+                Step::Wait(n) => self.wait = n,
+                Step::Key(mods, k) => press(ctx, mods, k),
+                Step::Type(text) => ctx.input_mut(|i| i.events.push(egui::Event::Text(text))),
+                Step::Follow(href) => {
+                    self.app.follow_link(&href);
+                    self.wait = 2;
+                }
+                Step::ReadLater { href, title } => {
+                    self.app.read_later(&href, &title);
+                    self.wait = 2;
+                }
+                Step::Run(command) => {
+                    self.app.run_command(ctx, command);
+                    self.wait = 2;
+                }
+                Step::Nav(target) => {
+                    press(ctx, Modifiers::COMMAND, Key::L);
+                    self.wait = 2;
+                    // The bar opens prefilled with the current URL, so replace rather
+                    // than append: this is what Ctrl+A then typing does.
+                    self.scenes[i]
+                        .steps
+                        .insert(self.step, Step::Key(Modifiers::COMMAND, Key::A));
+                    self.scenes[i]
+                        .steps
+                        .insert(self.step + 1, Step::Type(target));
+                    self.scenes[i]
+                        .steps
+                        .insert(self.step + 2, Step::Key(Modifiers::NONE, Key::Enter));
+                }
+                other => self.apply(ctx, other),
+            }
+            return true;
+        }
+        false
+    }
+
     fn drive(&mut self, ctx: &egui::Context) {
         // A frame that arrives long after the one before it means the window was frozen, and
         // the first frame back is mid-animation: a scroll still easing to the top, a window
@@ -1196,54 +1341,18 @@ impl Runner {
         }
         match self.stage {
             Stage::Steps => {
-                if self.wait > 0 {
-                    self.wait -= 1;
+                if self.pump(ctx) {
                     return;
                 }
-                let i = self.scene;
-                if self.step < self.scenes[i].steps.len() {
-                    let step =
-                        std::mem::replace(&mut self.scenes[i].steps[self.step], Step::Wait(0));
-                    self.step += 1;
-                    match step {
-                        Step::Wait(n) => self.wait = n,
-                        Step::Key(mods, k) => press(ctx, mods, k),
-                        Step::Type(text) => {
-                            ctx.input_mut(|i| i.events.push(egui::Event::Text(text)))
-                        }
-                        Step::Follow(href) => {
-                            self.app.follow_link(&href);
-                            self.wait = 2;
-                        }
-                        Step::ReadLater { href, title } => {
-                            self.app.read_later(&href, &title);
-                            self.wait = 2;
-                        }
-                        Step::Run(command) => {
-                            self.app.run_command(ctx, command);
-                            self.wait = 2;
-                        }
-                        Step::Nav(target) => {
-                            press(ctx, Modifiers::COMMAND, Key::L);
-                            self.wait = 2;
-                            // The bar opens prefilled with the current URL, so replace rather
-                            // than append: this is what Ctrl+A then typing does.
-                            self.scenes[i]
-                                .steps
-                                .insert(self.step, Step::Key(Modifiers::COMMAND, Key::A));
-                            self.scenes[i]
-                                .steps
-                                .insert(self.step + 1, Step::Type(target));
-                            self.scenes[i]
-                                .steps
-                                .insert(self.step + 2, Step::Key(Modifiers::NONE, Key::Enter));
-                        }
-                        other => self.apply(ctx, other),
-                    }
-                    return;
-                }
-                trace(&format!("{}: steps done", self.scenes[i].name));
+                trace(&format!("{}: steps done", self.scenes[self.scene].name));
                 self.stage = self.settle_stage();
+            }
+            Stage::After => {
+                if self.pump(ctx) {
+                    return;
+                }
+                trace(&format!("{}: put back", self.scenes[self.scene].name));
+                self.advance();
             }
             Stage::Settle { frames, until } => {
                 self.stage = if frames == 0 && Instant::now() >= until {
@@ -1281,11 +1390,11 @@ impl Runner {
                             Err(e) => eprintln!("{}: {e}", scene.name),
                         }
                         *self.progress.lock().expect("no poisoned lock") = Instant::now();
-                        self.advance();
+                        self.finish();
                     }
                     None if n == 0 => {
                         eprintln!("{}: no screenshot came back", self.scenes[self.scene].name);
-                        self.advance();
+                        self.finish();
                     }
                     None => self.stage = Stage::Await(n - 1),
                 }
@@ -1561,6 +1670,7 @@ fn serve() -> std::io::Result<u16> {
     let mark_b = Arc::new(mark_png([54, 108, 168]));
     let mark_c = Arc::new(mark_png([92, 140, 74]));
     let mark_d = Arc::new(mark_png([146, 96, 168]));
+    let mark_e = Arc::new(mark_png([198, 148, 58]));
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let photo = Arc::clone(&photo);
@@ -1568,6 +1678,7 @@ fn serve() -> std::io::Result<u16> {
             let mark_b = Arc::clone(&mark_b);
             let mark_c = Arc::clone(&mark_c);
             let mark_d = Arc::clone(&mark_d);
+            let mark_e = Arc::clone(&mark_e);
             std::thread::spawn(move || {
                 let mut stream = stream;
                 let mut buf = [0u8; 2048];
@@ -1590,6 +1701,8 @@ fn serve() -> std::io::Result<u16> {
                     // share: keeping a page twice un-keeps it. See `MARKED_THREE`.
                     "/mark-c.png" => ok(&mut stream, "image/png", &mark_c),
                     "/mark-d.png" => ok(&mut stream, "image/png", &mark_d),
+                    // The `bookmark-sidebar` scene's own, on the same rule as the pair above.
+                    "/mark-e.png" => ok(&mut stream, "image/png", &mark_e),
                     "/marked-one" => ok(
                         &mut stream,
                         "text/html; charset=utf-8",
@@ -1609,6 +1722,11 @@ fn serve() -> std::io::Result<u16> {
                         &mut stream,
                         "text/html; charset=utf-8",
                         MARKED_FOUR.as_bytes(),
+                    ),
+                    "/marked-five" => ok(
+                        &mut stream,
+                        "text/html; charset=utf-8",
+                        MARKED_FIVE.as_bytes(),
                     ),
                     // Two ordinary documents, for the one scene that needs two *real*
                     // navigations rather than injected pages: `present` resets the history to a
@@ -2046,6 +2164,12 @@ fn main() -> ExitCode {
     // into the settings of whoever is running this.
     let scratch = cfg.out.join(".config");
     let _ = std::fs::create_dir_all(&scratch);
+    // And not out of yesterday's run either. `Scene::after` is what keeps a saved setting from
+    // reaching the next scene; this is what keeps one from reaching the next *run*, including
+    // the runs where a scene never got as far as putting it back — a crash, a watchdog, a
+    // catalog cut short with one name on the command line. Every scene is photographed against
+    // the defaults, which is the only baseline a picture can be compared to.
+    let _ = std::fs::remove_file(scratch.join("settings.json"));
     // The bookmarks, unlike the settings, is cleared between runs. The catalog builds its own
     // through `Command::BookmarkPage`, so a file left behind by the previous run would leave the
     // bookmarks scene showing a list that grows every time the catalog is run.
