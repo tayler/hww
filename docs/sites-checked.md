@@ -92,6 +92,7 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | punchng.com | 2026-08-22 | front, section, article | clean |
 | quantamagazine.org | 2026-08-22 | front, article | clean |
 | reason.com | 2026-08-22 | front, article | clean |
+| reddit.com | 2026-09-03 | subreddit comment page | JS shell, 0 chars; its server-rendered alternate host now 302s to a login form, 0 chars. The rewrite to it was removed; see findings, Phase 2 |
 | reuters.com | 2026-08-22 | front | 401 |
 | sciencedaily.com | 2026-08-22 | front, section, article | "related stories" thread false positive, fixed generically |
 | scmp.com | 2026-08-22 | front, section, article | profile: strip TTS speed menu |

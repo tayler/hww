@@ -264,6 +264,30 @@ The rewrite table is the only place in the crate that contains a hostname, and t
 keeps it that way: it imports no extractor, and no extractor imports it. (It has since moved to
 `src/sites.rs`, where Phase 3's profile table joined it under the same host matcher.)
 
+## The one rule, removed
+
+Re-checked 2026-09-03, on a subreddit comment page of the same site:
+
+| | requested host | alternate host |
+|---|---:|---:|
+| response | 200, JavaScript shell | 302 to the alternate's own `/login/?reason=lor2&dest=…` |
+| bytes | 8,421 | 352,462 |
+| extracted | **0** | **0** |
+
+The alternate host now answers every page hww asks for with its login form. A generic
+User-Agent gets a 403 "blocked due to a network policy" from both hosts instead. Nothing hww
+can fetch on either side reads, so the rule traded one blank page for another and announced
+the swap on stderr while doing it. It is gone, and `RULES` ships empty: `--show-rewrites` says
+so. The layer stays. Its charter is the argument for the next rule, `--no-rewrite` and the
+bare reload still mean something, and the mechanism tests run against a fixture rather than
+the shipped table, so none of it goes untested while the table is empty.
+
+One gap the re-check exposed, recorded and not changed: the dead-rule report fires when a
+response *leaves* the alternate host, and a bounce to a login page on that same host passes
+it. A rule that dies this way is silent until somebody reads the blank page. With no rule
+shipping, a same-host detector would be mechanism with no caller, the standard this phase
+already applied once.
+
 
 ---
 

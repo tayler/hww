@@ -838,10 +838,10 @@ mod tests {
     #[test]
     fn rewrite_notice_names_hosts_not_urls() {
         let n = Rewrite::Applied {
-            from: Url::parse("https://reddit.com/r/rust/x").unwrap(),
-            to: Url::parse("https://old.reddit.com/r/rust/x").unwrap(),
+            from: Url::parse("https://example.com/r/rust/x").unwrap(),
+            to: Url::parse("https://old.example.com/r/rust/x").unwrap(),
         };
-        assert_eq!(n.to_string(), "[rewrote reddit.com -> old.reddit.com]");
+        assert_eq!(n.to_string(), "[rewrote example.com -> old.example.com]");
     }
 
     /// Every shipped profile, run over its own fixture with and without the profile: every
