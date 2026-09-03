@@ -612,3 +612,45 @@ it was, and being drawn is the only way they can be re-measured.
   which is process-global, while the rest of the suite runs in parallel threads; its `SAFETY`
   comment argues single-threadedness *within the test*, which is not the condition that matters.
   Observed failing once in about a dozen runs, on a tree that does not touch settings.
+
+# Phase 7: a picture hww cannot open
+
+Measured 2026-09-02, from one page a reader was actually on. The report was that a figure
+offered "load from host", and only the press said the format was AVIF. Three separate things
+were wrong, and only one of them was the one reported.
+
+**The control was drawn for an answer already settled.** `image_decode::declined_by_url` has
+always refused SVG and AVIF from the path extension before a request, and `autoload::plan` and
+`ReaderApp::load_all_images` both consulted it. The three surfaces that draw a control —
+`images::placeholder`, `inline_placeholder`, `load_control` — did not. `request_image` refused
+the press without contacting anyone, so nothing leaked and nothing was fetched; what the reader
+got was a button whose entire effect was to print what it knew before it was pressed. All three
+now ask, and a declined address gets the alt and the reason with no control.
+
+**A `<picture>` was handing over the one candidate that cannot be drawn.** `image_from` took the
+first `source[srcset]` and ignored `type`. The convention is best-compression-first, so a modern
+build pipeline lists AVIF, then WebP, then JPEG — and hww chose the AVIF with two decodable
+siblings under it. `picture_source` now takes the first candidate neither `type` nor extension
+declines, and still takes the first of them when they are all declined, because emitting nothing
+would say a page had no picture where it had one.
+
+**And the address cannot always answer.** The page that prompted this serves its images through
+a Next.js-style optimizer: the address is `/_next/image?url=%2Fhero.avif&w=1920&q=75`, whose last
+path segment is `image` and carries no extension at all. `fetch::ACCEPT_IMAGE` already omits
+`image/avif` deliberately; the server answered that exact Accept header with `content-type:
+image/avif`, `vary: Accept`, and `ftypavif` bytes. It advertises negotiation and does not perform
+it, and no client-side change reaches that.
+
+The `.avif` sitting in the query is **not** usable as a fourth signal, and the temptation to use
+it is why this is written down. The same address answers a browser asking for WebP with WebP, so
+refusing on a query-string extension would decline pictures that decode — the trade
+`declined_by_url` makes ("at worst a picture that would have loaded") stops being cheap the
+moment the extension describes an input rather than an output. Image CDNs that take their source
+in a query are the common case, not the exotic one. The byte sniff stays the answer there, and
+`Snapshot::Failed` is what says so afterwards.
+
+The table moved out of `image_decode` to `reader::image_formats` to make the second fix
+possible: `html::image_from` builds the IR in the default build, and `image_decode` rides with
+`gui`. Three lookups now read one table — extension, MIME type, bytes — and
+`the_declines_all_name_the_same_formats` fails the build if a format is added to one and not the
+others.

@@ -74,7 +74,8 @@
 //! [`ImageStore::take_changed`]'s contract, so a new call site cannot forget to record.
 
 use crate::ir;
-use crate::reader::image_decode::Decoded;
+use crate::reader::image_decode::{DecodeError, Decoded};
+use crate::reader::image_formats::declined_by_url;
 use crate::reader::pageinfo::Counts;
 use crate::reader::ui::{Action, RenderCtx, theme};
 use eframe::egui::{self, RichText, TextureHandle, Ui};
@@ -610,9 +611,41 @@ enum Snapshot {
     Offered,
     Loading,
     Ready,
+    /// A format the address names before anything is fetched. Apart from [`Snapshot::Failed`]
+    /// so the line can still carry the alt: nothing was ever asked for here, so the alt is the
+    /// whole account of the picture the reader gets.
+    Declined(&'static str),
     /// The message, and whether to draw the retry control beside it. Both halves, because this
     /// exists to be read out of the store before the drawing closures borrow `ctx`.
     Failed(String, bool),
+}
+
+/// The format an address names as one this reader declines, or `None`.
+///
+/// The three controls below are drawn on the strength of this, and it is the question
+/// `autoload::plan` and `ReaderApp::load_all_images` already ask before requesting anything.
+/// `ReaderApp::request_image` refuses such a `src` without contacting a host, so a control
+/// offering it is a button whose entire effect is to print an answer that was available before
+/// it was pressed — and naming what a press will do is the placeholder's whole claim.
+///
+/// The address and not the bytes, so this is half the declines at most: a format an
+/// extensionless address hides is knowable only from what comes back, and [`Snapshot::Failed`]
+/// is what says so afterwards. Resolved against the page like `inline_ui::image_host`, because
+/// a relative `src` carries the extension and no host.
+fn declined_by_address(src: &str, base: &url::Url) -> Option<&'static str> {
+    declined_by_url(&base.join(src).ok()?)
+}
+
+/// The `[image]` mark and the alt beside it: the line a placeholder opens with whether it is
+/// about to offer the picture or to say why it will not.
+fn alt_line(ui: &mut Ui, alt: &str, pal: &theme::Palette) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.label(RichText::new("[image] ").color(pal.dim));
+        if !alt.is_empty() {
+            ui.label(RichText::new(alt).color(pal.fg));
+        }
+    });
 }
 
 /// The first [`ALT_SHOWN`] characters of an alt, cut at a word and marked.
@@ -665,7 +698,15 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
         Some(State::Loading(_)) => Snapshot::Loading,
         Some(State::Failed(f)) => Snapshot::Failed(f.why.clone(), f.offers_retry()),
         Some(State::Ready(_)) => Snapshot::Ready,
-        None | Some(State::Offered) => Snapshot::Offered,
+        // Nothing has been asked about this picture, and for a format the address names
+        // nothing will be. Worded through `DecodeError::Unsupported` rather than a second
+        // literal, for the reason `request_image` gives at the same test: the reader must not
+        // learn one phrase for a declined format that was fetched and another for one that
+        // never left.
+        None | Some(State::Offered) => match declined_by_address(&img.src, &ctx.base) {
+            Some(name) => Snapshot::Declined(name),
+            None => Snapshot::Offered,
+        },
     };
     if let Snapshot::Ready = state {
         show_ready(ui, img, ctx);
@@ -715,14 +756,24 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
                             }
                         });
                     }
-                    Snapshot::Offered | Snapshot::Ready => {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            ui.label(RichText::new("[image] ").color(pal.dim));
-                            if !alt.is_empty() {
-                                ui.label(RichText::new(alt).color(pal.fg));
-                            }
+                    // The alt, then the reason, and no control at all. `request_image` would
+                    // answer this press by contacting nobody and writing the second line, so
+                    // a button here is one the placeholder cannot name a host for: it says
+                    // "load from …" about a request that will not be made. The alt is drawn
+                    // the same way an offer draws it, because this picture was on the page
+                    // and the alt is now the only thing that says so.
+                    Snapshot::Declined(name) => {
+                        alt_line(ui, alt, &pal);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(DecodeError::Unsupported(name).to_string())
+                                    .color(pal.notice_fg),
+                            );
+                            ui.label(RichText::new(&host).color(pal.dim));
                         });
+                    }
+                    Snapshot::Offered | Snapshot::Ready => {
+                        alt_line(ui, alt, &pal);
                         let resp = ui.add(
                             egui::Button::new(
                                 RichText::new(format!("load from {host}"))
@@ -871,9 +922,13 @@ pub fn paint_mark(ui: &Ui, store: &ImageStore, src: &str, rect: egui::Rect) -> b
 pub fn load_control(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     // Nothing to offer once it is loaded, and nothing to offer for a decline a second request
     // cannot change: this is a control, and both of those make it a dead one.
+    // The third case is the same dead control one step earlier: an address that names a
+    // declined format is refused by `request_image` without a request, so the button would
+    // take Tab focus and do nothing the first time it was pressed rather than the second.
     if !ctx.opts.images.offers_loading()
         || matches!(ctx.images.state(&img.src), Some(State::Ready(_)))
         || ctx.images.refuses_retry(&img.src)
+        || declined_by_address(&img.src, &ctx.base).is_some()
     {
         return;
     }
@@ -897,8 +952,11 @@ pub fn load_control(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
 pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     let alt = img.alt.as_deref().unwrap_or("image");
     let pal = ctx.pal;
-    match ctx.images.state(&img.src) {
-        Some(State::Ready(ready)) => {
+    // Paired with the state rather than asked inside a guard, so the arm below can name the
+    // format instead of unwrapping it back out.
+    let declined = declined_by_address(&img.src, &ctx.base);
+    match (ctx.images.state(&img.src), declined) {
+        (Some(State::Ready(ready)), _) => {
             let h = ctx.opts.base_size_pt * 1.4;
             let w = h * ready.width as f32 / ready.height.max(1) as f32;
             ui.add(egui::Image::new(&ready.texture).fit_to_exact_size(egui::vec2(w, h)));
@@ -911,13 +969,24 @@ pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>)
         _ if !ctx.opts.images.offers_loading() => {
             ui.label(RichText::new(format!("[{alt}]")).color(pal.dim).italics());
         }
+
         // Same shape, for the same reason, one case further on: a decline a second request
         // cannot change had no arm here at all, so the mark stayed a `Button` that took Tab
         // focus, wrote `focus_image`, and did nothing at all when pressed. A label says the
         // picture was there and why it is not shown, and takes no focus.
-        Some(State::Failed(f)) if !f.offers_retry() => {
+        (Some(State::Failed(f)), _) if !f.offers_retry() => {
             ui.label(
                 RichText::new(format!("[{alt}] ({})", f.why))
+                    .color(pal.dim)
+                    .italics(),
+            );
+        }
+        // And the same shape once more, one step before the request: a decline the address
+        // already names reaches the arm above only after a press that contacts nobody, so
+        // until then the mark was a `Button` offering a picture hww will not open.
+        (None | Some(State::Offered), Some(name)) => {
+            ui.label(
+                RichText::new(format!("[{alt}] ({})", DecodeError::Unsupported(name)))
                     .color(pal.dim)
                     .italics(),
             );
@@ -943,6 +1012,25 @@ pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use url::Url;
+
+    /// Admitted under `ui/` on the same argument as the store tests below: the failure is
+    /// otherwise invisible. Three surfaces drop their control on the strength of this, and each
+    /// holds the `src` a page wrote rather than a resolved URL, so resolving against the wrong
+    /// base — or not resolving at all — puts the button back on every relative address, which is
+    /// most of them. The only symptom is a press that contacts nobody and prints what it knew
+    /// before it was pressed, which is exactly what a screenshot cannot show.
+    #[test]
+    fn a_declined_address_is_recognised_relative_to_the_page_it_came_from() {
+        let base = Url::parse("https://example.org/post/one").expect("a literal URL parses");
+        assert_eq!(declined_by_address("../img/logo.svg", &base), Some("SVG"));
+        assert_eq!(declined_by_address("/hero.avif", &base), Some("AVIF"));
+        assert_eq!(declined_by_address("photo.jpg", &base), None);
+        // The case the bytes still have to answer, and the reason the control cannot be dropped
+        // on suspicion: an image CDN taking its source in a query says nothing about what it
+        // will serve, since the same address answers a browser with WebP.
+        assert_eq!(declined_by_address("/_i?url=%2Fa.avif&w=800", &base), None);
+    }
 
     /// A settled mark outlives the page; a pending one does not; a picture never does.
     ///

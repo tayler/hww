@@ -55,7 +55,6 @@
 //! ceiling, which is the one amplification path the transfer cap was genuinely holding shut.
 
 use crate::fetch::Truncation;
-use url::Url;
 
 /// Longest side, in pixels, that will be decoded at all.
 pub const MAX_DIMENSION: u32 = 8192;
@@ -204,22 +203,13 @@ pub fn decode(
     })
 }
 
-/// Formats this reader declines on purpose: the name each is reported under, and the path
-/// suffixes that claim it.
-///
-/// One table, read by both declines. [`deliberately_unsupported`] recognises these from their
-/// bytes and [`declined_by_url`] from an address; a format named by one and not the other is
-/// a format that half-works, so `the_url_and_the_bytes_decline_the_same_formats` walks this
-/// list and fails the build instead.
-const DECLINED: &[(&str, &[&str])] = &[("SVG", &["svg", "svgz"]), ("AVIF", &["avif"])];
-
 /// Formats this reader declines on purpose, recognised from their bytes so the failure names
 /// the format instead of calling a valid file unrecognisable.
 ///
-/// **SVG** would need a second layout engine. `resvg` is exactly that, and a client whose
-/// whole thesis is not running the page's layout should not acquire one to draw a logo.
-/// **AVIF** would need `dav1d`, a C decoder surface, on untrusted input; the only module in
-/// this crate that parses untrusted binary input is pure Rust and stays that way.
+/// The third of the three declines and the only one that is not a claim, so it is the one that
+/// stays here beside the decoder. The table it answers, and the reasons each format is on it,
+/// are in [`crate::reader::image_formats`]; `the_declines_all_name_the_same_formats` below is
+/// what holds this in step with the other two.
 fn deliberately_unsupported(bytes: &[u8]) -> Option<&'static str> {
     // ISO-BMFF: [4-byte size][b"ftyp"][brand]. `avif` and `avis` are the AVIF brands.
     if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && matches!(&bytes[8..12], b"avif" | b"avis") {
@@ -353,68 +343,6 @@ fn element_name(s: &str) -> &str {
         .unwrap_or(name)
 }
 
-/// The same declines as [`deliberately_unsupported`], decidable from the address before a byte
-/// is fetched.
-///
-/// A URL extension is a claim, exactly like `Content-Type`, and this module's standing rule is
-/// to sniff bytes rather than trust claims. What differs is the consequence. Trusting a claim
-/// about *how to decode* means decoding mislabelled bytes; trusting one about *what not to
-/// fetch* costs at worst a picture that would have loaded. The byte sniff stays the authority
-/// for anything that does get fetched.
-///
-/// The exchange is worth it because the alternative is not just a wasted transfer. Every
-/// caller of this names the host to the reader before requesting, so without it the reader
-/// discloses a contact it never makes.
-///
-/// Two knock-ons, both accepted: a `.svg` address that redirects to a raster is now refused
-/// unseen, and a declined format behind an extensionless address still costs one request
-/// before the bytes are sniffed.
-pub fn declined_by_url(url: &Url) -> Option<&'static str> {
-    // Decoded first. `path_segments` yields the segment as it appears in the URL, so
-    // `logo%2Esvg` and `logo%2Egz` carry no `.` at all and would walk straight past this
-    // filter — fetched in full, and their host named to the reader — to be refused by the byte
-    // sniff afterwards, which is the whole cost this function exists to avoid.
-    let last = percent_decoded(url.path_segments()?.next_back()?);
-    let ext = last.rsplit_once('.')?.1.to_ascii_lowercase();
-    DECLINED
-        .iter()
-        .find(|(_, suffixes)| suffixes.contains(&ext.as_str()))
-        .map(|(name, _)| *name)
-}
-
-/// `%XX` back to bytes, then lossily to text.
-///
-/// Enough for the one question asked of it — where the last `.` is and what follows it — and
-/// small enough not to be worth a dependency. A stray `%` or a bad pair is left as written,
-/// which is what a browser does with one and keeps a malformed address from losing its
-/// extension.
-fn percent_decoded(segment: &str) -> String {
-    if !segment.contains('%') {
-        return segment.to_owned();
-    }
-    let b = segment.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        let hex = (i + 2 < b.len())
-            .then(|| std::str::from_utf8(&b[i + 1..i + 3]).ok())
-            .flatten()
-            .filter(|_| b[i] == b'%')
-            .and_then(|h| u8::from_str_radix(h, 16).ok());
-        match hex {
-            Some(byte) => {
-                out.push(byte);
-                i += 3;
-            }
-            None => {
-                out.push(b[i]);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 fn alloc_limits(limits: &DecodeLimits) -> image::Limits {
     let mut l = image::Limits::default();
     l.max_image_width = Some(limits.max_dimension);
@@ -440,8 +368,10 @@ fn downscale(img: image::DynamicImage, max_width: u32) -> image::DynamicImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reader::image_formats::{DECLINED, declined_by_mime, declined_by_url};
     use image::{ImageFormat, RgbaImage};
     use std::io::Cursor;
+    use url::Url;
 
     /// A gradient rather than a flat fill: a flat image survives a truncated decode looking
     /// identical to a complete one, which would make the partial tests prove nothing.
@@ -556,14 +486,19 @@ mod tests {
         }
     }
 
-    /// The two declines must name the same formats.
+    /// The three declines must name the same formats.
     ///
-    /// A format the address refuses but the bytes accept loads on a URL with no extension; a
-    /// format the bytes refuse but the address does not costs a request every time. Both are
-    /// silent, so the agreement is asserted rather than remembered.
+    /// Each disagreement is silent and each is a different bug. A format the address refuses but
+    /// the bytes accept loads from any URL with no extension. A format the bytes refuse but the
+    /// address does not costs a request every time. A format both refuse but no `type` names is
+    /// one `html::image_from` still picks out of a `<picture>` while a decodable sibling sits
+    /// beside it. So the agreement is asserted rather than remembered.
+    ///
+    /// Here rather than in `image_formats` because this is the one test that needs both halves:
+    /// the table is ungated and the byte sniff rides with `image`.
     #[test]
-    fn the_url_and_the_bytes_decline_the_same_formats() {
-        for (name, suffixes) in DECLINED {
+    fn the_declines_all_name_the_same_formats() {
+        for (name, suffixes, mimes) in DECLINED {
             assert_eq!(
                 deliberately_unsupported(&declined_sample(name)),
                 Some(*name),
@@ -577,45 +512,19 @@ mod tests {
                     "{name} is refused by bytes but not by a .{suffix} address"
                 );
             }
+            assert!(
+                !mimes.is_empty(),
+                "{name} is refused by bytes and by an address, so a <source type> claiming it \
+                 must be refused too; add its MIME type"
+            );
+            for mime in *mimes {
+                assert_eq!(
+                    declined_by_mime(mime),
+                    Some(*name),
+                    "{name} is refused by bytes but not by a `{mime}` type attribute"
+                );
+            }
         }
-    }
-
-    #[test]
-    fn an_address_is_declined_on_its_extension_and_nothing_else() {
-        let declined = |u: &str| declined_by_url(&Url::parse(u).unwrap());
-        assert_eq!(declined("https://e.org/a.svg"), Some("SVG"));
-        assert_eq!(declined("https://e.org/a.SVG"), Some("SVG"));
-        assert_eq!(declined("https://e.org/a.svgz?v=2#f"), Some("SVG"));
-        assert_eq!(declined("https://e.org/deep/path/a.avif"), Some("AVIF"));
-        // The extension is the claim. A directory named for a format is not one, and neither
-        // is a query parameter: refusing those would drop pictures that decode.
-        assert_eq!(declined("https://e.org/svg/photo.png"), None);
-        assert_eq!(declined("https://e.org/photo.png?fmt=svg"), None);
-        assert_eq!(declined("https://e.org/notsvg"), None);
-        assert_eq!(declined("https://e.org/"), None);
-    }
-
-    /// A segment is served percent-encoded, so the `.` an extension hangs off need not be a
-    /// literal one. Missed, the address is fetched in full and its host named to the reader
-    /// before the byte sniff refuses it.
-    #[test]
-    fn an_encoded_extension_is_still_an_extension() {
-        let declined = |u: &str| declined_by_url(&Url::parse(u).unwrap());
-        assert_eq!(declined("https://e.org/logo%2Esvg"), Some("SVG"));
-        assert_eq!(declined("https://e.org/deep/a%2Eavif?v=2"), Some("AVIF"));
-        assert_eq!(declined("https://e.org/logo.sv%67"), Some("SVG"));
-        // And the decoding must not invent an extension where the address has none.
-        assert_eq!(declined("https://e.org/100%25"), None);
-        assert_eq!(declined("https://e.org/photo%2Epng"), None);
-    }
-
-    #[test]
-    fn a_malformed_escape_keeps_the_rest_of_the_segment() {
-        assert_eq!(percent_decoded("a%2Esvg"), "a.svg");
-        assert_eq!(percent_decoded("plain.svg"), "plain.svg");
-        assert_eq!(percent_decoded("trailing%"), "trailing%");
-        assert_eq!(percent_decoded("bad%zzpair.svg"), "bad%zzpair.svg");
-        assert_eq!(percent_decoded("cut%2"), "cut%2");
     }
 
     /// The failure the 1024-byte window produced: a real SVG reported as unrecognisable.
