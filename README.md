@@ -29,7 +29,7 @@ hww fetches a web page, parses the HTML, then displays it using hww's own render
 - **Four typefaces.** IBM Plex Sans, Serif, and Mono, plus Atkinson Hyperlegible Next for low vision. All of them are compiled into the binary.
 - **Screen-reader support.** An AccessKit tree, with the off-screen layout skip suspended while an assistive technology is attached.
 - **RSS and Atom feeds.** Open a feed's address and it is read as a list of entries with their summaries, not as a wall of XML. Nothing behind a headline is requested until you follow it, and how much of each entry to show is a setting.
-- **Per-site rules, compiled in and reported.** A rewrite table, a profile table, a search-engine table. Every application is announced before the request goes out, and `Ctrl+Shift+R` reloads bare.
+- **Per-site rules, compiled in and reported.** A rewrite table (empty at present: its one rule died behind a login and was removed), a profile table, a search-engine table. Every application is announced before the request goes out, and `Ctrl+Shift+R` reloads bare.
 
 ## Install
 
