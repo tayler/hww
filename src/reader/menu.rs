@@ -235,7 +235,7 @@ pub enum Needs {
     /// A page that came from a request is on screen.
     ///
     /// Narrower than [`Needs::Page`], and the difference is the bookmarks view itself: once a built
-    /// view is a real `Page::Ready`, `Page` is satisfied on it, and "keep this page" there would
+    /// view is a real `Page::Ready`, `Page` is satisfied on it, and "bookmark this page" there would
     /// offer to bookmark the bookmarks view.
     FetchedPage,
     /// Tab has landed on a link.
@@ -363,13 +363,13 @@ fn build() -> Vec<Menu> {
                 // "this is on" everywhere else in the bar, and `Checked` is the existing
                 // mechanism for a row whose state the reader can see at a glance.
                 Item::Check {
-                    label: "Keep this page",
+                    label: "Bookmark this page",
                     keys: BOOKMARK_PAGE,
                     command: C::BookmarkPage,
                     checked: Checked::Bookmarked,
                     needs: N::FetchedPage,
                 },
-                // `Item::Run` and not `Item::Check` beside "Keep this page", though this is a
+                // `Item::Run` and not `Item::Check` beside "Bookmark this page", though this is a
                 // toggle too. A tick answers a question about the page on screen and stays
                 // still while the reader reads it; this one would answer about whichever link
                 // Tab last touched, so it would be a frame stale and would flicker down the

@@ -355,7 +355,7 @@ struct Ready {
     /// Three things read it, and each would be a lie without it. `arrival` reports it, so the
     /// page-info panel draws no Response rows over a provenance that is all zeros; `commit`
     /// refuses to file it in the page cache, so Back rebuilds it and sees what has been kept
-    /// since; and "keep this page" is gated on it being false, because `Needs::Page` is
+    /// since; and "Bookmark this page" is gated on it being false, because `Needs::Page` is
     /// satisfied on the bookmarks view itself and would otherwise offer to save the bookmarks into the
     /// bookmarks.
     built: bool,
@@ -3245,7 +3245,7 @@ impl ReaderApp {
         let enable = menu_ui::Enable {
             page: self.shown().is_some(),
             // Narrower than `page`, and the bookmarks is the difference: once a built view is a
-            // real `Page::Ready`, `Needs::Page` is satisfied on it and "keep this page" there
+            // real `Page::Ready`, `Needs::Page` is satisfied on it and "Bookmark this page" there
             // would offer to bookmark the bookmarks view.
             fetched_page: self.shown().is_some_and(|r| !r.built),
             focused_link: self.focus_href_was.is_some(),
