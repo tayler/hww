@@ -393,6 +393,58 @@ same wire format, and the wire format is the only part anyone agreed on anyway.<
 </body></html>
 "#;
 
+/// A status permalink as one is served: the tweet in a container of its own inside `<main>`, the
+/// counted actions carrying both an `aria-label` and an icon name, and two replies under it.
+/// Synthetic, like every fixture here, and deliberately shaped rather than copied.
+const TWEET_URL: &str = "https://example.com/writer/status/9001";
+
+const TWEET: &str = r#"
+<html><head><title>A Writer (@writer) on Example</title>
+<meta property="og:site_name" content="Example">
+<meta property="article:published_time" content="2026-07-05T22:47:47.000Z"></head>
+<body><div><main>
+<div><article>
+  <div><a href="/writer"><img alt="@writer" src="http://127.0.0.1:{PORT}/face-a.png"></a>
+    <a href="https://example.com/writer">A Writer</a>
+    <a href="https://example.com/writer">@writer</a></div>
+  <div dir="auto"><span>Well well well</span></div>
+  <div><a aria-label="Image" href="/writer/status/9001/photo/1">
+    <img src="http://127.0.0.1:{PORT}/photo.png" alt=""></a></div>
+  <div><span><a href="/writer/status/9001">10:47 PM &#183; Jul 5, 2026</a></span>
+       <span><a href="/writer/status/9001"><span>108.2M</span><span>Views</span></a></span></div>
+  <div><a aria-label="Reply" href="/i/status/9001">
+         <svg data-icon="icon-reply-stroke"></svg><span>56K</span></a>
+       <button aria-label="Repost">
+         <svg data-icon="icon-retweet-stroke"></svg><span>166K</span></button>
+       <button aria-label="Like">
+         <svg data-icon="icon-heart-stroke"></svg><span>2.6M</span></button>
+       <button aria-label="Bookmark">
+         <svg data-icon="icon-bookmark-stroke"></svg><span>44K</span></button></div>
+</article></div>
+<div><article>
+  <div><a href="/reader"><img alt="@reader" src="http://127.0.0.1:{PORT}/face-b.png"></a>
+    <a href="https://example.com/reader">Another Reader</a>
+    <a href="https://example.com/reader">@reader</a></div>
+  <div dir="auto"><span>An answer to it, of the length an answer usually runs to.</span></div>
+  <div><span><a href="/reader/status/9002">Jul 5</a></span></div>
+  <div><a aria-label="Reply" href="/i/status/9002"><span>66</span></a>
+       <button aria-label="Repost"><span>420</span></button>
+       <button aria-label="Like"><span>38K</span></button></div>
+</article></div>
+<div><article>
+  <div><a href="/third"><img alt="@third" src="http://127.0.0.1:{PORT}/face-c.png"></a>
+    <a href="https://example.com/third">A Third Voice</a>
+    <a href="https://example.com/third">@third</a></div>
+  <div dir="auto"><span>And a shorter one.</span></div>
+  <div><span><a href="/third/status/9003">Jul 5</a></span></div>
+  <div><a aria-label="Reply" href="/i/status/9003"><span>7</span></a>
+       <button aria-label="Like"><span>1.5K</span></button></div>
+</article></div>
+</main></div>
+<div><a href="https://example.com/login">Log in or sign up to see what is happening</a></div>
+</body></html>
+"#;
+
 const THREAD: &str = r#"
 <html><head><title>Discussion: the second browser</title></head><body>
 <h1>Discussion: the second browser</h1>
@@ -518,6 +570,7 @@ const FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
 fn catalog(port: u16) -> Vec<Scene> {
     let images = IMAGES.replace("{PORT}", &port.to_string());
+    let tweet = TWEET.replace("{PORT}", &port.to_string());
     let stall = format!("http://127.0.0.1:{port}/stall");
     let mut scenes = vec![
         scene(
@@ -728,6 +781,19 @@ fn catalog(port: u16) -> Vec<Scene> {
             "an RSS feed: entries with calendar dates, summaries cut at a block boundary",
             vec![page(FEED_URL, FEED)],
         ),
+        scene(
+            "tweet",
+            "a tweet: name, message, picture, date, and the counts the page printed",
+            vec![page(TWEET_URL, &tweet)],
+        ),
+        Scene {
+            settle_ms: 2500,
+            ..scene(
+                "tweet-loaded",
+                "the same tweet after Shift+I: the face and the picture fetched",
+                vec![page(TWEET_URL, &tweet), shift(Key::I)],
+            )
+        },
         scene(
             "thread",
             "a discussion: authors, timestamps, nested replies",
@@ -1492,6 +1558,13 @@ fn build(url: &Url, body: &str, tweak: fn(&mut Provenance)) -> Loaded {
         truncation: Truncation::Complete,
         profile: None,
         feed,
+        // Derived from the document the same way `session::load` derives it, so a tweet scene
+        // photographs the notice bar a tweet really gets rather than the caution it would draw
+        // if this said `false` on a page the extractor read as tweets.
+        tweets: doc
+            .blocks
+            .iter()
+            .any(|b| matches!(b, hww::ir::Block::Tweets(_))),
     };
     tweak(&mut prov);
     Loaded { doc, prov }
@@ -1671,6 +1744,12 @@ fn serve() -> std::io::Result<u16> {
     let mark_c = Arc::new(mark_png([92, 140, 74]));
     let mark_d = Arc::new(mark_png([146, 96, 168]));
     let mark_e = Arc::new(mark_png([198, 148, 58]));
+    // The tweet scene's three faces. Squares like a mark, because that is the box an avatar is
+    // drawn in, and three colours apart, because the header exists to tell one poster's message
+    // from the next one's.
+    let face_a = Arc::new(mark_png([70, 70, 78]));
+    let face_b = Arc::new(mark_png([168, 116, 92]));
+    let face_c = Arc::new(mark_png([88, 128, 132]));
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let photo = Arc::clone(&photo);
@@ -1679,6 +1758,9 @@ fn serve() -> std::io::Result<u16> {
             let mark_c = Arc::clone(&mark_c);
             let mark_d = Arc::clone(&mark_d);
             let mark_e = Arc::clone(&mark_e);
+            let face_a = Arc::clone(&face_a);
+            let face_b = Arc::clone(&face_b);
+            let face_c = Arc::clone(&face_c);
             std::thread::spawn(move || {
                 let mut stream = stream;
                 let mut buf = [0u8; 2048];
@@ -1703,6 +1785,9 @@ fn serve() -> std::io::Result<u16> {
                     "/mark-d.png" => ok(&mut stream, "image/png", &mark_d),
                     // The `bookmark-sidebar` scene's own, on the same rule as the pair above.
                     "/mark-e.png" => ok(&mut stream, "image/png", &mark_e),
+                    "/face-a.png" => ok(&mut stream, "image/png", &face_a),
+                    "/face-b.png" => ok(&mut stream, "image/png", &face_b),
+                    "/face-c.png" => ok(&mut stream, "image/png", &face_c),
                     "/marked-one" => ok(
                         &mut stream,
                         "text/html; charset=utf-8",

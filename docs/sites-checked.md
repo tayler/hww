@@ -24,6 +24,7 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | bloomberg.com | 2026-08-22 | front, section, article | newsletter page read; paywall elsewhere |
 | bostonglobe.com | 2026-08-22 | front, section | front read; no article picked |
 | breitbart.com | 2026-08-22 | front | connection refused |
+| bsky.app | 2026-09-03 | profile | JS shell, body emits 0 chars; nothing for `tweet.rs` to read |
 | businessinsider.com | 2026-08-22 | front, article | clean |
 | cbc.ca | 2026-08-22 | front, article | clean |
 | cbsnews.com | 2026-08-22 | front, section, article | clean |
@@ -62,6 +63,7 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | lefigaro.fr | 2026-08-22 | front, section, article | profile: strip consent banner (root walked with hints off) |
 | lemonde.fr | 2026-08-22 | front, section, article | clean |
 | lwn.net | 2026-08-22 | front, article | mailing-list page read; fine |
+| mastodon.social | 2026-09-03 | profile | JS shell, body emits 0 chars; nothing for `tweet.rs` to read |
 | medium.com | 2026-08-22 | front | front gave the picker no article; not read |
 | mg.co.za | 2026-08-22 | front, article | clean |
 | milenio.com | 2026-08-22 | front, section, article | clean |
@@ -107,6 +109,7 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | thehill.com | 2026-08-22 | front, section, article | related-card remnant at the tail, left |
 | thehindu.com | 2026-08-22 | front, section, article | clean |
 | theverge.com | 2026-08-22 | front, article | native-ad block at the foot: tail trimmer handles it (profile tried and removed) |
+| threads.com | 2026-09-03 | profile | JS shell, body emits 0 chars; nothing for `tweet.rs` to read |
 | time.com | 2026-08-22 | front, section, article | clean |
 | timesofindia.indiatimes.com | 2026-08-22 | front, section, article | clean |
 | usatoday.com | 2026-08-22 | front, section, article | clean |
@@ -115,3 +118,4 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | wired.com | 2026-08-22 | front, article | clean |
 | wsj.com | 2026-08-22 | front | 401 |
 | wyborcza.pl | 2026-08-22 | front, article | adblock wall in place of the article |
+| x.com | 2026-09-03 | status permalink, profile | permalink server-rendered whole; article scoring lost it (139 chars, false JS caution). `tweet.rs` added, named for this host: no rewrite, no profile. Profile timeline reads as one article (288 chars), tweet run dropped |

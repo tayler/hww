@@ -507,6 +507,15 @@ pub fn mark_box(opts: &ReadOpts) -> f32 {
     snap(opts.base_size_pt * 1.25)
 }
 
+/// The side of the square a tweet's avatar is drawn in.
+///
+/// Larger than [`mark_box`], and for a different subject: a mark identifies a *site* at the size
+/// of a list row, and this is a *person* at the head of a message. Scaled off the reading size
+/// like everything else here, so a reader who has turned the text up gets a face to match it.
+pub fn avatar_box(opts: &ReadOpts) -> f32 {
+    snap(opts.base_size_pt * 2.6)
+}
+
 pub fn bar_pad(opts: &ReadOpts) -> i8 {
     (opts.base_size_pt * 0.5).round().clamp(6.0, 24.0) as i8
 }

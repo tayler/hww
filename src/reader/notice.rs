@@ -622,8 +622,9 @@ pub fn about_page(prov: &Provenance, text_len: usize, arrival: Arrival) -> Vec<N
     // feed whose entries are each a single picture scores under the floor having parsed
     // perfectly, and this caution would tell its reader that a page hww read correctly needs
     // JavaScript. The IR is not the place to fix that — text length has one currency — so the
-    // pipeline says the page was a feed and the caution reads `prov.feed`.
-    if text_len < THIN_TEXT && prov.feed.is_none() {
+    // pipeline says the page was a feed and the caution reads `prov.feed`. A tweet is short for
+    // its own reason and is exempt the same way, through `prov.tweets`.
+    if text_len < THIN_TEXT && prov.feed.is_none() && !prov.tweets {
         out.push(Notice::new(
             Severity::Caution,
             "hww found little text on this page, which may need JavaScript to show its content.",
@@ -701,6 +702,11 @@ pub fn carries_rtl(doc: &crate::ir::Document) -> bool {
             Block::Entries(es) => es
                 .iter()
                 .any(|e| inlines_have_rtl(&e.title) || blocks_have_rtl(&e.summary)),
+            Block::Tweets(ps) => ps.iter().any(|p| {
+                blocks_have_rtl(&p.blocks)
+                    || p.author.as_deref().is_some_and(has_rtl)
+                    || p.timestamp.as_deref().is_some_and(has_rtl)
+            }),
             Block::Rule | Block::Embed { .. } => false,
         })
     }
@@ -1630,6 +1636,25 @@ mod tests {
     #[test]
     fn the_thin_extraction_threshold_matches_the_extractor() {
         assert_eq!(about_page(&page(200), THIN_TEXT, Arrival::Fetched).len(), 0);
+        assert_eq!(
+            about_page(&page(200), THIN_TEXT - 1, Arrival::Fetched).len(),
+            1
+        );
+    }
+
+    /// A tweet draws no thin-text caution either, and for its own reason.
+    ///
+    /// A tweet is a few dozen words by design — the one this was measured against is nine — so a
+    /// page that parsed perfectly still lands under the floor. Cautioning there is how hww came
+    /// to tell a reader that a fully server-rendered page "may need JavaScript" while holding
+    /// the whole of it. Same fix as the feed above, through `prov.tweets`.
+    #[test]
+    fn a_tweet_is_short_by_nature_and_is_not_told_it_needs_javascript() {
+        let mut p = page(200);
+        p.tweets = true;
+        assert!(about_page(&p, 0, Arrival::Fetched).is_empty());
+        assert!(about_page(&p, THIN_TEXT - 1, Arrival::Fetched).is_empty());
+        // And nothing else was suppressed along with it.
         assert_eq!(
             about_page(&page(200), THIN_TEXT - 1, Arrival::Fetched).len(),
             1

@@ -135,6 +135,7 @@ Before 0.4 this file was called `library.json` and bookmarks were called the lib
 | `src/fetch.rs` | HTTP client with no cookie jar, redirect inspection, and request limits |
 | `src/html.rs` | Parses HTML into `Document`: article scoring, cards, thread hooks |
 | `src/thread.rs` | Detects comment lists from repeated siblings with the same classes |
+| `src/tweet.rs` | Detects tweets, the shape X serves: a name, a date, and a row of counted actions |
 | `src/ir.rs` | Semantic document intermediate representation (IR); extractors write the IR, renderers read it |
 
 ## Developing
