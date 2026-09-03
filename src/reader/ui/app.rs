@@ -44,7 +44,6 @@ use crate::reader::autoload;
 use crate::reader::desktop;
 use crate::reader::history::{EntryId, History};
 use crate::reader::iconcache;
-use crate::reader::image_decode;
 use crate::reader::measure::{self, Heights};
 use crate::reader::menu::{self, Command};
 use crate::reader::notice::{
@@ -62,6 +61,7 @@ use crate::reader::ui::images::{Failure, ImageStore, Source};
 use crate::reader::ui::{
     Action, Launch, RenderCtx, blocks, fonts, menu_ui, net, notice_ui, pageinfo_ui, prefs_ui, theme,
 };
+use crate::reader::{image_decode, image_formats};
 use crate::session::{self, LoadError, LoadOptions, Loaded, Rewrite, Target};
 use eframe::egui::{self, Align, Key, Layout, Modifiers, RichText, Ui};
 use net::{Job, Kept, Msg, Net, ReqId};
@@ -1665,14 +1665,7 @@ impl ReaderApp {
             in_band,
             &self.auto_attempts,
             self.images.pending(),
-            // Not only "the store has an answer": also "this address will never be
-            // requested", so a declined picture is not requested and failed once per frame.
-            &|src| {
-                self.images.state(src).is_some()
-                    || base
-                        .join(src)
-                        .is_ok_and(|u| image_decode::declined_by_url(&u).is_some())
-            },
+            &|src| self.images.state(src).is_some(),
         );
         let max_width = self.column_texture_width(ctx);
         for src in srcs {
@@ -2023,7 +2016,7 @@ impl ReaderApp {
         // Worded through `DecodeError::Unsupported` rather than a second literal: the reader
         // must not learn one phrase for a declined format fetched and another for one that
         // was not.
-        if let Some(name) = image_decode::declined_by_url(&url) {
+        if let Some(name) = image_formats::declined_by_url(&url) {
             let why = image_decode::DecodeError::Unsupported(name).to_string();
             self.images.fail(src, Failure::permanent(why));
             return false;
@@ -2092,10 +2085,7 @@ impl ReaderApp {
         // in place of the one this removes. An unusable address still belongs in the list;
         // `request_image` has the honest message for it. Asked twice below: once to decide what
         // to request, and once to decide what to say when that comes to nothing.
-        let is_declined = |s: &str| {
-            base.join(s)
-                .is_ok_and(|u| image_decode::declined_by_url(&u).is_some())
-        };
+        let is_declined = |s: &str| image_formats::declined_by_href(s, &base).is_some();
         // Before the hosts are gathered and before the count is taken. This remark names every
         // host it is about to contact, so a declined address left in would have it name one it
         // never reaches — the same claim about the network that `autoload::plan` refuses to

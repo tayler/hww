@@ -468,9 +468,18 @@ fn link_ui(
 /// shifts by almost nothing, and once an image *has* been decoded its dimensions are cached
 /// per `src`, so a revisit reserves the right box for free.
 pub fn image_host(img: &ir::Image, base: &url::Url) -> String {
-    base.join(&img.src)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
+    host_label(base.join(&img.src).ok().as_ref())
+}
+
+/// The same label for a caller that has already resolved the address.
+///
+/// `images::placeholder` asks two questions of one `src` — which host the control will name,
+/// and whether the address names a declined format — and joining once for each was two full URL
+/// parses per unloaded figure per frame. `None` is an address that would not resolve, which is
+/// the same "unknown host" a join failure was always reported as.
+pub fn host_label(url: Option<&url::Url>) -> String {
+    url.and_then(|u| u.host_str())
+        .map(str::to_owned)
         .unwrap_or_else(|| "an unknown host".to_owned())
 }
 

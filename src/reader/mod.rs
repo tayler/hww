@@ -38,6 +38,12 @@ pub mod history;
 /// before writing anything else to disk: this is the one exception to the rule that nothing hww
 /// fetches is kept, and it argues for itself there.
 pub mod iconcache;
+/// Which picture formats this reader declines, and the three claims that name one. No egui
+/// types and no `image` crate, so the fast CI job tests it — which is the point, since one of
+/// the three is asked while building the IR in the default build. [`image_decode`] holds the
+/// fourth answer, the byte sniff, and the test that keeps them in step.
+pub mod image_formats;
+
 pub mod inline;
 /// The link macOS hands a bundled application, which it sends as an Apple Event rather than
 /// putting in `argv`. macOS only, and the one module in the crate no CI job on another platform

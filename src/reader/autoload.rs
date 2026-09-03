@@ -20,6 +20,7 @@
 //! forever, requesting an address that cannot resolve, letting the queue grow without bound —
 //! are all arithmetic on those sets, and none of them are visible in a screenshot.
 
+use crate::reader::image_formats;
 use std::collections::{HashMap, HashSet};
 use url::Url;
 
@@ -52,10 +53,8 @@ pub const MAX_ATTEMPTS: u32 = 2;
 ///
 /// `in_band` is every `src` the column drew inside the band, in document order and possibly
 /// with repeats. `attempts` is how many times this page has already asked for each, and
-/// `pending` how many requests are outstanding. `known` answers whether this `src` is already
-/// settled, one way or another — the store holds a state for it, or it is an address the reader
-/// will never request, such as a format `image_decode` declines. The caller answers that second
-/// half, because the format tables ride with the `gui` feature and this module does not.
+/// `pending` how many requests are outstanding. `known` answers whether the store already holds
+/// a state for this `src`, one way or another.
 ///
 /// `attempts` and `known` are both consulted, and neither one covers the other. `known` is
 /// false for a picture the LRU evicted while it was still on the page, and without a count of
@@ -89,12 +88,18 @@ pub fn plan(
         // Resolved here rather than at the request, because an address that will not resolve
         // has no fetch to make. Requesting it would mark the placeholder failed without
         // anything having been contacted, which is a claim about the network that nothing did.
-        if base
-            .join(src)
-            .ok()
-            .and_then(|u| u.host_str().map(str::to_owned))
-            .is_none()
-        {
+        let Ok(url) = base.join(src) else {
+            continue;
+        };
+        if url.host_str().is_none() {
+            continue;
+        }
+        // And an address whose format this reader declines is a request that would be refused
+        // before it left: `request_image` fails it on the spot, so planning it fails the same
+        // picture once a frame for as long as it is drawn. Asked here, off the join this
+        // function already makes, rather than by the caller — the table is ungated, so the
+        // question belongs where the plan is made and where the fast job tests it.
+        if image_formats::declined_by_url(&url).is_some() {
             continue;
         }
         srcs.push(src.clone());
@@ -112,13 +117,6 @@ mod tests {
 
     fn nothing_known(_: &str) -> bool {
         false
-    }
-
-    /// A `src` a declined format claims, which is how `ReaderApp::autoload` answers `known`
-    /// for one. Spelled here rather than reached for, because `image_decode` rides with the
-    /// `gui` feature and this module is tested without it.
-    fn declined(src: &str) -> bool {
-        src.ends_with(".svg")
     }
 
     /// Attempt counts, spelled `("src", n)`.
@@ -218,17 +216,21 @@ mod tests {
 
     /// A picture this reader will never request is not planned, so a page of declined formats
     /// contacts nobody rather than failing a placeholder per picture.
+    ///
+    /// `nothing_known` throughout: the store has never heard of these, and the refusal is the
+    /// real table's, asked here rather than handed in by the caller.
     #[test]
     fn a_declined_src_is_not_planned() {
         let band = [
             "https://cdn.example.net/diagram.svg".to_owned(),
+            "/relative/hero.avif".to_owned(),
             "https://img.example.org/photo.jpg".to_owned(),
         ];
-        let p = plan(&base(), &band, &tries(&[]), 0, &declined);
+        let p = plan(&base(), &band, &tries(&[]), 0, &nothing_known);
         assert_eq!(
             p,
             vec!["https://img.example.org/photo.jpg"],
-            "the declined picture is not requested"
+            "neither declined picture is requested, and a relative one is resolved first"
         );
     }
 
@@ -239,7 +241,7 @@ mod tests {
             "https://cdn.example.net/a.svg".to_owned(),
             "https://cdn.example.net/b.svg".to_owned(),
         ];
-        let p = plan(&base(), &band, &tries(&[]), 0, &declined);
+        let p = plan(&base(), &band, &tries(&[]), 0, &nothing_known);
         assert!(p.is_empty());
     }
 }

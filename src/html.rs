@@ -37,6 +37,7 @@
 //! pass.
 
 use crate::ir::{Block, Document, Image, Inline};
+use crate::reader::image_formats::{declined_by_href, declined_by_mime};
 use scraper::{ElementRef, Html, Node, Selector};
 use std::collections::HashMap;
 use url::Url;
@@ -2246,15 +2247,12 @@ fn image_from(el: &ElementRef, base: &Url) -> Option<Image> {
         .or_else(|| v.attr("data-srcset").and_then(first_of_srcset))
         .or_else(|| {
             // `<picture><source srcset><img></picture>` with an `<img>` that carries nothing
-            // but a placeholder: the first source's first candidate is the image.
+            // but a placeholder: one of the sources is the image.
             let parent = el.parent().and_then(ElementRef::wrap)?;
             if parent.value().name() != "picture" {
                 return None;
             }
-            let source = &*sel::SOURCE_SRCSET;
-            parent
-                .select(source)
-                .find_map(|s| s.value().attr("srcset").and_then(first_of_srcset))
+            picture_source(&parent, base)
         })?;
     let src = base.join(raw).ok()?;
     Some(Image {
@@ -2265,6 +2263,49 @@ fn image_from(el: &ElementRef, base: &Url) -> Option<Image> {
             .filter(|a| !a.trim().is_empty())
             .map(str::to_owned),
     })
+}
+
+/// The candidate a `<picture>` offers that this reader can actually draw.
+///
+/// A `<source>` under a `<picture>` is usually the same picture in a different encoding, so
+/// choosing between them is usually choosing between equivalents rather than choosing what the
+/// page said — which is why extraction is allowed to make the choice at all, and why it may
+/// consult a decoder capability here without knowing anything else about the renderer.
+///
+/// It has to. The convention is best-compression-first, so a `<picture>` in 2026 opens with
+/// AVIF and lists the JPEG the reader can see underneath it; taking the first source handed the
+/// column the one candidate hww declines while a decodable sibling sat two lines below, and the
+/// reader got a picture that could not be shown on a page where showing it was never in doubt.
+/// A `<source>` announces its format in `type` for exactly this decision.
+///
+/// The art-direction form is the exception and is accepted as one: sources carrying `media` are
+/// different crops for different viewports, so skipping a declined one can select a picture
+/// framed for a window this reader does not have. `media` is deliberately not consulted, because
+/// a text column has no viewport to match it against and the alternative is handing the renderer
+/// a candidate it cannot draw at any width. A differently framed picture is the smaller loss.
+///
+/// Both claims are read, and neither is required: a `type` that names a declined format is
+/// skipped, and so is a candidate URL whose extension does, which is `declined_by_url`'s
+/// existing bargain one step earlier. A source wearing neither claim is tried, because this
+/// list is what hww cannot draw and never a list of what it can.
+///
+/// The first source is still the answer when every one of them is declined. Dropping the image
+/// instead would be the reader saying a page had no picture where it had one, and the
+/// placeholder has the honest line for a format it will not open — which the reader now sees
+/// without pressing anything.
+fn picture_source<'a>(parent: &ElementRef<'a>, base: &Url) -> Option<&'a str> {
+    let candidates = || {
+        parent.select(&sel::SOURCE_SRCSET).filter_map(|s| {
+            let v = s.value();
+            Some((v.attr("srcset").and_then(first_of_srcset)?, v.attr("type")))
+        })
+    };
+    candidates()
+        .find(|(url, mime)| {
+            mime.and_then(declined_by_mime).is_none() && declined_by_href(url, base).is_none()
+        })
+        .or_else(|| candidates().next())
+        .map(|(url, _)| url)
 }
 
 /// The first URL in a `srcset`: `url 1x, url 2x` or `url 256w, url 512w`. The smallest
@@ -3399,6 +3440,60 @@ mod tests {
             ],
             "{:?}",
             d.blocks
+        );
+    }
+
+    /// The picture a `<picture>` yields is the one that can be drawn, not the one listed first.
+    ///
+    /// The markup here is what a 2026 build pipeline emits: AVIF first because it is smallest,
+    /// then WebP, then the JPEG every client can read. Taking the first source put a format hww
+    /// declines into the IR with a decodable sibling two lines below it, and the reader met a
+    /// placeholder that would never load on a page where nothing was actually missing.
+    #[test]
+    fn a_picture_yields_the_first_candidate_this_reader_can_decode() {
+        let body =
+            "Prose long enough to clear the floor, repeated a few times over for size. ".repeat(4);
+        let picture = |sources: &str| {
+            let src = format!(
+                "<html><body><article><figure><picture>{sources}\
+                 <img src=\"data:image/gif;base64,R0lGOD\" alt=\"A hero\"></picture></figure>\
+                 <p>{body}</p></article></body></html>"
+            );
+            doc(&src).blocks.iter().find_map(|b| match b {
+                Block::Figure { image, .. } => Some(image.src.clone()),
+                _ => None,
+            })
+        };
+
+        // The `type` attribute is the claim the page makes on purpose, so it is read first.
+        assert_eq!(
+            picture(
+                "<source type=\"image/avif\" srcset=\"/a.avif\">\
+                 <source type=\"image/webp\" srcset=\"/a.webp\">\
+                 <source type=\"image/jpeg\" srcset=\"/a.jpg\">"
+            )
+            .as_deref(),
+            Some("https://example.test/a.webp")
+        );
+        // And a source that makes no claim is judged by its candidate's extension, which is
+        // the bargain `declined_by_url` already strikes one step later.
+        assert_eq!(
+            picture("<source srcset=\"/a.svg\"><source srcset=\"/a-512.png 512w\">").as_deref(),
+            Some("https://example.test/a-512.png")
+        );
+        // A source claiming nothing hww has heard of is tried rather than skipped: the table is
+        // what cannot be drawn, and the decoder gets the last word on everything else.
+        assert_eq!(
+            picture("<source type=\"image/jxl\" srcset=\"/a.jxl\"><source srcset=\"/a.jpg\">")
+                .as_deref(),
+            Some("https://example.test/a.jxl")
+        );
+        // All declined is still a picture. Emitting nothing would say the page had none, and
+        // the placeholder can say why this one is not shown; dropping it cannot.
+        assert_eq!(
+            picture("<source type=\"image/avif\" srcset=\"/a.avif\"><source srcset=\"/b.svg\">")
+                .as_deref(),
+            Some("https://example.test/a.avif")
         );
     }
 

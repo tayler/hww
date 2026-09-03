@@ -74,10 +74,12 @@
 //! [`ImageStore::take_changed`]'s contract, so a new call site cannot forget to record.
 
 use crate::ir;
-use crate::reader::image_decode::Decoded;
+use crate::reader::image_decode::{DecodeError, Decoded};
+use crate::reader::image_formats::{declined_by_href, declined_by_url};
 use crate::reader::pageinfo::Counts;
 use crate::reader::ui::{Action, RenderCtx, theme};
 use eframe::egui::{self, RichText, TextureHandle, Ui};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 /// Textures held at once.
@@ -610,9 +612,39 @@ enum Snapshot {
     Offered,
     Loading,
     Ready,
+    /// A format the address names before anything is fetched. Apart from [`Snapshot::Failed`]
+    /// so the line can still carry the alt: nothing was ever asked for here, so the alt is the
+    /// whole account of the picture the reader gets.
+    Declined(&'static str),
     /// The message, and whether to draw the retry control beside it. Both halves, because this
     /// exists to be read out of the store before the drawing closures borrow `ctx`.
     Failed(String, bool),
+}
+
+/// The compact dead mark: `[alt]`, and the reason in brackets after it when there is one.
+///
+/// The three cases the inline strip draws without a control — the policy, a failure no retry
+/// can change, and a format the address names — differed only in that reason, and each carried
+/// its own copy of the colour, the italics and the bracket convention `notice` treats as
+/// load-bearing. One site, so a change to how a dead mark reads is one edit.
+fn dead_mark(ui: &mut Ui, alt: &str, reason: Option<&str>, pal: &theme::Palette) {
+    let text = match reason {
+        Some(why) => format!("[{alt}] ({why})"),
+        None => format!("[{alt}]"),
+    };
+    ui.label(RichText::new(text).color(pal.dim).italics());
+}
+
+/// The `[image]` mark and the alt beside it: the line a placeholder opens with whether it is
+/// about to offer the picture or to say why it will not.
+fn alt_line(ui: &mut Ui, alt: &str, pal: &theme::Palette) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.label(RichText::new("[image] ").color(pal.dim));
+        if !alt.is_empty() {
+            ui.label(RichText::new(alt).color(pal.fg));
+        }
+    });
 }
 
 /// The first [`ALT_SHOWN`] characters of an alt, cut at a word and marked.
@@ -642,7 +674,6 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     let alt_full = img.alt.as_deref().unwrap_or("").trim();
     let alt_short = short_alt(alt_full);
     let alt = alt_short.as_str();
-    let host = super::inline_ui::image_host(img, &ctx.base);
     let pal = ctx.pal;
     let font = theme::chrome_font(ctx.opts);
 
@@ -659,13 +690,28 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
         return;
     }
 
+    // One resolution of the `src` for both questions a page-relative address answers here:
+    // which host the control is about to name, and whether the address names a format this
+    // reader declines. `image_host` joined for the first and the decline joined again for the
+    // second, which is two full URL parses per unloaded figure per frame.
+    let resolved = ctx.base.join(&img.src).ok();
+    let host = super::inline_ui::host_label(resolved.as_ref());
+
     // Read the state out before drawing: the closures below need `ctx` mutably, and holding a
     // borrow of the store across them would be a second one.
     let state = match ctx.images.state(&img.src) {
         Some(State::Loading(_)) => Snapshot::Loading,
         Some(State::Failed(f)) => Snapshot::Failed(f.why.clone(), f.offers_retry()),
         Some(State::Ready(_)) => Snapshot::Ready,
-        None | Some(State::Offered) => Snapshot::Offered,
+        // Nothing has been asked about this picture, and for a format the address names
+        // nothing will be. Worded through `DecodeError::Unsupported` rather than a second
+        // literal, for the reason `request_image` gives at the same test: the reader must not
+        // learn one phrase for a declined format that was fetched and another for one that
+        // never left.
+        None | Some(State::Offered) => match resolved.as_ref().and_then(declined_by_url) {
+            Some(name) => Snapshot::Declined(name),
+            None => Snapshot::Offered,
+        },
     };
     if let Snapshot::Ready = state {
         show_ready(ui, img, ctx);
@@ -715,14 +761,24 @@ pub fn placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
                             }
                         });
                     }
-                    Snapshot::Offered | Snapshot::Ready => {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            ui.label(RichText::new("[image] ").color(pal.dim));
-                            if !alt.is_empty() {
-                                ui.label(RichText::new(alt).color(pal.fg));
-                            }
+                    // The alt, then the reason, and no control at all. `request_image` would
+                    // answer this press by contacting nobody and writing the second line, so
+                    // a button here is one the placeholder cannot name a host for: it says
+                    // "load from …" about a request that will not be made. The alt is drawn
+                    // the same way an offer draws it, because this picture was on the page
+                    // and the alt is now the only thing that says so.
+                    Snapshot::Declined(name) => {
+                        alt_line(ui, alt, &pal);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(DecodeError::Unsupported(name).to_string())
+                                    .color(pal.notice_fg),
+                            );
+                            ui.label(RichText::new(&host).color(pal.dim));
                         });
+                    }
+                    Snapshot::Offered | Snapshot::Ready => {
+                        alt_line(ui, alt, &pal);
                         let resp = ui.add(
                             egui::Button::new(
                                 RichText::new(format!("load from {host}"))
@@ -866,21 +922,79 @@ pub fn paint_mark(ui: &Ui, store: &ImageStore, src: &str, rect: egui::Rect) -> b
     true
 }
 
-/// The one control an entry's thumbnail gets: a small dim `[image]` beside the time, which
-/// loads that one picture, and nothing once it is loaded. `Never` shows nothing at all.
-pub fn load_control(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
-    // Nothing to offer once it is loaded, and nothing to offer for a decline a second request
-    // cannot change: this is a control, and both of those make it a dead one.
+/// What an entry's thumbnail mark says, decided before the row is laid out.
+///
+/// `blocks::entry_ui` reserves the right-hand end of the headline's first line for the mark and
+/// wraps the headline under the reservation, so the measuring and the drawing have to ask one
+/// question rather than two that agree by hand. A reservation for a mark that is never drawn is
+/// a headline wrapped early against empty space.
+pub enum EntryMark {
+    /// The control: one press loads this one picture.
+    Offer,
+    /// A decline no press can change, so a label and not a button.
+    ///
+    /// Named rather than dropped, because on a card this mark is the only thing that says the
+    /// entry had a picture at all — [`thumbnail`] draws nothing until the bytes are here, so
+    /// returning early here is the row claiming there was never a picture. Short of the
+    /// placeholder's full sentence for the reason `title::short_date` is short of a feed's
+    /// stamp: this band is a few em wide beside a headline that gets the rest.
+    Declined(&'static str),
+}
+
+impl EntryMark {
+    /// The text drawn, which `blocks::entry_ui` measures to reserve room for.
+    ///
+    /// Borrowed for the common case: this is asked once per card per frame, and a feed is a
+    /// few thousand rows of which the offer is nearly all of them.
+    pub fn text(&self) -> Cow<'static, str> {
+        match self {
+            Self::Offer => Cow::Borrowed("[image]"),
+            Self::Declined(name) => Cow::Owned(format!("[image] ({name})")),
+        }
+    }
+}
+
+/// What [`load_control`] will draw for `img`, or `None` when it draws nothing at all.
+///
+/// Nothing to offer once it is loaded, and nothing to offer for a failure a second request
+/// cannot change: this is a control, and both of those make it a dead one. `Never` shows
+/// nothing either. A declined format is the one case that is not a dead control but a picture
+/// that will not be opened, and it gets the label rather than the silence.
+pub fn entry_mark(img: &ir::Image, ctx: &RenderCtx<'_>) -> Option<EntryMark> {
     if !ctx.opts.images.offers_loading()
         || matches!(ctx.images.state(&img.src), Some(State::Ready(_)))
         || ctx.images.refuses_retry(&img.src)
     {
+        return None;
+    }
+    // An address that names a declined format is refused by `request_image` without a request,
+    // so a button here would take Tab focus and do nothing the first time it was pressed
+    // rather than the second.
+    Some(match declined_by_href(&img.src, &ctx.base) {
+        Some(name) => EntryMark::Declined(name),
+        None => EntryMark::Offer,
+    })
+}
+
+/// The one mark an entry's thumbnail gets: a small dim `[image]` beside the time, which loads
+/// that one picture, and nothing once it is loaded. `Never` shows nothing at all.
+///
+/// `mark` comes from the caller because the caller has already asked: `blocks::entry_ui`
+/// reserves the width of this before laying the headline out, and asking [`entry_mark`] a
+/// second time here would be a second `Url::join` per card per frame *and* a second answer free
+/// to differ from the one the row was measured against.
+pub fn load_control(ui: &mut Ui, img: &ir::Image, mark: EntryMark, ctx: &mut RenderCtx<'_>) {
+    let pal = ctx.pal;
+    let text = RichText::new(mark.text()).color(pal.dim).small();
+    ctx.note_unloaded_image(ui.next_widget_position().y, &img.src);
+    if let EntryMark::Declined(_) = mark {
+        // Italic and label-shaped, as the inline strip's declined arm is: a picture no press
+        // will open must not wear the widget that means a press loads one, must not take Tab
+        // focus, and must not write `focus_image` for `i` to land on.
+        ui.label(text.italics());
         return;
     }
-    let pal = ctx.pal;
-    ctx.note_unloaded_image(ui.next_widget_position().y, &img.src);
-    let resp =
-        ui.add(egui::Button::new(RichText::new("[image]").color(pal.dim).small()).frame(false));
+    let resp = ui.add(egui::Button::new(text).frame(false));
     super::follow_focus(&resp);
     super::advance_focus(&resp);
     theme::focus_ring(ui, &resp, &pal);
@@ -908,22 +1022,29 @@ pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>)
         // landed on a picture the setting had ruled out and the block placeholder two
         // functions up had stopped offering. The mark stays either way — saying nothing is how
         // a reader lies about a page.
-        _ if !ctx.opts.images.offers_loading() => {
-            ui.label(RichText::new(format!("[{alt}]")).color(pal.dim).italics());
-        }
+        _ if !ctx.opts.images.offers_loading() => dead_mark(ui, alt, None, &pal),
+
         // Same shape, for the same reason, one case further on: a decline a second request
         // cannot change had no arm here at all, so the mark stayed a `Button` that took Tab
         // focus, wrote `focus_image`, and did nothing at all when pressed. A label says the
         // picture was there and why it is not shown, and takes no focus.
-        Some(State::Failed(f)) if !f.offers_retry() => {
-            ui.label(
-                RichText::new(format!("[{alt}] ({})", f.why))
-                    .color(pal.dim)
-                    .italics(),
-            );
-        }
+        Some(State::Failed(f)) if !f.offers_retry() => dead_mark(ui, alt, Some(&f.why), &pal),
         _ => {
             ctx.note_unloaded_image(ui.next_widget_position().y, &img.src);
+            // And the same shape once more, one step before the request: a decline the address
+            // already names reaches the arm above only after a press that contacts nobody, so
+            // until then the mark was a `Button` offering a picture hww will not open. Asked
+            // here rather than beside the state above so the join happens on the one path that
+            // can use the answer: the arms above run for every inline picture, every frame.
+            if let Some(name) = declined_by_href(&img.src, &ctx.base) {
+                dead_mark(
+                    ui,
+                    alt,
+                    Some(&DecodeError::Unsupported(name).to_string()),
+                    &pal,
+                );
+                return;
+            }
             let resp = ui.add(
                 egui::Button::new(RichText::new(format!("[{alt}]")).color(pal.dim)).frame(false),
             );
@@ -943,6 +1064,51 @@ pub fn inline_placeholder(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use url::Url;
+
+    /// A card's mark names a declined format, and is absent only when there is nothing to say.
+    ///
+    /// Admitted under `ui/` on the same argument as the test above rather than on its
+    /// precedent: `blocks::entry_ui` reserves the right-hand end of the headline for this
+    /// answer and wraps the headline under the reservation, so before [`entry_mark`] the
+    /// measuring and the drawing were written out separately and agreed by hand — and both ways
+    /// of disagreeing are silent. A mark dropped for a declined format is a row claiming the
+    /// entry never had a picture, since [`thumbnail`] draws nothing until the bytes are here; a
+    /// reservation held for a mark that is not drawn is a headline wrapped early against empty
+    /// space. A screenshot of either looks like a card that simply reads that way.
+    #[test]
+    fn a_cards_mark_names_a_declined_format_and_is_absent_only_when_it_is_dead() {
+        let opts = crate::reader::opts::ReadOpts::default();
+        let collapsed = HashSet::new();
+        let threads = HashMap::new();
+        let base = Url::parse("https://example.org/feed").expect("a literal URL parses");
+        let pal = theme::palette(crate::reader::opts::Theme::Light, false);
+        let mut images = ImageStore::default();
+        images.fail(
+            "https://cdn.example.net/gone.jpg",
+            Failure::permanent("404".to_owned()),
+        );
+        let ctx = RenderCtx::new(pal, &opts, base, &mut images, &collapsed, &threads);
+        assert!(
+            ctx.opts.images.offers_loading(),
+            "the default policy offers the control, or every case below reads the same"
+        );
+        let mark = |src: &str| {
+            entry_mark(
+                &ir::Image {
+                    src: src.to_owned(),
+                    alt: None,
+                },
+                &ctx,
+            )
+            .map(|m| m.text())
+        };
+        assert_eq!(mark("/hero.avif").as_deref(), Some("[image] (AVIF)"));
+        assert_eq!(mark("photo.jpg").as_deref(), Some("[image]"));
+        // The one silence a card keeps: a failure a second request cannot change was already
+        // drawn and pressed, so the mark is a dead control rather than an undisclosed picture.
+        assert_eq!(mark("https://cdn.example.net/gone.jpg"), None);
+    }
 
     /// A settled mark outlives the page; a pending one does not; a picture never does.
     ///

@@ -234,6 +234,11 @@ impl RenderCtx<'_> {
     /// `images::inline_placeholder`, and `images::load_control` for a feed card — and by
     /// nothing else. A picture already loaded is not recorded: `autoload::plan` would drop it,
     /// and a page of loaded pictures should not walk a list of them every frame.
+    ///
+    /// Everything else that is drawn unloaded *is* recorded, a declined format included, and
+    /// `plan` is the one place that decides what a request may be made for — off a join it
+    /// already makes. A surface that filtered here as well would be a second copy of those
+    /// rules, kept in step by hand, in the place least able to see them.
     pub fn note_unloaded_image(&mut self, y: f32, src: &str) {
         if let Some(band) = self.autoload_band
             && !band.skips(y, 0.0)
