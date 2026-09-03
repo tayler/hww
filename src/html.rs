@@ -2267,10 +2267,16 @@ fn image_from(el: &ElementRef, base: &Url) -> Option<Image> {
 
 /// The candidate a `<picture>` offers that this reader can actually draw.
 ///
-/// Every `<source>` under a `<picture>` is the same picture in a different encoding, so choosing
-/// between them is choosing between equivalents rather than choosing what the page said — which
-/// is why extraction is allowed to make the choice at all, and why it may consult a decoder
-/// capability here without knowing anything else about the renderer.
+/// A `<source>` under a `<picture>` is usually the same picture in a different encoding, so
+/// choosing between them is usually choosing between equivalents rather than choosing what the
+/// page said — which is why extraction is allowed to make the choice at all, and why it may
+/// consult a decoder capability here without knowing anything else about the renderer.
+///
+/// The art-direction form is the exception and is accepted as one: sources carrying `media` are
+/// different crops for different viewports, so skipping a declined one can select a picture
+/// framed for a window this reader does not have. `media` is deliberately not consulted, because
+/// a text column has no viewport to match it against and the alternative is handing the renderer
+/// a candidate it cannot draw at any width. A differently framed picture is the smaller loss.
 ///
 /// It has to. The convention is best-compression-first, so a `<picture>` in 2026 opens with
 /// AVIF and lists the JPEG the reader can see underneath it; taking the first source handed the

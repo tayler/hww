@@ -329,10 +329,23 @@ fn entry_ui(ui: &mut Ui, e: &ir::Entry, ctx: &mut RenderCtx<'_>) {
             .rect
             .width()
     });
-    let control_w = if e.image.is_some() {
-        theme::snap(ctx.opts.base_size_pt * 4.0)
-    } else {
-        0.0
+    // Measured, and measured against the same answer the mark itself takes: a fixed reservation
+    // for `e.image.is_some()` held four em of the first line for a picture already loaded, one
+    // whose failure refuses a retry, or one whose format is declined — none of which draw
+    // anything — and the headline wrapped early against the empty space. See
+    // `images::entry_mark`. The chrome font over the mark's own `small` is an upper bound on
+    // purpose: the headline may have a hair more room than it uses, never less.
+    let control_w = match e
+        .image
+        .as_ref()
+        .and_then(|img| super::images::entry_mark(img, ctx))
+    {
+        Some(mark) => ui
+            .painter()
+            .layout_no_wrap(mark.text(), font.clone(), ctx.pal.dim)
+            .rect
+            .width(),
+        None => 0.0,
     };
     // The reading list's own control, reserved like the picture's and drawn beside it. A run
     // of entries anywhere else is the page's own rows, and hww has nothing to take them off;
