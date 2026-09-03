@@ -12,6 +12,10 @@
 //! loud, in a screen reader, and on a monochrome display. The only non-ASCII mark here is `·`,
 //! which `blocks::document_header` already draws.
 //!
+//! **The date is the door.** A tweet's permalink is the anchor its date wore, and the card
+//! keeps it there: the date is drawn as a link where the page linked it, through the same run
+//! layout as every link in the column, so a timeline is a page of tweets each of which opens.
+//!
 //! **The avatar waits.** It is a third-party picture on a fetched page, so it is `ImagePolicy`'s
 //! like every other picture, and it is not the site-mark exception: a mark identifies a site on
 //! one of hww's own surfaces, and this is a person on somebody else's. The square is allocated
@@ -23,7 +27,8 @@
 
 use crate::ir;
 use crate::reader::face::Face;
-use crate::reader::ui::blocks::blocks_ui;
+use crate::reader::ui::blocks::{blocks_ui, runs};
+use crate::reader::ui::inline_ui::Setting;
 use crate::reader::ui::{RenderCtx, fonts, theme};
 use eframe::egui::{self, RichText, Ui};
 
@@ -60,11 +65,7 @@ fn card(ui: &mut Ui, tweet: &ir::Tweet, ctx: &mut RenderCtx<'_>) {
             blocks_ui(ui, &tweet.blocks, ctx, None);
             if let Some(t) = tweet.timestamp.as_deref().filter(|t| !t.trim().is_empty()) {
                 ui.add_space(theme::snap(ctx.opts.base_size_pt * 0.3));
-                ui.label(
-                    RichText::new(t)
-                        .color(ctx.pal.dim)
-                        .font(theme::small_font(ctx.opts)),
-                );
+                dateline(ui, t, tweet.permalink.as_deref(), ctx);
             }
             if !tweet.stats.is_empty() {
                 ui.add_space(theme::snap(ctx.opts.base_size_pt * 0.3));
@@ -72,6 +73,24 @@ fn card(ui: &mut Ui, tweet: &ir::Tweet, ctx: &mut RenderCtx<'_>) {
                 stats_row(ui, &tweet.stats, ctx);
             }
         });
+}
+
+/// The date under a tweet, and the way into it: where the page linked the date to the tweet's
+/// own address, the date is that link, as it is on the page. Drawn through the ordinary run
+/// layout rather than as a label, so it is one more link in the column — focused by Tab, found
+/// by find, followed by `ReaderApp::follow_link` — and not a second door. Where the page dated
+/// the tweet without linking it, the date is words.
+fn dateline(ui: &mut Ui, date: &str, permalink: Option<&str>, ctx: &mut RenderCtx<'_>) {
+    let text = ir::Inline::Text(date.to_owned());
+    let line = [match permalink {
+        Some(href) => ir::Inline::Link {
+            href: href.to_owned(),
+            inlines: vec![text],
+        },
+        None => text,
+    }];
+    let set = Setting::dateline(ctx.opts, &ctx.pal);
+    runs(ui, &line, &set, ctx);
 }
 
 /// The account over a timeline: the banner, the face beside the name, the bio, the link, the
