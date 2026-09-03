@@ -631,6 +631,7 @@ fn blocks_plain(blocks: &[Block]) -> String {
             Block::Thread(cs) => cs.iter().map(|c| blocks_plain(&c.blocks)).collect(),
             Block::Entries(es) => es.iter().map(|e| ir::plain_text(&e.title)).collect(),
             Block::Tweets(ps) => ps.iter().map(|p| blocks_plain(&p.blocks)).collect(),
+            Block::Profile(p) => blocks_plain(&p.bio),
         };
         if !words.trim().is_empty() {
             out.push_str(words.trim());

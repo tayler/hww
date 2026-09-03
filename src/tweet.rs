@@ -12,6 +12,10 @@
 //! and shares, which no `StatKind` names. A second social host that earns a row in the ledger
 //! is how this module widens, and its name should move with what it fits.
 //!
+//! The module also reads the account over a timeline — banner, face, name, bio, link, joined
+//! date, and the following and followers counts — into [`ir::Profile`] through [`profile_of`],
+//! measured on one profile page of the same host and found by the same kind of hooks.
+//!
 //! A tweet is not an article, not a discussion, and not a front page. It is a few dozen words
 //! under a name, with a date, usually a picture, and a row of counts saying how it was received.
 //! Scored as an article it does not exist: `score = raw_text * (1 - link_density)` and a tweet is
@@ -42,7 +46,7 @@
 //! thread extraction came out under `ir::THIN_TEXT`. That is what keeps a news page with share
 //! counts on it from being redrawn as somebody's status.
 
-use crate::ir::{self, Image, Stat, StatKind, Tweet};
+use crate::ir::{self, Block, Image, Inline, Profile, Stat, StatKind, Tweet};
 use ego_tree::NodeId;
 use scraper::{ElementRef, Html, Selector};
 use std::collections::{HashMap, HashSet};
@@ -62,6 +66,9 @@ const MAX_TIME_TEXT: usize = 40;
 /// Longest a string may be and still read as a count. "108.2M" is 6.
 const MAX_COUNT_TEXT: usize = 12;
 
+/// Longest a control's text may run and still be a count and its word. "16.2M Followers" is 15.
+const MAX_STAT_TEXT: usize = 32;
+
 static SEL_CANDIDATE: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("article, [role=article]").expect("a literal selector"));
 static SEL_A_HREF: LazyLock<Selector> =
@@ -69,6 +76,58 @@ static SEL_A_HREF: LazyLock<Selector> =
 static SEL_IMG: LazyLock<Selector> = LazyLock::new(|| Selector::parse("img").expect("a literal"));
 static SEL_TIME: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("time").expect("a literal selector"));
+static SEL_H1: LazyLock<Selector> = LazyLock::new(|| Selector::parse("h1").expect("a literal"));
+static SEL_DIR_AUTO: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("[dir=auto]").expect("a literal selector"));
+static SEL_ICON: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("[data-icon]").expect("a literal selector"));
+
+/// What one page yielded: the tweets, the account over them where the page is a profile, and
+/// the containers the tweets were read from, which `html::extract_traced` compares against the
+/// root the article path chose.
+#[derive(Debug, Clone)]
+pub struct Run {
+    /// Focal tweet first at depth 0, the rest at depth 1; empty on a profile with no posts.
+    pub tweets: Vec<Tweet>,
+    pub profile: Option<Profile>,
+    /// Every container accepted as a tweet, before de-duplication.
+    containers: Vec<NodeId>,
+}
+
+impl Run {
+    /// Is this element one of the tweets, or inside one? Asked of the article path's root: a
+    /// timeline with one long tweet on it hands the scorer a root that *is* a tweet, and the
+    /// article it then reads is that tweet's name, date, and counts as prose.
+    pub(crate) fn contains(&self, el: &ElementRef<'_>) -> bool {
+        std::iter::once(*el)
+            .chain(el.ancestors().filter_map(ElementRef::wrap))
+            .any(|a| self.containers.contains(&a.id()))
+    }
+
+    /// The run's text in the one currency: the tweets' messages and the bio.
+    pub fn text_len(&self) -> usize {
+        self.tweets
+            .iter()
+            .map(|t| ir::blocks_text_len(&t.blocks))
+            .sum::<usize>()
+            + self
+                .profile
+                .as_ref()
+                .map_or(0, |p| ir::blocks_text_len(&p.bio))
+    }
+
+    /// The blocks a document made of this run holds: the profile, then the tweets.
+    pub fn into_blocks(self) -> Vec<Block> {
+        let mut out = Vec::with_capacity(2);
+        if let Some(p) = self.profile {
+            out.push(Block::Profile(Box::new(p)));
+        }
+        if !self.tweets.is_empty() {
+            out.push(Block::Tweets(self.tweets));
+        }
+        out
+    }
+}
 
 /// One candidate as the detector saw it. Plain data; outlives the parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +169,8 @@ pub struct Verdict {
     pub weighed: usize,
     /// How many survived de-duplication and became the run.
     pub kept: usize,
+    /// The account found over the timeline, in a line, or `None` where the page drew none.
+    pub profile: Option<String>,
 }
 
 impl Verdict {
@@ -121,12 +182,12 @@ impl Verdict {
     }
 }
 
-/// Find the tweets on a page, and the account of every candidate weighed.
+/// Find the tweets on a page, the account over them, and the account of every candidate weighed.
 ///
 /// Reached from the tests rather than from the pipeline, which goes through [`detect_in`] with
 /// the census and card map it already holds. It stays for the reason `cards::explain` does: it
 /// is the entry a caller that has only an `Html` should use.
-pub fn detect(html: &Html, base: &Url) -> (Option<Vec<Tweet>>, Verdict) {
+pub fn detect(html: &Html, base: &Url) -> (Option<Run>, Verdict) {
     detect_in(html, base, &crate::thread::sibling_groups(html))
 }
 
@@ -136,7 +197,7 @@ pub(crate) fn detect_in(
     html: &Html,
     base: &Url,
     groups: &[crate::thread::Group<'_>],
-) -> (Option<Vec<Tweet>>, Verdict) {
+) -> (Option<Run>, Verdict) {
     // Every `<article>`, plus every member of every sibling group. A permalink shows one tweet
     // and has no group; a timeline is a group and may use no `<article>` at all. Taking both and
     // de-duplicating by node is cheaper than deciding which page this is up front.
@@ -160,11 +221,25 @@ pub(crate) fn detect_in(
     }
     candidates.sort_by_key(|el| order.get(&el.id()).copied().unwrap_or(usize::MAX));
 
-    let nested: HashSet<NodeId> = candidates.iter().map(|el| el.id()).collect();
-    let mut reports = Vec::new();
+    // Innermost first. Reversed document order puts every descendant before its ancestor, so by
+    // the time a container is weighed the tweets nested inside it are already known, and the
+    // wrapper refusal and the body walk's skip set are asked of *accepted tweets* rather than
+    // of every candidate. The census lends this detector every sibling group on the page, and
+    // on a profile timeline that includes the three or four slides of a photo carousel: asked
+    // of those, the wrapper rule refused every tweet that carried more than one picture, which
+    // on the timeline measured was three of five.
+    let mut accepted: HashSet<NodeId> = HashSet::new();
+    let mut weighed_in_reverse: Vec<(Option<Tweet>, TweetReport)> = Vec::new();
+    for el in candidates.iter().rev() {
+        let (tweet, report) = weigh(el, base, &accepted);
+        if tweet.is_some() {
+            accepted.insert(el.id());
+        }
+        weighed_in_reverse.push((tweet, report));
+    }
+    let mut reports = Vec::with_capacity(weighed_in_reverse.len());
     let mut found: Vec<Tweet> = Vec::new();
-    for el in &candidates {
-        let (tweet, report) = weigh(el, base, &nested);
+    for (tweet, report) in weighed_in_reverse.into_iter().rev() {
         reports.push(report);
         if let Some(p) = tweet {
             found.push(p);
@@ -174,15 +249,35 @@ pub(crate) fn detect_in(
     reports.sort_by_key(|r| (r.rejected.is_some(), usize::MAX - r.text));
     reports.truncate(Verdict::KEEP);
 
-    let tweets = assemble(found, base);
-    let kept = tweets.as_ref().map_or(0, Vec::len);
-    (
+    let profile = profile_of(html, base);
+    let tweets = assemble(found, base).unwrap_or_default();
+    let kept = tweets.len();
+    let verdict = Verdict {
+        candidates: reports,
+        weighed,
+        kept,
+        profile: profile.as_ref().map(describe_profile),
+    };
+    let run = (!tweets.is_empty() || profile.is_some()).then(|| Run {
         tweets,
-        Verdict {
-            candidates: reports,
-            weighed,
-            kept,
-        },
+        profile,
+        containers: accepted.into_iter().collect(),
+    });
+    (run, verdict)
+}
+
+/// One line for `--why`: what the header gave and what it did not.
+fn describe_profile(p: &Profile) -> String {
+    format!(
+        "{} name={} avatar={} banner={} bio={} website={} joined={} stats={}",
+        p.handle.as_deref().unwrap_or("(no at-name)"),
+        p.name.is_some(),
+        p.avatar.is_some(),
+        p.banner.is_some(),
+        ir::blocks_text_len(&p.bio),
+        !p.website.is_empty(),
+        p.joined.is_some(),
+        p.stats.len()
     )
 }
 
@@ -190,7 +285,7 @@ pub(crate) fn detect_in(
 fn weigh(
     el: &ElementRef<'_>,
     base: &Url,
-    candidates: &HashSet<NodeId>,
+    tweets_within: &HashSet<NodeId>,
 ) -> (Option<Tweet>, TweetReport) {
     let signature = crate::thread::signature(el);
     let mut report = TweetReport {
@@ -211,36 +306,38 @@ fn weigh(
     if crate::html::in_chrome(el) {
         refuse!("inside chrome");
     }
-    // A wrapper around other candidates is the page's layout, not a tweet. The tweet itself is
-    // the innermost thing that passes, so an outer container carrying a login prompt beside the
-    // tweet does not become a second copy of it.
+    // A wrapper around a tweet is the page's layout, not a tweet. The tweet itself is the
+    // innermost thing that passes, so an outer container carrying a login prompt beside the
+    // tweet does not become a second copy of it. Asked of tweets already accepted and not of
+    // every candidate: see `detect_in` for the carousel that taught the difference.
     if el
         .descendants()
         .filter_map(ElementRef::wrap)
-        .any(|d| d.id() != el.id() && candidates.contains(&d.id()))
+        .any(|d| d.id() != el.id() && tweets_within.contains(&d.id()))
     {
-        refuse!("wraps another candidate");
+        refuse!("wraps another tweet");
+    }
+
+    // The name first, because it is the cheap question — the anchors alone — and the one most
+    // candidates fail: since wrappers are weighed and not refused up front (see `detect_in`),
+    // a page of nested containers asks this of every level, and the counts walk below is the
+    // dear one. Every cheap refusal before the body walk, for the same reason: on a discussion
+    // page every comment is a candidate.
+    let (author, handle, author_href, skip_names) = author_of(el);
+    report.author = author.is_some() || handle.is_some();
+    if !report.author {
+        refuse!("no name over it");
     }
 
     let stats = stats_of(el);
     report.stats = stats.len();
-
-    let (author, handle, author_href, skip_names) = author_of(el);
-    report.author = author.is_some() || handle.is_some();
-
-    let (timestamp, permalink, time_id) = time_of(el, base);
-    report.timestamp = timestamp.is_some();
-
-    // Every cheap refusal before the body walk. On a discussion page every comment is a
-    // candidate, and walking each one's subtree only to refuse it for want of a count would
-    // make this detector cost what the thread detector costs, twice.
-    if !report.author {
-        refuse!("no name over it");
-    }
     // Fewer than two counts is a comment, and `thread` reads those better than this would.
     if stats.len() < MIN_STATS {
         refuse!("fewer than two counted actions");
     }
+
+    let (timestamp, permalink, time_id) = time_of(el, base);
+    report.timestamp = timestamp.is_some();
     if timestamp.is_none() {
         refuse!("no date under it");
     }
@@ -248,7 +345,7 @@ fn weigh(
     let avatar = avatar_of(el, base, author_href.as_deref());
 
     // Every part that is attribution rather than what was said, so the body walk can step over
-    // it: the name, the at-name, the date, the counts, the face, and any nested candidate.
+    // it: the name, the at-name, the date, the counts, the face, and any nested tweet.
     let mut skip: HashSet<NodeId> = skip_names;
     skip.extend(time_id);
     skip.extend(stats.iter().map(|(id, _)| *id));
@@ -256,7 +353,7 @@ fn weigh(
         skip.insert(*id);
     }
     for d in el.descendants().filter_map(ElementRef::wrap) {
-        if d.id() != el.id() && candidates.contains(&d.id()) {
+        if d.id() != el.id() && tweets_within.contains(&d.id()) {
             skip.insert(d.id());
         }
     }
@@ -288,7 +385,8 @@ fn weigh(
 /// the page did print.
 ///
 /// Depth here is one bit. The detector reads no reply chain — nothing on the page says which
-/// tweet answers which — so the focal tweet is 0 and everything else is 1. `Tweet::depth` is a
+/// tweet answers which — so on a permalink the focal tweet is 0 and everything else is 1, and
+/// on a timeline, which has no focal tweet, everything is 0. `Tweet::depth` is a
 /// `u16` because `Block::Thread` indents by the same field and the renderers share the arithmetic;
 /// no tweet from this module reaches 2.
 fn assemble(found: Vec<Tweet>, base: &Url) -> Option<Vec<Tweet>> {
@@ -308,27 +406,27 @@ fn assemble(found: Vec<Tweet>, base: &Url) -> Option<Vec<Tweet>> {
             None => unique.push(p),
         }
     }
-    // The focal tweet is the one the address names. Failing that, the first: on a timeline
-    // nothing is focal and the page reads top to bottom anyway.
+    // The focal tweet is the one the address names, and the rest are the conversation under
+    // it, one step in. Where no tweet is the address — a timeline — nothing is focal, nothing
+    // is a reply, and every tweet stands at depth 0: indenting the second and later ones drew
+    // a profile as one post and four answers to it.
     //
     // Path only, deliberately. The permalink is the address the page wrote for itself; `base`
     // is the address the reader arrived by, which is the same path wearing whatever query a
     // share button appended (`?s=20&t=…`). Comparing queries would make the focal tweet depend
     // on how the link was copied. A site whose tweet identity lives in the query alone gets the
     // first-tweet fallback, which on a permalink is the tweet the page drew first.
-    let focal = unique
-        .iter()
-        .position(|p| {
-            p.permalink
-                .as_deref()
-                .and_then(|l| Url::parse(l).ok())
-                .is_some_and(|u| u.path() == base.path())
-        })
-        .unwrap_or(0);
-    let mut out = vec![unique.remove(focal)];
+    let focal = unique.iter().position(|p| {
+        p.permalink
+            .as_deref()
+            .and_then(|l| Url::parse(l).ok())
+            .is_some_and(|u| u.path() == base.path())
+    });
+    let reply_depth = u16::from(focal.is_some());
+    let mut out = vec![unique.remove(focal.unwrap_or(0))];
     out[0].depth = 0;
     for mut p in unique {
-        p.depth = 1;
+        p.depth = reply_depth;
         out.push(p);
     }
     Some(out)
@@ -374,6 +472,12 @@ fn stats_of(el: &ElementRef<'_>) -> Vec<(NodeId, Stat)> {
         if control.id() == el.id() {
             continue;
         }
+        // Asked before the text is built, and with an early exit, because this loop visits every
+        // descendant of every candidate and a candidate can be the page: building each one's
+        // text is quadratic in the candidate, and on a page of nested candidates it was cubic.
+        if text_over(*control, MAX_STAT_TEXT) {
+            continue;
+        }
         let v = control.value();
         let text = ir::normalize_ws(&crate::thread::text_of(*control));
         let labelled = v
@@ -386,6 +490,7 @@ fn stats_of(el: &ElementRef<'_>) -> Vec<(NodeId, Stat)> {
             .and_then(|k| count_in(&text).map(|c| (k, c)))
             .or_else(|| pair_stat(&text))
             .or_else(|| pair_stat_of_parts(&control))
+            .or_else(|| pair_stat_of_leaves(&control))
         else {
             continue;
         };
@@ -452,6 +557,61 @@ fn pair_stat_of_parts(control: &ElementRef<'_>) -> Option<(StatKind, String)> {
     }
 }
 
+/// [`pair_stat_of_parts`] one level further in: the two words as the leaf texts of the whole
+/// subtree, however many boxes are nested between them and the control.
+///
+/// `<a><div><div>11</div><div>Following</div></div></a>` is how a profile prints its counts:
+/// the anchor has one child, so the parts test sees one part, and the flat text runs the two
+/// together. Exactly two leaves, so a row of four counts under one container is not read as one.
+fn pair_stat_of_leaves(control: &ElementRef<'_>) -> Option<(StatKind, String)> {
+    let mut leaves: Vec<String> = Vec::with_capacity(2);
+    for n in control.descendants() {
+        if let scraper::Node::Text(t) = n.value() {
+            let t = ir::normalize_ws(t);
+            if t.is_empty() {
+                continue;
+            }
+            if leaves.len() == 2 {
+                return None;
+            }
+            leaves.push(t);
+        }
+    }
+    let [a, b] = leaves.as_slice() else {
+        return None;
+    };
+    if is_count(a) {
+        kind_of_label(b).map(|k| (k, a.clone()))
+    } else if is_count(b) {
+        kind_of_label(a).map(|k| (k, b.clone()))
+    } else {
+        None
+    }
+}
+
+/// Does the subtree's text run past `cap`? Stops at the first byte over it, so asking this of a
+/// container the size of the page costs the nodes down to its first words and not the page.
+/// The walk is `thread::text_of`'s, iterative for the same reason, and approximate about
+/// whitespace, which a cap does not need to be exact about.
+fn text_over(node: ego_tree::NodeRef<'_, scraper::Node>, cap: usize) -> bool {
+    let mut seen = 0;
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        match n.value() {
+            scraper::Node::Text(t) => {
+                seen += t.trim().len();
+                if seen > cap {
+                    return true;
+                }
+            }
+            scraper::Node::Element(e)
+                if matches!(e.name.local.as_ref(), "script" | "style" | "svg") => {}
+            _ => stack.extend(n.children().rev()),
+        }
+    }
+    false
+}
+
 /// The first thing inside a control that reads as a count.
 fn count_in(text: &str) -> Option<String> {
     if is_count(text) {
@@ -490,7 +650,8 @@ fn is_count(s: &str) -> bool {
 /// The word a count wears, read as a whole-word match so `replies` and `reply` meet.
 ///
 /// `reply`, `repost`, `retweet`, `like`, `quote`, `bookmark`, and `view` are X's own row and
-/// the words measured. `comment`, `answer`, `boost`, `renote`, `favorite`, `favourite`,
+/// the words measured; `following`, `followers`, and `posts` are what its profile header
+/// prints beside its counts, measured the same way. `comment`, `answer`, `boost`, `renote`, `favorite`, `favourite`,
 /// `fav`, and `impression` are what other networks call the same actions and are here on paper
 /// only: none of those hosts serves a body to a client without JavaScript, so none of these
 /// words has been seen by this code on a live page. They claim nothing; see the module header.
@@ -512,6 +673,12 @@ fn kind_of_label(label: &str) -> Option<StatKind> {
         Some(StatKind::Bookmarks)
     } else if word("view") || word("impression") {
         Some(StatKind::Views)
+    } else if word("following") {
+        Some(StatKind::Following)
+    } else if word("follower") {
+        Some(StatKind::Followers)
+    } else if word("post") || word("tweet") || word("status") {
+        Some(StatKind::Posts)
     } else {
         None
     }
@@ -680,9 +847,211 @@ fn avatar_of(
     None
 }
 
+/// The account over a timeline, where the page draws one.
+///
+/// X's profile header: a wide banner, the face, the name in an `<h1>`, the at-name under it,
+/// the bio, a link, the joined date, and the following and followers counts. It is found by the
+/// two counts, which are the part no other page carries, and it is the smallest container
+/// holding one of them and an `<h1>` and no tweet. Nothing here asks `html::in_chrome`: the
+/// layout measured wraps its whole column in a class whose responsive prefix tokenises as
+/// `nav`, so the header is chrome to the walker — which is why every root candidate under it
+/// was refused, and why the bio is walked with the hints off, as a feed summary is.
+///
+/// The post count is printed outside the header, beside the name in the bar above the banner,
+/// so it is looked for in the column above the header and nowhere else.
+fn profile_of(html: &Html, base: &Url) -> Option<Profile> {
+    let is_follow = |k: StatKind| matches!(k, StatKind::Following | StatKind::Followers);
+    let count = html
+        .select(&SEL_A_HREF)
+        .find(|a| pair_stat_of_leaves(a).is_some_and(|(k, _)| is_follow(k)))?;
+    let header = count
+        .ancestors()
+        .filter_map(ElementRef::wrap)
+        .find(|anc| anc.select(&SEL_H1).next().is_some())?;
+    if header.select(&SEL_CANDIDATE).next().is_some() {
+        return None;
+    }
+    let text = |e: ElementRef<'_>| ir::normalize_ws(&crate::thread::text_of(*e));
+
+    let name = header
+        .select(&SEL_H1)
+        .next()
+        .map(text)
+        .filter(|s| !s.is_empty() && s.len() <= 120);
+
+    // The at-name is the innermost element whose text is one. The bio mentions other accounts
+    // the same way, so where the address names an account — `/name` — that one is preferred,
+    // and otherwise the first in the header, which is the one under the `<h1>`.
+    let mut handles: Vec<String> = Vec::new();
+    for e in header.descendants().filter_map(ElementRef::wrap) {
+        let t = text(e);
+        if is_handle(&t)
+            && !e
+                .children()
+                .filter_map(ElementRef::wrap)
+                .any(|c| is_handle(&text(c)))
+        {
+            handles.push(t);
+        }
+    }
+    let named = base.path().trim_matches('/');
+    let handle = handles
+        .iter()
+        .find(|h| !named.is_empty() && h[1..].eq_ignore_ascii_case(named))
+        .or_else(|| handles.first())
+        .cloned();
+
+    // The face is the picture whose alt is the at-name, as it is under every tweet; a banner
+    // inside the header is the picture drawn before it. The banner outside it is found below.
+    let mut avatar = None;
+    let mut banner = None;
+    for img in header.select(&SEL_IMG) {
+        let Some(image) = crate::html::image_from(&img, base) else {
+            continue;
+        };
+        let is_face = handle.as_deref().is_some_and(|h| {
+            img.value()
+                .attr("alt")
+                .is_some_and(|a| ir::normalize_ws(a).eq_ignore_ascii_case(h))
+        });
+        if is_face {
+            avatar = Some(image);
+            break;
+        }
+        if banner.is_none() {
+            banner = Some(image);
+        }
+    }
+
+    let bio_el = header.select(&SEL_DIR_AUTO).find(|e| {
+        let t = text(*e);
+        !t.is_empty()
+            && !is_handle(&t)
+            && name.as_deref() != Some(t.as_str())
+            && pair_stat(&t).is_none()
+    });
+    let bio = bio_el
+        .map(|e| crate::html::blocks_from_bio(e, base))
+        .unwrap_or_default();
+    let inside_bio =
+        |e: &ElementRef<'_>| bio_el.is_some_and(|b| e.ancestors().any(|a| a.id() == b.id()));
+
+    // The account's own link: the first anchor out of the header to another host that is not a
+    // mention, a count, or the date. The label is kept over the href because a shortener's
+    // address is not what the account published.
+    let mut website = Vec::new();
+    for a in header.select(&SEL_A_HREF) {
+        if inside_bio(&a) {
+            continue;
+        }
+        let t = text(a);
+        if t.is_empty()
+            || t.len() > 120
+            || is_handle(&t)
+            || looks_like_time(&t)
+            || pair_stat_of_leaves(&a).is_some()
+        {
+            continue;
+        }
+        let Some(href) = a.value().attr("href").and_then(|h| base.join(h).ok()) else {
+            continue;
+        };
+        if href.host_str().is_none() || href.host_str() == base.host_str() {
+            continue;
+        }
+        website = vec![Inline::Link {
+            href: href.into(),
+            inlines: vec![Inline::Text(t)],
+        }];
+        break;
+    }
+
+    // The joined date is the words beside the calendar icon, or failing an icon, the one short
+    // line that says so and reads as a date.
+    let joined = header
+        .select(&SEL_ICON)
+        .filter(|i| {
+            i.value()
+                .attr("data-icon")
+                .is_some_and(|d| d.to_ascii_lowercase().contains("calendar"))
+        })
+        .filter_map(|i| i.parent().and_then(ElementRef::wrap))
+        .map(text)
+        .find(|t| looks_like_time(t))
+        .or_else(|| {
+            header
+                .descendants()
+                .filter_map(ElementRef::wrap)
+                .map(text)
+                .find(|t| t.starts_with("Joined ") && looks_like_time(t))
+        });
+
+    let mut stats: Vec<Stat> = stats_of(&header)
+        .into_iter()
+        .map(|(_, s)| s)
+        .filter(|s| is_follow(s.kind))
+        .collect();
+    // Two things are printed in the column above the header rather than in it: the post count,
+    // in the bar over the banner, and on the page measured the banner itself, several
+    // containers up from the one that holds the name and the counts. Both are read from the
+    // largest ancestor holding no tweet, walked in document order and stopped at the header.
+    // The banner is the picture inside the link to the account's header photo — the one route
+    // here that is X's and nothing more general, because a wide picture above a name is also
+    // what an advertisement is, and the alt and the link's label are English words.
+    if let Some(region) = header
+        .ancestors()
+        .filter_map(ElementRef::wrap)
+        .take_while(|a| a.select(&SEL_CANDIDATE).next().is_none())
+        .last()
+    {
+        let above = || {
+            region
+                .descendants()
+                .take_while(|n| n.id() != header.id())
+                .filter_map(ElementRef::wrap)
+        };
+        let posts = above()
+            .filter_map(|e| pair_stat_of_leaves(&e))
+            .find(|(k, _)| *k == StatKind::Posts);
+        if let Some((kind, count)) = posts {
+            stats.insert(0, Stat { kind, count });
+        }
+        if banner.is_none() {
+            banner = above()
+                .filter(|a| {
+                    a.value().name() == "a"
+                        && a.value()
+                            .attr("href")
+                            .and_then(|h| base.join(h).ok())
+                            .is_some_and(|u| u.path().ends_with("/header_photo"))
+                })
+                .filter_map(|a| a.select(&SEL_IMG).next())
+                .filter_map(|img| crate::html::image_from(&img, base))
+                .find(|i| avatar.as_ref().is_none_or(|a| a.src != i.src));
+        }
+    }
+
+    Some(Profile {
+        name,
+        handle,
+        avatar,
+        banner,
+        bio,
+        website,
+        joined,
+        stats,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tweets alone, as every test here before the profile existed asked for them.
+    fn tweets_of(html: &Html, base: &Url) -> (Option<Vec<Tweet>>, Verdict) {
+        let (run, why) = detect(html, base);
+        (run.map(|r| r.tweets).filter(|t| !t.is_empty()), why)
+    }
 
     fn base() -> Url {
         Url::parse("https://example.invalid/erling/status/9001").expect("a literal URL")
@@ -726,7 +1095,7 @@ mod tests {
     #[test]
     fn a_tweet_with_a_name_a_date_and_counts_is_found() {
         let html = page(&tweet_markup("erling", 9001, "Well well well", ""));
-        let (tweets, why) = detect(&html, &base());
+        let (tweets, why) = tweets_of(&html, &base());
         let tweets = tweets.expect("the tweet is found");
         assert_eq!(tweets.len(), 1, "{why:?}");
         let p = &tweets[0];
@@ -756,7 +1125,7 @@ mod tests {
     #[test]
     fn the_counts_are_kept_as_the_page_printed_them() {
         let html = page(&tweet_markup("erling", 9001, "Well well well", ""));
-        let (tweets, _) = detect(&html, &base());
+        let (tweets, _) = tweets_of(&html, &base());
         let stats = &tweets.expect("found").swap_remove(0).stats;
         let got: Vec<(StatKind, &str)> = stats.iter().map(|s| (s.kind, s.count.as_str())).collect();
         assert_eq!(
@@ -776,7 +1145,7 @@ mod tests {
     #[test]
     fn a_rounded_count_is_never_expanded() {
         let html = page(&tweet_markup("erling", 9001, "Well well well", ""));
-        let (tweets, _) = detect(&html, &base());
+        let (tweets, _) = tweets_of(&html, &base());
         for s in &tweets.expect("found")[0].stats {
             assert!(
                 s.count.chars().any(|c| !c.is_ascii_digit()) || s.count.parse::<u64>().is_ok(),
@@ -796,7 +1165,7 @@ mod tests {
                          href="/erling/status/9001/photo/1">
                          <img src="/media/pic.jpg" alt=""></a></div>"#;
         let html = page(&tweet_markup("erling", 9001, "Well well well", media));
-        let (tweets, _) = detect(&html, &base());
+        let (tweets, _) = tweets_of(&html, &base());
         let p = &tweets.expect("found")[0];
         let figures: Vec<&str> = p
             .blocks
@@ -820,7 +1189,7 @@ mod tests {
                  <div dir="auto">Some words that were said in reply to something else.</div>
                  <a href="/x/status/3">Jul 5, 2026</a></article>"#,
         );
-        let (tweets, why) = detect(&html, &base());
+        let (tweets, why) = tweets_of(&html, &base());
         assert!(tweets.is_none());
         assert_eq!(
             why.candidates[0].rejected,
@@ -839,7 +1208,7 @@ mod tests {
                       <button aria-label="Bookmark"><span>340</span></button></div>
                </article>"#,
         );
-        let (tweets, why) = detect(&html, &base());
+        let (tweets, why) = tweets_of(&html, &base());
         assert!(tweets.is_none(), "{why:?}");
         assert_eq!(why.candidates[0].rejected, Some("no name over it"));
     }
@@ -850,7 +1219,7 @@ mod tests {
             "<html><body><footer>{}</footer></body></html>",
             tweet_markup("erling", 9001, "Well well well", "")
         ));
-        let (tweets, why) = detect(&html, &base());
+        let (tweets, why) = tweets_of(&html, &base());
         assert!(tweets.is_none());
         assert_eq!(why.candidates[0].rejected, Some("inside chrome"));
     }
@@ -861,7 +1230,7 @@ mod tests {
     fn a_tweet_rendered_twice_is_kept_once() {
         let one = tweet_markup("erling", 9001, "Well well well", "");
         let html = page(&format!("{one}{one}"));
-        let (tweets, why) = detect(&html, &base());
+        let (tweets, why) = tweets_of(&html, &base());
         let tweets = tweets.expect("found");
         assert_eq!(tweets.len(), 1, "{why:?}");
         assert_eq!(why.kept, 1);
@@ -877,7 +1246,7 @@ mod tests {
             tweet_markup("erling", 9001, "Well well well", ""),
             tweet_markup("third", 7002, "A reply to it", ""),
         ));
-        let (tweets, _) = detect(&html, &base());
+        let (tweets, _) = tweets_of(&html, &base());
         let tweets = tweets.expect("found");
         assert_eq!(tweets.len(), 3);
         assert_eq!(tweets[0].handle.as_deref(), Some("@erling"));
@@ -885,8 +1254,8 @@ mod tests {
         assert!(tweets[1..].iter().all(|p| p.depth == 1));
     }
 
-    /// A timeline: nothing on it is the address. The first tweet leads at depth 0 and the rest
-    /// follow at 1, rather than the detector giving up on a page with no focal tweet.
+    /// A timeline: nothing on it is the address, so nothing is a reply either. Every tweet
+    /// stands at depth 0, rather than the first leading and the rest drawn as answers to it.
     #[test]
     fn a_timeline_with_no_focal_tweet_reads_top_to_bottom() {
         let html = page(&format!(
@@ -895,12 +1264,11 @@ mod tests {
             tweet_markup("third", 7002, "A later one", ""),
         ));
         let home = Url::parse("https://example.invalid/home").expect("a literal URL");
-        let (tweets, why) = detect(&html, &home);
+        let (tweets, why) = tweets_of(&html, &home);
         let tweets = tweets.expect("found");
         assert_eq!(tweets.len(), 2, "{why:?}");
         assert_eq!(tweets[0].handle.as_deref(), Some("@someone"));
-        assert_eq!(tweets[0].depth, 0);
-        assert_eq!(tweets[1].depth, 1);
+        assert!(tweets.iter().all(|t| t.depth == 0), "{tweets:?}");
         assert_eq!(why.weighed, 2);
         assert_eq!(why.kept, 2);
     }
@@ -916,7 +1284,7 @@ mod tests {
         ));
         let shared = Url::parse("https://example.invalid/erling/status/9001?s=20&t=abc")
             .expect("a literal URL");
-        let (tweets, _) = detect(&html, &shared);
+        let (tweets, _) = tweets_of(&html, &shared);
         let tweets = tweets.expect("found");
         assert_eq!(tweets[0].handle.as_deref(), Some("@erling"));
         assert_eq!(tweets[0].depth, 0);
@@ -937,7 +1305,7 @@ mod tests {
                   <button aria-label="Like"><span>2.6M</span></button></div>
            </article>"#;
         let html = page(&format!("{one}{one}"));
-        let (tweets, why) = detect(&html, &base());
+        let (tweets, why) = tweets_of(&html, &base());
         let tweets = tweets.expect("found");
         assert_eq!(tweets.len(), 1, "{why:?}");
         assert!(tweets[0].permalink.is_none());
@@ -970,7 +1338,7 @@ mod tests {
             one("Well well well"),
             one("Something else entirely")
         ));
-        let (tweets, _) = detect(&html, &base());
+        let (tweets, _) = tweets_of(&html, &base());
         assert_eq!(tweets.expect("found").len(), 2);
     }
 
@@ -987,7 +1355,7 @@ mod tests {
                       <button aria-label="Like"><span>2.6M</span></button></div>
                </article>"#,
         );
-        let (tweets, why) = detect(&html, &base());
+        let (tweets, why) = tweets_of(&html, &base());
         assert!(tweets.is_none(), "{why:?}");
         assert_eq!(why.candidates[0].rejected, Some("no name over it"));
     }
@@ -1008,7 +1376,7 @@ mod tests {
                </article>"#
             ))
         };
-        let (tweets, _) = detect(&with("<time>Jul 5, 2026</time>"), &base());
+        let (tweets, _) = tweets_of(&with("<time>Jul 5, 2026</time>"), &base());
         let p = tweets.expect("found").swap_remove(0);
         assert_eq!(p.timestamp.as_deref(), Some("Jul 5, 2026"));
         assert!(p.permalink.is_none());
@@ -1028,12 +1396,12 @@ mod tests {
             "<article><div>{}</div><div>Log in or sign up</div></article>",
             tweet_markup("erling", 9001, "Well well well", "")
         ));
-        let (tweets, why) = detect(&html, &base());
+        let (tweets, why) = tweets_of(&html, &base());
         assert_eq!(tweets.expect("found").len(), 1);
         assert!(
             why.candidates
                 .iter()
-                .any(|c| c.rejected == Some("wraps another candidate")),
+                .any(|c| c.rejected == Some("wraps another tweet")),
             "{why:?}"
         );
     }
@@ -1059,5 +1427,188 @@ mod tests {
         assert!(!is_handle("erling"));
         assert!(!is_handle("@"));
         assert!(!is_handle("@someone and then some words"));
+    }
+
+    /// A tweet with four pictures draws them as a carousel: four same-classed slides, which the
+    /// census reads as a sibling group and lends here as candidates. Asked of every candidate,
+    /// the wrapper rule refused the tweet for wrapping its own pictures — three of the five on
+    /// the timeline measured. Asked of accepted tweets, it does not, and the pictures ride in
+    /// the body.
+    #[test]
+    fn a_tweet_with_a_photo_carousel_is_not_refused_for_wrapping_its_slides() {
+        let slides: String = (1..=4)
+            .map(|i| {
+                format!(
+                    r#"<div class="border snap-center"><a aria-label="Image"
+                         href="/erling/status/9001/photo/{i}"><img src="/media/{i}.jpg" alt=""></a></div>"#
+                )
+            })
+            .collect();
+        let html = page(&tweet_markup(
+            "erling",
+            9001,
+            "Four of them",
+            &format!(r#"<div class="rail">{slides}</div>"#),
+        ));
+        let (tweets, why) = tweets_of(&html, &base());
+        let tweets = tweets.expect("the tweet is found");
+        assert_eq!(tweets.len(), 1, "{why:?}");
+        assert!(why.weighed >= 5, "the slides were candidates: {why:?}");
+        assert!(
+            !why.candidates
+                .iter()
+                .any(|c| c.rejected == Some("wraps another tweet")),
+            "{why:?}"
+        );
+        let figures = tweets[0]
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, ir::Block::Figure { .. }))
+            .count();
+        assert_eq!(figures, 4, "{:?}", tweets[0].blocks);
+    }
+
+    /// The header X draws over a profile, in its own attribute vocabulary and with a column
+    /// class whose responsive prefix tokenises as `nav`, because the live one is chrome to the
+    /// walker and the detector has to read it anyway. The banner sits ahead of the container
+    /// that holds the name and the counts, as served.
+    fn profile_markup(handle: &str, bio: &str) -> String {
+        format!(
+            r#"<div class="one-col:max-w-[688px] nav-xl:max-w-[1038px]"><main>
+                 <div><button aria-label="Back"></button>
+                      <div><div>Real Name</div><div>1,057<!-- --> <!-- -->posts</div></div></div>
+                 <a aria-label="Opens header photo" href="/{handle}/header_photo">
+                   <img src="/banners/{handle}/1500x500" alt="Real Name profile banner"></a>
+                 <div class="@container flex flex-col">
+                   <a aria-label="Opens profile photo" href="/{handle}/photo">
+                     <img alt="@{handle}" src="/pfp/{handle}_400x400.jpg"></a>
+                   <h1>Real Name</h1>
+                   <span>@{handle}</span>
+                   <div dir="auto"><span>{bio}</span></div>
+                   <div><svg data-icon="icon-link"></svg><a href="https://t.example/abc">example.org/me</a></div>
+                   <div><svg data-icon="icon-calendar"></svg><a href="/{handle}/about">Joined October 2013</a></div>
+                   <div><a href="/{handle}/following"><div><div>11</div><div>Following</div></div></a>
+                        <a href="/{handle}/verified_followers"><div><div>16.2M</div><div>Followers</div></div></a></div>
+                 </div></main></div>"#
+        )
+    }
+
+    fn profile_base() -> Url {
+        Url::parse("https://example.invalid/erling").expect("a literal URL")
+    }
+
+    #[test]
+    fn a_profile_header_is_read_whole() {
+        let html = Html::parse_document(&format!(
+            "<html><body>{}{}</body></html>",
+            profile_markup(
+                "erling",
+                "Chasing them 💪 with <a href=\"https://example.invalid/club\">@club</a>"
+            ),
+            tweet_markup("erling", 9001, "Well well well", "")
+        ));
+        let (run, why) = detect(&html, &profile_base());
+        let run = run.expect("a run");
+        let p = run.profile.as_ref().expect("the header is found: {why:?}");
+        assert_eq!(p.name.as_deref(), Some("Real Name"));
+        assert_eq!(
+            p.handle.as_deref(),
+            Some("@erling"),
+            "the address's account, not the mention in the bio"
+        );
+        assert!(
+            p.avatar
+                .as_ref()
+                .is_some_and(|a| a.src.ends_with("_400x400.jpg")),
+            "{:?}",
+            p.avatar
+        );
+        assert!(
+            p.banner
+                .as_ref()
+                .is_some_and(|b| b.src.contains("/banners/")),
+            "{:?}",
+            p.banner
+        );
+        let bio = ir::plain_text(&match &p.bio[0] {
+            ir::Block::Paragraph(v) => v.clone(),
+            other => panic!("expected the bio, got {other:?}"),
+        });
+        assert!(
+            bio.contains("Chasing them") && bio.contains("@club"),
+            "{bio:?}"
+        );
+        match p.website.as_slice() {
+            [Inline::Link { href, inlines }] => {
+                assert_eq!(href, "https://t.example/abc");
+                assert_eq!(ir::plain_text(inlines), "example.org/me");
+            }
+            other => panic!("the label over the shortener, not the mention in the bio: {other:?}"),
+        }
+        assert_eq!(p.joined.as_deref(), Some("Joined October 2013"));
+        let got: Vec<(StatKind, &str)> =
+            p.stats.iter().map(|s| (s.kind, s.count.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![
+                (StatKind::Posts, "1,057"),
+                (StatKind::Following, "11"),
+                (StatKind::Followers, "16.2M"),
+            ]
+        );
+        assert_eq!(run.tweets.len(), 1, "the timeline rides under the header");
+        assert!(why.profile.is_some(), "{why:?}");
+    }
+
+    /// A status permalink has no header, and a page that prints follower counts somewhere
+    /// else — a card list, say — is not a profile unless the counts sit under an `<h1>` with
+    /// no tweet beside them.
+    #[test]
+    fn a_permalink_has_no_profile() {
+        let html = page(&tweet_markup("erling", 9001, "Well well well", ""));
+        let (run, why) = detect(&html, &base());
+        assert!(run.expect("the tweet").profile.is_none(), "{why:?}");
+        assert!(why.profile.is_none());
+    }
+
+    /// An account with nothing posted is still a page about the account.
+    #[test]
+    fn a_profile_with_no_tweets_is_still_a_run() {
+        let html = Html::parse_document(&format!(
+            "<html><body>{}</body></html>",
+            profile_markup("erling", "Nothing yet.")
+        ));
+        let (run, _) = detect(&html, &profile_base());
+        let run = run.expect("a run");
+        assert!(run.tweets.is_empty());
+        assert!(run.profile.is_some());
+        assert!(run.text_len() > 0, "the bio is the text");
+        let blocks = run.into_blocks();
+        assert!(
+            matches!(blocks.as_slice(), [ir::Block::Profile(_)]),
+            "{blocks:?}"
+        );
+    }
+
+    #[test]
+    fn a_count_and_its_word_are_read_through_nested_boxes() {
+        let html = page(
+            r#"<a href="/x/following"><div><div>11</div><div>Following</div></div></a>
+               <a href="/x/followers"><div><div>16.2M</div><div>Followers</div></div></a>
+               <a href="/x/more"><div>1</div><div>2</div><div>Followers</div></a>"#,
+        );
+        let sel = Selector::parse("a").expect("a literal");
+        let got: Vec<(StatKind, String)> = html
+            .select(&sel)
+            .filter_map(|e| pair_stat_of_leaves(&e))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (StatKind::Following, "11".into()),
+                (StatKind::Followers, "16.2M".into()),
+            ],
+            "three leaves are not a pair"
+        );
     }
 }

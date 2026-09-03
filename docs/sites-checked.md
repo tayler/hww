@@ -116,7 +116,8 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | usatoday.com | 2026-08-22 | front, section, article | clean |
 | vox.com | 2026-08-22 | front, section, article | native-ad block at the foot: tail trimmer handles it (profile tried and removed) |
 | washingtonpost.com | 2026-08-22 | front | h2 reset on every request |
+| wikipedia.org | 2026-09-03 | portal | `<nav>` was the page: 446 chars of fundraising banner before, 4,886 of language links after; generic rule in `html.rs` (`NAV_RATIO`), no profile |
 | wired.com | 2026-08-22 | front, article | clean |
 | wsj.com | 2026-08-22 | front | 401 |
 | wyborcza.pl | 2026-08-22 | front, article | adblock wall in place of the article |
-| x.com | 2026-09-03 | status permalink, profile | permalink server-rendered whole; article scoring lost it (139 chars, false JS caution). `tweet.rs` added, named for this host: no rewrite, no profile. Profile timeline reads as one article (288 chars), tweet run dropped |
+| x.com | 2026-09-03 | status permalink, profile | permalink and profile server-rendered whole; article scoring lost both (139 chars and a false JS caution; the header is chrome by a `nav-xl:` class). `tweet.rs` added, named for this host: no rewrite, no `sites.rs` profile. A profile reads as its header and every tweet on it |

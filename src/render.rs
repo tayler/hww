@@ -196,6 +196,46 @@ fn render_block(b: &Block, o: &TextOpts, indent: usize, out: &mut String) {
                 out.push('\n');
             }
         }
+        Block::Profile(p) => {
+            let lead = " ".repeat(indent);
+            if let Some(b) = &p.banner {
+                out.push_str(&format!(
+                    "{lead}[{}]\n",
+                    b.alt
+                        .as_deref()
+                        .filter(|a| !a.is_empty())
+                        .unwrap_or("banner")
+                ));
+            }
+            let who = match (p.name.as_deref(), p.handle.as_deref()) {
+                (Some(a), Some(h)) => format!("{a} {h}"),
+                (Some(a), None) => a.to_owned(),
+                (None, Some(h)) => h.to_owned(),
+                (None, None) => String::new(),
+            };
+            if !who.is_empty() {
+                out.push_str(&format!("{lead}{who}\n"));
+            }
+            if !p.bio.is_empty() {
+                out.push('\n');
+                render_blocks(&p.bio, o, indent, out);
+            }
+            if !p.website.is_empty() {
+                out.push_str(&format!("{lead}{}\n", inline_text(&p.website)));
+            }
+            if let Some(j) = &p.joined {
+                out.push_str(&format!("{lead}{j}\n"));
+            }
+            if !p.stats.is_empty() {
+                let row: Vec<String> = p
+                    .stats
+                    .iter()
+                    .map(|s| format!("{} {}", s.count, s.kind.label()))
+                    .collect();
+                out.push_str(&format!("{lead}{}\n", row.join(" · ")));
+            }
+            out.push('\n');
+        }
         Block::Tweets(tweets) => {
             for p in tweets {
                 let depth = indent + o.indent_for(p.depth);

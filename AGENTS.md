@@ -96,9 +96,16 @@ row, and Mastodon, Bluesky, and Threads serve a JavaScript shell with no body fo
 host earns a ledger row and is read by it. It is still shape-based like its siblings and reads
 `aria-label`, `data-icon`, `dir` and anchor arithmetic, never a class name and never a host: the
 name records what has been measured, not a host match. It is a **rescue with a floor**: it takes
-the document only where the article and thread paths came out under `ir::THIN_TEXT`, and a page
-that installed tweets skips the `<body>` fallback, which would otherwise trade a tweet that
-parsed for the navigation around it. A tweet is short by design, so `Provenance::tweets` exempts
+the document where the article and thread paths came out under `ir::THIN_TEXT`, where the root
+the scorer chose was one tweet of several (a timeline's longest post reads as an article of one),
+or where the run carries more text than what was read; one tweet alone that reads as an article
+stays the article it read as. A page that installed tweets skips the `<body>` fallback, which
+would otherwise trade a tweet that parsed for the navigation around it. `tweet::profile_of` reads
+the account over a timeline into `Block::Profile`, found by its following and followers counts
+under an `<h1>` and never through `html::in_chrome`, because X's column class tokenises as `nav`
+and the header is chrome to the walker; its bio is walked by `html::blocks_from_bio` with the
+hints off. `Block::Profile` is boxed and `ir::tests::a_block_stays_small` pins why: `html::walk_blocks`
+budgets its recursion against `Block`'s size, and an inline payload overflowed the worker stack. A tweet is short by design, so `Provenance::tweets` exempts
 it from the thin-text caution exactly as `Provenance::feed` exempts a picture-only feed — the IR
 does not grow a second text currency to make a tweet look longer. Engagement counts stay the
 page's own strings (`2.6M`), because the exact figures live only in a `<script>` and nothing

@@ -148,6 +148,7 @@ pub fn block_ui(ui: &mut Ui, b: &ir::Block, ctx: &mut RenderCtx<'_>) {
         ir::Block::Thread(comments) => super::thread_ui::thread_ui(ui, comments, ctx),
         ir::Block::Entries(entries) => entries_ui(ui, entries, ctx),
         ir::Block::Tweets(tweets) => super::tweet_ui::tweets_ui(ui, tweets, ctx),
+        ir::Block::Profile(p) => super::tweet_ui::profile_ui(ui, p, ctx),
     }
 }
 

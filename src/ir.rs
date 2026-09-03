@@ -77,6 +77,41 @@ pub enum Block {
     /// page needs JavaScript when the server sent the whole thing. Flat with a `depth`, as
     /// `Thread` is. See docs/findings.md.
     Tweets(Vec<Tweet>),
+    /// The account a timeline belongs to: the header X draws over a profile page — the wide
+    /// banner, the face, the name, the at-name, the bio, the joined date, and the following and
+    /// followers counts. One per page, ahead of the `Tweets` it introduces, and named and
+    /// measured as they are. Its bio is the only part `blocks_text_len` counts, for the reason a
+    /// tweet counts its message and not its attribution.
+    ///
+    /// Boxed, and the box is load-bearing: `html::walk_blocks` recurses to `MAX_DEPTH` with
+    /// `Block` temporaries in every frame, and its budget was measured against a 2 MiB worker
+    /// stack with `Block` at its `Figure` size. Inline, the eight fields here trebled the enum
+    /// and the walker overflowed at 197 levels; `a_block_stays_small` pins the size.
+    Profile(Box<Profile>),
+}
+
+/// The account over a timeline. Every part is optional but the struct is not built empty:
+/// `tweet::profile_of` returns one only where it found the counts that no other page carries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Profile {
+    /// Display name, as the page wrote it.
+    pub name: Option<String>,
+    /// The at-name, `@` included.
+    pub handle: Option<String>,
+    /// The account's picture; a URL under the reader's image policy, like every [`Image`].
+    pub avatar: Option<Image>,
+    /// The wide picture drawn over the header. Same policy as `avatar`.
+    pub banner: Option<Image>,
+    /// The bio, as blocks: it carries mentions, links, and line breaks.
+    pub bio: Vec<Block>,
+    /// The one link the account chose to show beside its bio, as a single inline `Link`, or
+    /// empty. Inlines rather than a bare href because the page shows a label for it
+    /// (`example.org/me`) over a shortener's address, and the label is what was published.
+    pub website: Vec<Inline>,
+    /// "Joined October 2013", as printed. Not parsed, for [`Tweet::timestamp`]'s reason.
+    pub joined: Option<String>,
+    /// Following, followers, and the post count, each as the page printed it.
+    pub stats: Vec<Stat>,
 }
 
 /// One tweet in a `Tweets` run: who wrote it, what they said, and what the page said about how
@@ -120,9 +155,10 @@ pub struct Stat {
 /// What a count counts. Naming the kind is what separates a labelled stats row from four bare
 /// numbers, which is the whole reason a tweet is a block rather than a run of paragraphs.
 ///
-/// The six are the row X draws and no other network's: a share, an upvote, or a reaction has
-/// no kind here, which is one reason the block is named for the site. A new kind is a variant,
-/// a word in `label`, and a row in `every_stat_kind_has_its_own_word`.
+/// The first six are the row X draws under a tweet and no other network's: a share, an upvote,
+/// or a reaction has no kind here, which is one reason the block is named for the site. The
+/// last three are the counts X draws on a profile. A new kind is a variant, a word in `label`,
+/// and a row in `every_stat_kind_has_its_own_word`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StatKind {
     Replies,
@@ -131,6 +167,11 @@ pub enum StatKind {
     Quotes,
     Bookmarks,
     Views,
+    /// The three below are a profile's, not a tweet's: how many the account follows, how
+    /// many follow it, and how many posts it has made.
+    Following,
+    Followers,
+    Posts,
 }
 
 impl StatKind {
@@ -144,6 +185,9 @@ impl StatKind {
             StatKind::Quotes => "quotes",
             StatKind::Bookmarks => "bookmarks",
             StatKind::Views => "views",
+            StatKind::Following => "following",
+            StatKind::Followers => "followers",
+            StatKind::Posts => "posts",
         }
     }
 }
@@ -302,6 +346,7 @@ fn block_text_len(b: &Block) -> usize {
         // date, and a row of counts are attribution, and letting them score would make a
         // stats row look like prose to every caller that measures coverage.
         Block::Tweets(ps) => ps.iter().map(|p| blocks_text_len(&p.blocks)).sum(),
+        Block::Profile(p) => blocks_text_len(&p.bio),
     }
 }
 
@@ -401,6 +446,19 @@ mod tests {
         assert_eq!(blocks_text_len(std::slice::from_ref(&b)), words.len());
     }
 
+    /// `html::walk_blocks` keeps `Block` temporaries in a frame it enters `MAX_DEPTH` times on
+    /// a 2 MiB worker stack, and that budget was measured with `Block` at this size. A variant
+    /// that carries a large struct inline widens every frame; `Profile` learnt that at 197
+    /// levels and is boxed. A new variant that trips this is boxed, not budgeted for.
+    #[test]
+    fn a_block_stays_small() {
+        assert!(
+            std::mem::size_of::<Block>() <= 96,
+            "Block is {} bytes; box the new variant's payload",
+            std::mem::size_of::<Block>()
+        );
+    }
+
     /// Every kind prints a word, and no two kinds print the same one, or a stats row would say
     /// "2.6M likes \u{b7} 44K likes" and the reader could not tell which was which.
     #[test]
@@ -412,6 +470,9 @@ mod tests {
             StatKind::Quotes,
             StatKind::Bookmarks,
             StatKind::Views,
+            StatKind::Following,
+            StatKind::Followers,
+            StatKind::Posts,
         ];
         let mut seen: Vec<&str> = kinds.iter().map(|k| k.label()).collect();
         assert!(seen.iter().all(|l| !l.is_empty()));
