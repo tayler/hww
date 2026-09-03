@@ -463,7 +463,10 @@ impl Session {
         let mut prov = f.provenance(requested, doc.text_len(), report);
         // Asked of the document rather than tracked through the extractor: one question, one
         // answer, and `explain` below reaches the same fact by the same route.
-        prov.tweets = doc.blocks.iter().any(|b| matches!(b, ir::Block::Tweets(_)));
+        prov.tweets = doc
+            .blocks
+            .iter()
+            .any(|b| matches!(b, ir::Block::Tweets(_) | ir::Block::Profile(_)));
         Ok(Loaded { doc, prov })
     }
 

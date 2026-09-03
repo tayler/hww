@@ -445,6 +445,63 @@ const TWEET: &str = r#"
 </body></html>
 "#;
 
+/// A profile page as one is served: the header in a column whose class carries a `nav-xl:`
+/// prefix, the post count in the bar over the banner, and the timeline as `<article>`s beside
+/// the column rather than in it. One tweet carries a photo carousel, whose slides the census
+/// lends the detector as candidates. Synthetic and shaped, like `POST` above it.
+const PROFILE_URL: &str = "https://example.com/writer";
+
+const PROFILE: &str = r#"
+<html><head><title>A Writer (@writer) on Example</title>
+<meta property="og:site_name" content="Example"></head>
+<body><div class="one-col:max-w-[688px] nav-xl:max-w-[1038px]"><main>
+<div><button aria-label="Back"></button><div><div>A Writer</div><div>1,057<!-- --> <!-- -->posts</div></div></div>
+<a aria-label="Opens header photo" href="/writer/header_photo">
+  <img src="http://127.0.0.1:{PORT}/photo.png" alt="A Writer profile banner"></a>
+<div class="@container flex flex-col">
+  <a aria-label="Opens profile photo" href="/writer/photo">
+    <img alt="@writer" src="http://127.0.0.1:{PORT}/face-a.png"></a>
+  <h1>A Writer</h1>
+  <span>@writer</span>
+  <div dir="auto"><span>Every morning you have two choices. Words about a person, of the length
+    a bio runs to, with a mention of <a href="https://example.com/club">@club</a> at the end.</span></div>
+  <div><svg data-icon="icon-link"></svg><a href="https://t.example/abc">example.org/writer</a></div>
+  <div><svg data-icon="icon-calendar"></svg><a href="/writer/about">Joined October 2013</a></div>
+  <div><a href="/writer/following"><div><div>11</div><div>Following</div></div></a>
+       <a href="/writer/verified_followers"><div><div>16.2M</div><div>Followers</div></div></a></div>
+</div></main></div>
+<ul><li><article>
+  <div><a href="/writer"><img alt="@writer" src="http://127.0.0.1:{PORT}/face-a.png"></a>
+    <a href="https://example.com/writer">A Writer</a>
+    <a href="https://example.com/writer">@writer</a>
+    <a href="/writer/status/9001">Sep 2</a></div>
+  <div dir="auto"><span>Well well well</span></div>
+  <div class="rail">
+    <div class="border snap-center"><a aria-label="Image" href="/writer/status/9001/photo/1">
+      <img src="http://127.0.0.1:{PORT}/photo.png" alt=""></a></div>
+    <div class="border snap-center"><a aria-label="Image" href="/writer/status/9001/photo/2">
+      <img src="http://127.0.0.1:{PORT}/photo.png" alt=""></a></div>
+    <div class="border snap-center"><a aria-label="Image" href="/writer/status/9001/photo/3">
+      <img src="http://127.0.0.1:{PORT}/photo.png" alt=""></a></div></div>
+  <div><a aria-label="Reply" href="/i/status/9001"><span>1.3K</span></a>
+       <button aria-label="Repost"><span>4.4K</span></button>
+       <button aria-label="Like"><span>98K</span></button>
+       <button aria-label="View count"><span>1M</span></button></div>
+</article></li>
+<li><article>
+  <div><a href="/writer"><img alt="@writer" src="http://127.0.0.1:{PORT}/face-a.png"></a>
+    <a href="https://example.com/writer">A Writer</a>
+    <a href="https://example.com/writer">@writer</a>
+    <a href="/writer/status/9002">Aug 31</a></div>
+  <div dir="auto"><span>A second one, a little longer, of the length a post usually runs to when
+    there is something to say about the day.</span></div>
+  <div><a aria-label="Reply" href="/i/status/9002"><span>893</span></a>
+       <button aria-label="Repost"><span>3.8K</span></button>
+       <button aria-label="Like"><span>94K</span></button></div>
+</article></li></ul>
+</body></html>
+"#;
+
 const THREAD: &str = r#"
 <html><head><title>Discussion: the second browser</title></head><body>
 <h1>Discussion: the second browser</h1>
@@ -571,6 +628,7 @@ const FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 fn catalog(port: u16) -> Vec<Scene> {
     let images = IMAGES.replace("{PORT}", &port.to_string());
     let tweet = TWEET.replace("{PORT}", &port.to_string());
+    let profile = PROFILE.replace("{PORT}", &port.to_string());
     let stall = format!("http://127.0.0.1:{port}/stall");
     let mut scenes = vec![
         scene(
@@ -794,6 +852,11 @@ fn catalog(port: u16) -> Vec<Scene> {
                 vec![page(TWEET_URL, &tweet), shift(Key::I)],
             )
         },
+        scene(
+            "profile",
+            "a profile: banner, face, name, bio, link, joined date, counts, and the timeline under it",
+            vec![page(PROFILE_URL, &profile)],
+        ),
         scene(
             "thread",
             "a discussion: authors, timestamps, nested replies",
@@ -1564,7 +1627,7 @@ fn build(url: &Url, body: &str, tweak: fn(&mut Provenance)) -> Loaded {
         tweets: doc
             .blocks
             .iter()
-            .any(|b| matches!(b, hww::ir::Block::Tweets(_))),
+            .any(|b| matches!(b, hww::ir::Block::Tweets(_) | hww::ir::Block::Profile(_))),
     };
     tweak(&mut prov);
     Loaded { doc, prov }

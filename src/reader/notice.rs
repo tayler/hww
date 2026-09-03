@@ -707,6 +707,11 @@ pub fn carries_rtl(doc: &crate::ir::Document) -> bool {
                     || p.author.as_deref().is_some_and(has_rtl)
                     || p.timestamp.as_deref().is_some_and(has_rtl)
             }),
+            Block::Profile(p) => {
+                blocks_have_rtl(&p.bio)
+                    || p.name.as_deref().is_some_and(has_rtl)
+                    || p.joined.as_deref().is_some_and(has_rtl)
+            }
             Block::Rule | Block::Embed { .. } => false,
         })
     }

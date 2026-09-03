@@ -1,4 +1,4 @@
-//! A tweet, rendered as a card.
+//! A tweet, and the profile over a timeline of them, rendered as cards.
 //!
 //! The shape the page itself uses, because it is the shape that makes the parts legible: the
 //! name over the message, the message in the reading face, the date under it, a hairline, and
@@ -72,6 +72,75 @@ fn card(ui: &mut Ui, tweet: &ir::Tweet, ctx: &mut RenderCtx<'_>) {
                 stats_row(ui, &tweet.stats, ctx);
             }
         });
+}
+
+/// The account over a timeline: the banner, the face beside the name, the bio, the link, the
+/// joined date, and the counts. Laid out as a tweet's card is, because its parts are the same
+/// kinds of thing — a name, some words, a row of counts — with a wide picture over them, and
+/// drawn without the card's border, because it is the page's header and not an item in it.
+///
+/// The banner is drawn through [`super::images::placeholder`] as a figure is, and not through
+/// a mark's door: it is a third-party picture on a fetched page and answers `ImagePolicy` like
+/// the face under it. The face is [`super::images::avatar`]'s square at twice a tweet's size,
+/// because this is the one place on the page where the person is the subject.
+pub fn profile_ui(ui: &mut Ui, p: &ir::Profile, ctx: &mut RenderCtx<'_>) {
+    // The same margins as a tweet's card and no border: bordered, the account read as the
+    // first post on its own timeline. The header is the page's, not one item in the column,
+    // and the hairline over the counts is the one rule it draws.
+    let pad = (ctx.opts.base_size_pt * 0.6).round().clamp(6.0, 20.0) as i8;
+    egui::Frame::new()
+        .inner_margin(egui::Margin::same(pad))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if let Some(b) = &p.banner {
+                super::images::placeholder(ui, b, ctx);
+                ui.add_space(theme::snap(ctx.opts.base_size_pt * 0.4));
+            }
+            let small = theme::small_font(ctx.opts);
+            let bold = egui::FontId::new(
+                theme::body_font(ctx.opts).size * 1.15,
+                fonts::family(Face::new(ctx.opts.family, true, false)),
+            );
+            ui.horizontal_top(|ui| {
+                if let Some(a) = &p.avatar {
+                    super::images::avatar(ui, a, theme::avatar_box(ctx.opts) * 2.0, ctx);
+                    ui.add_space(theme::snap(ctx.opts.base_size_pt * 0.5));
+                }
+                ui.vertical(|ui| {
+                    if let Some(name) = p.name.as_deref().filter(|n| !n.trim().is_empty()) {
+                        ui.label(RichText::new(name).color(ctx.pal.strong).font(bold.clone()));
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = theme::snap(ctx.opts.base_size_pt * 0.35);
+                        if let Some(h) = p.handle.as_deref().filter(|h| !h.trim().is_empty()) {
+                            ui.label(RichText::new(h).color(ctx.pal.dim).font(small.clone()));
+                        }
+                        if let Some(a) = &p.avatar {
+                            super::images::load_control(ui, a, ctx);
+                        }
+                    });
+                });
+            });
+            if !p.bio.is_empty() {
+                ui.add_space(theme::snap(ctx.opts.base_size_pt * 0.4));
+                blocks_ui(ui, &p.bio, ctx, None);
+            }
+            if !p.website.is_empty() {
+                // One paragraph built per frame so the link is drawn, focused, and followed
+                // exactly as a link in the page is. It is one inline; the clone is a few bytes.
+                let line = [ir::Block::Paragraph(p.website.clone())];
+                blocks_ui(ui, &line, ctx, None);
+            }
+            if let Some(j) = p.joined.as_deref().filter(|j| !j.trim().is_empty()) {
+                ui.label(RichText::new(j).color(ctx.pal.dim).font(small.clone()));
+            }
+            if !p.stats.is_empty() {
+                ui.add_space(theme::snap(ctx.opts.base_size_pt * 0.3));
+                ui.separator();
+                stats_row(ui, &p.stats, ctx);
+            }
+        });
+    ui.add_space(theme::snap(ctx.opts.base_size_pt * 0.6));
 }
 
 /// The name over the tweet: the face, the display name, and the at-name under it.

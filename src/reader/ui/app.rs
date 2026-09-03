@@ -2949,6 +2949,12 @@ fn walk_blocks(blocks: &[ir::Block], budget: u16, out: &mut Vec<String>) {
                 out.extend(p.avatar.as_ref().map(|a| a.src.clone()));
                 walk_blocks(&p.blocks, budget, out);
             }),
+            // A profile's banner and face are pictures under the same policy as a tweet's.
+            ir::Block::Profile(p) => {
+                out.extend(p.banner.as_ref().map(|b| b.src.clone()));
+                out.extend(p.avatar.as_ref().map(|a| a.src.clone()));
+                walk_blocks(&p.bio, budget, out);
+            }
             // Entry thumbnails draw once loaded (`blocks::entries_ui`), so `I` loads them
             // with the rest and the page-info panel counts them. The summary is walked only as
             // far as it is drawn: see this function's doc comment.
