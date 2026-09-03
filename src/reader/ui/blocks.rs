@@ -446,7 +446,7 @@ fn remove_control(ui: &mut Ui, href: &str, ctx: &mut RenderCtx<'_>) {
 }
 
 /// Flatten, register the run list with find-in-page, then set it.
-fn runs(ui: &mut Ui, inlines: &[ir::Inline], set: &Setting, ctx: &mut RenderCtx<'_>) {
+pub(super) fn runs(ui: &mut Ui, inlines: &[ir::Inline], set: &Setting, ctx: &mut RenderCtx<'_>) {
     runs_flat(ui, &inline::flatten(inlines), set, ctx);
 }
 
