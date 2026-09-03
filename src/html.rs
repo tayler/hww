@@ -29,11 +29,18 @@
 //!    Headers and footers inside an article or section remain content.
 //! 3. [`crate::thread::extract_thread_traced`] runs independently. A longer thread replaces the
 //!    article result; a thread over 200 characters is appended to a longer article result.
-//! 4. A result below [`crate::ir::THIN_TEXT`], or below 1,000 characters when `<body>` emits
-//!    five times as much, falls back to `<body>`.
+//! 4. [`crate::tweet::detect`] runs last of the three detectors, over the same census: a
+//!    container carrying a name, a date, and two or more counted actions is a tweet — the shape
+//!    X serves, and named for X rather than for tweets at large because no other social
+//!    host has been measured; `tweet.rs` says why. It takes the document only where steps 2 and 3 came out under [`crate::ir::THIN_TEXT`], so it
+//!    rescues a page nothing else could read rather than competing with one that reads. A page
+//!    that installed tweets skips step 5.
+//! 5. A result below [`crate::ir::THIN_TEXT`], or below 1,000 characters when `<body>` emits
+//!    five times as much, falls back to `<body>` — unless step 4 produced a tweet. A tweet is
+//!    short by nature, and every floor here reads that shortness as a failure to extract.
 //!
 //! Reordering these steps changes whether cards become comments, nested discussions disappear,
-//! or thin pages become blank. Diagnose changes through `--why`, which is produced by this same
+//! thin pages become blank, or a tweet that parsed is replaced by the navigation around it. Diagnose changes through `--why`, which is produced by this same
 //! pass.
 
 use crate::ir::{Block, Document, Image, Inline};
@@ -210,6 +217,16 @@ pub struct Explanation {
     /// What the thread merge did: `"replaced the document"`, `"appended"`,
     /// `"dropped (thinner than the floor)"`, or `"no thread"`.
     pub thread_merge: &'static str,
+    /// What the tweet detector saw.
+    pub tweet: crate::tweet::Verdict,
+    /// What the tweet merge did: `"became the document"`, `"no tweet"`, or
+    /// `"dropped (the page already read)"`.
+    pub tweet_merge: &'static str,
+    /// The tweet run became the document. The same fact `tweet_merge` spells, as a bool, because
+    /// `session::explain` sets `Provenance::tweets` from it and `session::load` sets the same
+    /// field by looking for `Block::Tweets` in the document: two routes to one flag, and a
+    /// string compare on the second would come apart from the first the day the wording moved.
+    pub tweets: bool,
     /// `(field, source, value)`: where each metadata field came from, or `"none"`.
     pub meta: Vec<(&'static str, &'static str, Option<String>)>,
     /// The `<body>` fallback ran and its blocks replaced the result.
@@ -285,6 +302,18 @@ impl std::fmt::Display for Explanation {
                 ' '
             };
             writeln!(f, "  {mark} {g}")?;
+        }
+        writeln!(
+            f,
+            "tweet: {}; {} weighed, {} kept, {} listed",
+            self.tweet_merge,
+            self.tweet.weighed,
+            self.tweet.kept,
+            self.tweet.candidates.len()
+        )?;
+        for c in &self.tweet.candidates {
+            let mark = if c.rejected.is_none() { '*' } else { ' ' };
+            writeln!(f, "  {mark} {c}")?;
         }
         let accepted = self.cards.accepted().count();
         writeln!(
@@ -410,6 +439,9 @@ fn extract_traced(
         profile: profile_report,
         search: None,
         thread_merge: "no thread",
+        tweet: Default::default(),
+        tweet_merge: "no tweet",
+        tweets: false,
         meta: vec![
             ("title", title_src, doc.title.clone()),
             ("byline", byline_src, doc.byline.clone()),
@@ -453,6 +485,22 @@ fn extract_traced(
         }
     }
 
+    // A tweet is the third shape and the only one whose length is not its completeness. It runs
+    // last so the other two keep what they win, and it is a rescue rather than a competitor: it
+    // takes the document only where the article and thread paths came out under the floor. A
+    // forum whose posts each carry a like count stays a thread, because the thread carried text.
+    let (tweets, verdict) = crate::tweet::detect_in(&html, url, &groups);
+    why.tweet = verdict;
+    if let Some(tweets) = tweets {
+        if doc.text_len() < crate::ir::THIN_TEXT {
+            doc.blocks = vec![Block::Tweets(tweets)];
+            why.tweet_merge = "became the document";
+            why.tweets = true;
+        } else {
+            why.tweet_merge = "dropped (the page already read)";
+        }
+    }
+
     // Scoring finds nothing on pages built entirely from unlabelled divs (product grids,
     // listing pages). Falling back to <body> bleeds navigation, but a thin page beats a
     // blank one, and the renderer can still be read.
@@ -466,7 +514,10 @@ fn extract_traced(
     let cards_text = cards_outside_chrome(&html, &card_map);
     why.cards_text = cards_text;
     let have = doc.text_len();
-    if (have < SLIVER_TEXT || cards_text > CARDS_RATIO * have)
+    // `!why.tweets` is load-bearing: a tweet is under every floor here having parsed perfectly, so
+    // the fallback would trade the message for the navigation around it. See the header.
+    if !why.tweets
+        && (have < SLIVER_TEXT || cards_text > CARDS_RATIO * have)
         && let Some(body) = html.select(&sel::BODY).next()
     {
         let (fallback, hints_off) = blocks_guarded(body, url, &card_map);
@@ -1338,6 +1389,27 @@ pub fn blocks_from_skipping(
     blocks_from(root, &walk)
 }
 
+/// [`blocks_from_skipping`] with the loose-text floor lifted: how a tweet's message is
+/// read once `tweet::detect` has taken the attribution and the counts out of the container.
+///
+/// The floor exists to stop a stray label on a *page* becoming a paragraph. A tweet is not a
+/// page. "Well well well" is fourteen characters and is the entire message, and dropping it is
+/// how a reader ends up being told a page it has in hand needs JavaScript. `tweet.rs` has
+/// already established that this container is one message, which is the claim the floor was
+/// standing in for.
+pub fn blocks_from_tweet(
+    root: ElementRef<'_>,
+    base: &Url,
+    skip: &std::collections::HashSet<ego_tree::NodeId>,
+) -> Vec<Block> {
+    let walk = Walk {
+        skip: Some(skip),
+        short_runs: true,
+        ..Walk::bare(base)
+    };
+    blocks_from(root, &walk)
+}
+
 /// What every walker is handed, and all it is allowed to know: where hrefs resolve, and
 /// whether the class-name chrome hints are in force. Never a hostname.
 ///
@@ -1360,6 +1432,11 @@ pub struct Walk<'a> {
     /// Subtrees not to enter: a post's body stops at the replies nested inside it, which are
     /// posts of their own.
     skip: Option<&'a std::collections::HashSet<ego_tree::NodeId>>,
+    /// Keep a gathered run that clears no length floor. Off everywhere but a tweet body, where
+    /// the container is already known to be one message: `MIN_LOOSE_TEXT` is a guess about
+    /// *page* text, and "Well well well" is a whole tweet. Same argument as
+    /// [`blocks_from_public_unhinted`] makes for a feed summary, one floor further down.
+    short_runs: bool,
     /// How many subtrees this walk dropped *because a hint named them*, as opposed to because
     /// of their tag. [`blocks_guarded`] reads it to decide whether the second, unhinted walk can
     /// tell it anything; see there. A shared `Cell` rather than a field, so `Walk` stays `Copy`
@@ -1375,6 +1452,7 @@ impl<'a> Walk<'a> {
             card_depth: 0,
             cards: None,
             skip: None,
+            short_runs: false,
             hint_drops: None,
         }
     }
@@ -1925,7 +2003,10 @@ fn flush_pending(pending: &mut Vec<Inline>, out: &mut Vec<Block>, walk: &Walk<'_
     {
         return;
     }
-    if crate::ir::inlines_text_len(&inl) > MIN_LOOSE_TEXT || inl.iter().any(has_link) {
+    if walk.short_runs
+        || crate::ir::inlines_text_len(&inl) > MIN_LOOSE_TEXT
+        || inl.iter().any(has_link)
+    {
         out.push(Block::Paragraph(inl));
     }
 }
@@ -2041,7 +2122,8 @@ fn link_block(b: &mut Block, href: &str) {
         | Block::Rule
         | Block::Embed { .. }
         | Block::Thread(_)
-        | Block::Entries(_) => {}
+        | Block::Entries(_)
+        | Block::Tweets(_) => {}
     }
 }
 
@@ -2235,7 +2317,7 @@ fn code_lang(el: &ElementRef) -> Option<String> {
         })
 }
 
-fn image_from(el: &ElementRef, base: &Url) -> Option<Image> {
+pub(crate) fn image_from(el: &ElementRef, base: &Url) -> Option<Image> {
     let v = el.value();
     let raw = v
         .attr("src")
@@ -2489,6 +2571,116 @@ mod tests {
         extract(html, &Url::parse("https://example.test/a/b").unwrap())
     }
 
+    /// A tweet fixture in the chain a status permalink actually serves: `main > div > article`,
+    /// with the login prompt the page puts beside it.
+    fn tweet_page(words: &str, prompt: &str) -> String {
+        format!(
+            r#"<html><body><div><main><div><article>
+                 <div><a href="/writer"><img alt="@writer" src="/pfp.jpg"></a>
+                   <a href="https://example.test/writer">A Writer</a>
+                   <a href="https://example.test/writer">@writer</a></div>
+                 <div dir="auto"><span>{words}</span></div>
+                 <div><span><a href="/a/b">10:47 PM · Jul 5, 2026</a></span>
+                      <span><a href="/a/b"><span>108.2M</span><span>Views</span></a></span></div>
+                 <div><a aria-label="Reply" href="/i/1"><span>56K</span></a>
+                      <button aria-label="Repost"><span>166K</span></button>
+                      <button aria-label="Like"><span>2.6M</span></button></div>
+               </article></div></main></div><div>{prompt}</div></body></html>"#
+        )
+    }
+
+    /// The whole point. Before `tweet.rs`, this page scored under every floor, fell to `<body>`,
+    /// and drew the "may need JavaScript" caution over content that was entirely present.
+    #[test]
+    fn a_permalinked_tweet_becomes_a_tweet_and_not_a_body_fallback() {
+        let src = tweet_page("Well well well", "Log in or sign up");
+        let d = doc(&src);
+        let [Block::Tweets(tweets)] = d.blocks.as_slice() else {
+            panic!("expected one run of tweets, got {:?}", d.blocks);
+        };
+        assert_eq!(tweets.len(), 1);
+        assert_eq!(tweets[0].handle.as_deref(), Some("@writer"));
+        assert_eq!(tweets[0].stats.len(), 4);
+        let why = explain(&src, &Url::parse("https://example.test/a/b").unwrap());
+        assert_eq!(why.tweet_merge, "became the document");
+        assert!(
+            why.tweets,
+            "the flag `session::explain` reads must agree with the document"
+        );
+        assert!(!why.body_fallback, "the tweet must survive step 5");
+    }
+
+    /// `Explanation::tweets` is the one fact `session::explain` has, and `session::load` reads
+    /// the document instead. Both routes must answer alike on both kinds of page, or `--why`
+    /// and the reader disagree about whether the thin-text caution belongs on it.
+    #[test]
+    fn the_tweets_flag_agrees_with_the_document_either_way() {
+        let base = Url::parse("https://example.test/a/b").unwrap();
+        for src in [
+            tweet_page("Well well well", "Log in or sign up"),
+            r#"<html><body><article><h1>A headline</h1>
+               <p>Body prose long enough to clear the floor, and then some more of it, and more
+               still, so that the article path wins and no tweet is installed anywhere.</p>
+               </article></body></html>"#
+                .to_owned(),
+        ] {
+            let d = doc(&src);
+            let in_doc = d.blocks.iter().any(|b| matches!(b, Block::Tweets(_)));
+            let why = explain(&src, &base);
+            assert_eq!(why.tweets, in_doc, "{why}");
+            assert_eq!(
+                why.tweets,
+                why.tweet_merge == "became the document",
+                "{why}"
+            );
+        }
+    }
+
+    /// A tweet is under every floor in this file having parsed perfectly, so the `<body>`
+    /// fallback would trade the message for the navigation around it. `is_post` is the guard.
+    #[test]
+    fn the_body_fallback_does_not_overwrite_a_tweet() {
+        // Chrome that `<body>` would emit several times over, and that no root candidate can
+        // win with: all links, so `raw_text * (1 - link_density)` stays under the floor.
+        let prompt = r#"<a href="https://example.test/login">See what is happening on here and join the conversation today</a>"#.repeat(12);
+        let src = tweet_page("Well well well", &prompt);
+        let why = explain(&src, &Url::parse("https://example.test/a/b").unwrap());
+        assert_eq!(why.tweet_merge, "became the document", "{why}");
+        let d = doc(&src);
+        assert!(
+            matches!(d.blocks.as_slice(), [Block::Tweets(_)]),
+            "the body walk won: {:?}",
+            d.blocks
+        );
+    }
+
+    /// The rescue must not become a competitor. An article that carries counted controls is
+    /// still an article, because the article path cleared the floor and the tweet path only
+    /// takes a page nothing else could read.
+    #[test]
+    fn an_article_that_reads_is_never_replaced_by_a_tweet() {
+        let prose = "Body prose long enough to clear the floor, and then some more of it. ";
+        let src = format!(
+            r#"<html><body><article>
+                 <h1>A headline about a thing</h1>
+                 <div><a href="https://example.test/writer">A Writer</a>
+                      <a href="https://example.test/writer">@writer</a></div>
+                 <p>{prose}</p><p>{prose}</p><p>{prose}</p>
+                 <div><span><a href="/a/b">Jul 5, 2026</a></span></div>
+                 <div><button aria-label="Like"><span>1.2K</span></button>
+                      <button aria-label="Bookmark"><span>340</span></button></div>
+               </article></body></html>"#
+        );
+        let d = doc(&src);
+        assert!(
+            !d.blocks.iter().any(|b| matches!(b, Block::Tweets(_))),
+            "an article that reads was redrawn as a tweet: {:?}",
+            d.blocks
+        );
+        let why = explain(&src, &Url::parse("https://example.test/a/b").unwrap());
+        assert_eq!(why.tweet_merge, "dropped (the page already read)");
+    }
+
     #[test]
     fn maps_basic_prose_to_ir() {
         let d = doc(r#"<html><body><article>
@@ -2610,6 +2802,10 @@ mod tests {
                     e.summary.iter().for_each(|b| walk(b, out));
                 }),
                 Block::Thread(cs) => cs.iter().flat_map(|c| &c.blocks).for_each(|b| walk(b, out)),
+                Block::Tweets(ps) => ps.iter().for_each(|p| {
+                    out.extend(p.permalink.clone());
+                    p.blocks.iter().for_each(|b| walk(b, out));
+                }),
                 Block::Code { .. } | Block::Rule | Block::Embed { .. } => {}
             }
         }

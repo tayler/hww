@@ -70,6 +70,82 @@ pub enum Block {
     /// handed linked paragraphs cannot tell a headline from a dek. A feed maps onto the same
     /// block. See docs/findings.md.
     Entries(Vec<Entry>),
+    /// A tweet and the replies the page showed under it: the shape X serves on a status
+    /// permalink, and named for X because no second social host has been measured (see
+    /// `tweet.rs`). Added after the Phase 7 triage: a tweet is a handful of words wrapped in
+    /// links and buttons, so article scoring puts it under the floor and the reader is told the
+    /// page needs JavaScript when the server sent the whole thing. Flat with a `depth`, as
+    /// `Thread` is. See docs/findings.md.
+    Tweets(Vec<Tweet>),
+}
+
+/// One tweet in a `Tweets` run: who wrote it, what they said, and what the page said about how
+/// it was received. `depth` is reply nesting, 0 for the tweet the page is about. The one producer,
+/// `tweet::assemble`, writes 0 and 1 and nothing deeper, because a page carries no reply chain
+/// it can read; the field is a `u16` so the renderers indent it with the arithmetic they
+/// already have for `Comment::depth`, not because a deeper value is ever produced.
+///
+/// Not an `Entry` and not a `Comment`. An `Entry` is a card pointing at something to read; this
+/// *is* the thing read. A `Comment` has nowhere to put a picture or a count, and a reply here
+/// carries both.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tweet {
+    /// Display name, as the page wrote it.
+    pub author: Option<String>,
+    /// The at-name, `@` included, when the page carried one distinct from the display name.
+    pub handle: Option<String>,
+    /// The tweet's own address, from the anchor its timestamp wore.
+    pub permalink: Option<String>,
+    /// The words the page printed, unparsed: "10:47 PM · Jul 5, 2026", or just "Jul 5". A date
+    /// is what the page said it was; reformatting it would be this client inventing precision.
+    pub timestamp: Option<String>,
+    /// The author's picture. A URL and not pixels, like every other [`Image`], and drawn under
+    /// the reader's image policy like every other picture: nothing here is fetched by itself.
+    pub avatar: Option<Image>,
+    pub depth: u16,
+    pub blocks: Vec<Block>,
+    pub stats: Vec<Stat>,
+}
+
+/// One engagement count, exactly as the page printed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stat {
+    pub kind: StatKind,
+    /// Verbatim: "56K", "2.6M", "108.2M". Kept a string on purpose. The page rounds these and
+    /// the exact figures are not in the markup, so parsing "2.6M" back to 2,600,000 would print
+    /// a number nobody published.
+    pub count: String,
+}
+
+/// What a count counts. Naming the kind is what separates a labelled stats row from four bare
+/// numbers, which is the whole reason a tweet is a block rather than a run of paragraphs.
+///
+/// The six are the row X draws and no other network's: a share, an upvote, or a reaction has
+/// no kind here, which is one reason the block is named for the site. A new kind is a variant,
+/// a word in `label`, and a row in `every_stat_kind_has_its_own_word`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StatKind {
+    Replies,
+    Reposts,
+    Likes,
+    Quotes,
+    Bookmarks,
+    Views,
+}
+
+impl StatKind {
+    /// The word a renderer prints beside the count. Here rather than in a renderer because
+    /// every renderer must agree on what the number means; how it is laid out is theirs.
+    pub fn label(self) -> &'static str {
+        match self {
+            StatKind::Replies => "replies",
+            StatKind::Reposts => "reposts",
+            StatKind::Likes => "likes",
+            StatKind::Quotes => "quotes",
+            StatKind::Bookmarks => "bookmarks",
+            StatKind::Views => "views",
+        }
+    }
 }
 
 /// One card in an `Entries` run: a headline, where it leads, and what the card said about it.
@@ -222,6 +298,10 @@ fn block_text_len(b: &Block) -> usize {
             .iter()
             .map(|e| inlines_text_len(&e.title) + blocks_text_len(&e.summary))
             .sum(),
+        // Bodies only, as the `Thread` arm above counts comment bodies only: an author, a
+        // date, and a row of counts are attribution, and letting them score would make a
+        // stats row look like prose to every caller that measures coverage.
+        Block::Tweets(ps) => ps.iter().map(|p| blocks_text_len(&p.blocks)).sum(),
     }
 }
 
@@ -287,5 +367,57 @@ mod tests {
             },
         ];
         assert_eq!(blocks_text_len(&blocks), 7);
+    }
+
+    /// A tweet measures its message and not its attribution, exactly as a `Thread` measures its
+    /// comments' bodies and not their authors. The counter's job is deciding whether extraction
+    /// failed, and a name, a date, and a row of counts are what a JavaScript shell renders when
+    /// it has nothing: letting those score would make an empty shell look like content.
+    #[test]
+    fn a_tweet_measures_its_message_and_not_its_attribution() {
+        let words = "a".repeat(40);
+        let b = Block::Tweets(vec![Tweet {
+            author: Some("A Writer With A Long Name".into()),
+            handle: Some("@a_rather_long_handle".into()),
+            permalink: Some("https://example.test/a/b".into()),
+            timestamp: Some("10:47 PM \u{b7} Jul 5, 2026".into()),
+            avatar: Some(Image {
+                src: "https://example.test/pfp.jpg".into(),
+                alt: None,
+            }),
+            depth: 0,
+            blocks: vec![Block::Paragraph(vec![Inline::Text(words.clone())])],
+            stats: vec![
+                Stat {
+                    kind: StatKind::Likes,
+                    count: "2.6M".into(),
+                },
+                Stat {
+                    kind: StatKind::Views,
+                    count: "108.2M".into(),
+                },
+            ],
+        }]);
+        assert_eq!(blocks_text_len(std::slice::from_ref(&b)), words.len());
+    }
+
+    /// Every kind prints a word, and no two kinds print the same one, or a stats row would say
+    /// "2.6M likes \u{b7} 44K likes" and the reader could not tell which was which.
+    #[test]
+    fn every_stat_kind_has_its_own_word() {
+        let kinds = [
+            StatKind::Replies,
+            StatKind::Reposts,
+            StatKind::Likes,
+            StatKind::Quotes,
+            StatKind::Bookmarks,
+            StatKind::Views,
+        ];
+        let mut seen: Vec<&str> = kinds.iter().map(|k| k.label()).collect();
+        assert!(seen.iter().all(|l| !l.is_empty()));
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), before, "two kinds share a word");
     }
 }

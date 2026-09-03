@@ -196,6 +196,32 @@ fn render_block(b: &Block, o: &TextOpts, indent: usize, out: &mut String) {
                 out.push('\n');
             }
         }
+        Block::Tweets(tweets) => {
+            for p in tweets {
+                let depth = indent + o.indent_for(p.depth);
+                let lead = " ".repeat(depth);
+                let who = match (p.author.as_deref(), p.handle.as_deref()) {
+                    (Some(a), Some(h)) => format!("{a} {h}"),
+                    (Some(a), None) => a.to_owned(),
+                    (None, Some(h)) => h.to_owned(),
+                    (None, None) => "anon".to_owned(),
+                };
+                out.push_str(&format!("{lead}{who}\n"));
+                render_blocks(&p.blocks, o, depth, out);
+                if let Some(t) = &p.timestamp {
+                    out.push_str(&format!("{lead}{t}\n"));
+                }
+                if !p.stats.is_empty() {
+                    let row: Vec<String> = p
+                        .stats
+                        .iter()
+                        .map(|s| format!("{} {}", s.count, s.kind.label()))
+                        .collect();
+                    out.push_str(&format!("{lead}{}\n", row.join(" · ")));
+                }
+                out.push('\n');
+            }
+        }
     }
 }
 
@@ -439,6 +465,48 @@ mod tests {
         assert!(out.contains("## A heading"));
         assert!(out.contains("Prose with *weight* and a link."));
         assert!(out.contains("- one"));
+    }
+
+    /// A tweet reads as a byline, the message, the date, and a labelled stats row. The labels
+    /// are the whole reason `Block::Tweets` exists: without them this is four bare numbers.
+    #[test]
+    fn a_tweet_renders_with_its_counts_labelled() {
+        let doc = Document {
+            url: String::new(),
+            title: None,
+            byline: None,
+            published: None,
+            site_name: None,
+            favicon: None,
+            lang: None,
+            blocks: vec![Block::Tweets(vec![crate::ir::Tweet {
+                author: Some("A Writer".into()),
+                handle: Some("@writer".into()),
+                permalink: None,
+                timestamp: Some("10:47 PM \u{b7} Jul 5, 2026".into()),
+                avatar: None,
+                depth: 0,
+                blocks: vec![Block::Paragraph(vec![t("Well well well")])],
+                stats: vec![
+                    crate::ir::Stat {
+                        kind: crate::ir::StatKind::Replies,
+                        count: "56K".into(),
+                    },
+                    crate::ir::Stat {
+                        kind: crate::ir::StatKind::Likes,
+                        count: "2.6M".into(),
+                    },
+                ],
+            }])],
+        };
+        let out = to_text(&doc, &TextOpts::default());
+        assert!(out.contains("A Writer @writer"), "got: {out}");
+        assert!(out.contains("Well well well"), "got: {out}");
+        assert!(out.contains("10:47 PM"), "got: {out}");
+        assert!(
+            out.contains("56K replies \u{b7} 2.6M likes"),
+            "the counts must carry their words: {out}"
+        );
     }
 
     /// `Comment::depth` comes from a page-controlled `indent` attribute with no clamp, and the

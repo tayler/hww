@@ -19,3 +19,4 @@ pub mod search;
 pub mod session;
 pub mod sites;
 pub mod thread;
+pub mod tweet;

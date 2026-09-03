@@ -300,7 +300,7 @@ pub fn rows(
     // Not on a feed, for the same reason `about_page` does not draw the bar on one:
     // `ir::block_text_len` counts a `Figure` as its caption alone, so a picture-only feed scores
     // under the floor while having parsed perfectly, and the note would be false about it.
-    if prov.chars < crate::ir::THIN_TEXT && prov.feed.is_none() {
+    if prov.chars < crate::ir::THIN_TEXT && prov.feed.is_none() && !prov.tweets {
         article = article.with_note(
             "Below the extraction floor. This page may need JavaScript to show its content.",
         );

@@ -2942,6 +2942,13 @@ fn walk_blocks(blocks: &[ir::Block], budget: u16, out: &mut Vec<String>) {
                 rows.iter().flatten().for_each(|c| walk_inlines(c, out));
             }
             ir::Block::Thread(cs) => cs.iter().for_each(|c| walk_blocks(&c.blocks, budget, out)),
+            // A tweet's avatar is an ordinary picture under the ordinary policy: it is walked
+            // here so `I` loads it with the rest, its host is named in the disclosure, and page
+            // info counts it. Nothing about a face makes it identity the way a site mark is.
+            ir::Block::Tweets(ps) => ps.iter().for_each(|p| {
+                out.extend(p.avatar.as_ref().map(|a| a.src.clone()));
+                walk_blocks(&p.blocks, budget, out);
+            }),
             // Entry thumbnails draw once loaded (`blocks::entries_ui`), so `I` loads them
             // with the rest and the page-info panel counts them. The summary is walked only as
             // far as it is drawn: see this function's doc comment.

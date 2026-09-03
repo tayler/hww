@@ -806,6 +806,37 @@ pub fn thumbnail(ui: &mut Ui, img: &ir::Image, ctx: &mut RenderCtx<'_>) {
     }
 }
 
+/// A tweet's avatar: a square that is empty until the bytes are asked for and arrive.
+///
+/// Not [`site_icon`], which is the site-mark door and requests through `ctx.note_icon`. A face
+/// on a fetched page is third-party content and answers `ImagePolicy` like every other picture:
+/// nothing here asks the network for anything. `I` fetches it with the rest of the page, and
+/// [`load_control`] beside the name offers it on its own.
+///
+/// The square is allocated whether or not there is anything to draw in it, for [`site_icon`]'s
+/// reason one surface over: a header that closed up around a missing face would move the name
+/// sideways the moment it loaded.
+pub fn avatar(ui: &mut Ui, img: &ir::Image, box_size: f32, ctx: &mut RenderCtx<'_>) {
+    let (_, rect) = ui.allocate_space(egui::vec2(box_size, box_size));
+    let radius = egui::CornerRadius::same(theme::RADIUS);
+    if let Some(State::Ready(ready)) = ctx.images.state(&img.src) {
+        egui::Image::new(&ready.texture)
+            .corner_radius(radius)
+            .paint_at(ui, rect);
+        return;
+    }
+    // An empty frame in the code ground, the same mark the picture placeholder uses for a
+    // picture that has not been asked for. Silence here would be the page lying about a face
+    // it drew.
+    ui.painter().rect_filled(rect, radius, ctx.pal.code_bg);
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(1.0, ctx.pal.rule),
+        egui::StrokeKind::Inside,
+    );
+}
+
 /// The page favicon beside the masthead eyebrow. Drawn only when ready: a missing or failed
 /// icon leaves the site label alone, which is what the line was before favicons existed.
 pub fn favicon(ui: &mut Ui, src: &str, ctx: &mut RenderCtx<'_>) {

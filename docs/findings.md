@@ -612,3 +612,122 @@ it was, and being drawn is the only way they can be re-measured.
   which is process-global, while the rest of the suite runs in parallel threads; its `SAFETY`
   comment argues single-threadedness *within the test*, which is not the condition that matters.
   Observed failing once in about a dozen runs, on a tree that does not touch settings.
+
+# Phase 7: a tweet is a shape
+
+Measured 2026-09-02 against one status permalink on x.com, requested with hww's own client.
+
+## The page was never the problem
+
+| | |
+|---|---:|
+| status | 200 `text/html` |
+| bytes | 192,483 |
+| redirects | 0 |
+| cookie attempts discarded | 1 |
+| extracted | **139** |
+
+hww's UA and Accept headers get byte-identical bytes to a plain `curl`, and the response
+server-renders the whole tweet: the display name, the at-name, the words, the picture with a full
+`srcset`, the date, the view count, four engagement counts, and three replies. No JavaScript is
+required to read any of it, and **no rewrite is warranted** — the operator serves the content at
+the address the reader typed. The four-condition charter in `src/sites.rs` is never reached, and
+`sites.rs` was not touched.
+
+## What broke, and why it is the worst kind of break
+
+```
+root candidates: none cleared the floor
+thread: no thread
+cards: 1 group(s) look like story cards; 0 chars outside chrome
+body fallback: fired (body would emit 139)
+result: 1 blocks, 139 chars
+```
+
+139 is under `ir::THIN_TEXT`, so `reader::notice::about_page` told the reader the page "may need
+JavaScript to show its content". Not a blank screen — a confident wrong diagnosis, about a page
+hww had complete in memory. That is the failure this document keeps returning to, and it is the
+reason the fix had to be a shape rather than a loosened floor.
+
+Each detector lost for its own structural reason, and none of them was wrong to:
+
+| detector | why it lost |
+|---|---|
+| content root | `score = raw_text × (1 − link_density)`; a tweet is short **and** nearly all links, so the product is small twice over and clears no floor |
+| thread | needs three same-signature siblings over `MIN_MEDIAN_TEXT` and under `MAX_LINK_DENSITY`; a permalink shows one tweet, and its text is mostly inside anchors |
+| cards | needs a link of `MIN_HEADLINE` length; a tweet's longest link is a handle |
+
+## The shape, and whose it is
+
+An article is one subtree, a discussion is N sibling subtrees, a front page is N sibling cards.
+A tweet is a fourth shape: one short, link-dense container carrying an attributed message and a
+row of counts. `src/tweet.rs` accepts a container with a name over it, a date under it, and **two
+or more counted actions** beside it. The counts are what separate a tweet from a comment; the name
+and the date are what separate it from a card.
+
+The module is named `tweet` and the block `Block::Tweets`, for X and not for social posts in
+general, because X is the only social host the shape was built from or has been measured
+against. Checked 2026-09-03 with `--why`: mastodon.social, bsky.app, and threads.com each answer
+a client without JavaScript with a shell whose body emits 0 characters, so no tweet, no article,
+and no thread can be read from any of them, and nothing on those networks has ever exercised
+this code. The fixtures reproduce X's server-rendered markup — `aria-label="Reply"` beside
+`data-icon="icon-reply-stroke"`, `dir="auto"` on the message, `/status/<id>` on the date, an
+`<img alt="@name">` inside the profile link — and the six `ir::StatKind`s are X's engagement
+row and no other network's. Where the code names another network's word (`boost`, `renote`,
+`favourite`), it is on paper only. A Mastodon at-name of the `@user@host` form fails
+`is_handle`, a Reddit post carries no at-name at all, and a Facebook post counts reactions and
+shares, which no kind names. The first draft called this a social-post detector; the name was
+narrowed to what it fits, and it widens when a second social host earns a ledger row.
+
+Nothing in the detector is a class name and nothing is a host. The hooks are `<article>`,
+`dir`, `aria-label`, `data-icon`, `<img alt>`, `<time>`, and the arithmetic of anchors — the parts
+of the markup a redesign does not rotate. The first draft let the name and the date fall back to
+the class-name hints `thread` keeps; that fallback could decide acceptance on a class alone and
+was removed, so a forum entry attributed only by `.author` stays the thread detector's. Where a page stops carrying them the failure is graceful and
+total: no tweet, and the page reads exactly as it did before.
+
+## A candidate with a floor, not an override
+
+The tweet run takes the document **only where the article and thread paths came out under
+`ir::THIN_TEXT`**. It rescues a page nothing else could read; it never competes with one that
+reads. A forum whose posts each carry a like count stays a thread, because the thread carried
+text. A news article with a share row stays an article, for the same reason, and
+`an_article_that_reads_is_never_replaced_by_a_tweet` pins it.
+
+The `<body>` fallback then has to be skipped on a page that installed tweets. Without that guard
+the correct answer is overwritten by the wrong one on every tweet page, because a tweet is under
+the fallback's floor having parsed perfectly.
+
+## Two floors that had to learn about shortness
+
+- **`flush_pending`'s `MIN_LOOSE_TEXT`** dropped every run under 40 characters that carried no
+  link. The measured tweet is nine words. `html::blocks_from_tweet` lifts the floor for a tweet
+  body, on the argument `blocks_from_public_unhinted` already makes for a feed summary: the
+  container is known to be the content, so a guess about *page* text does not apply to it.
+- **`notice::about_page`'s thin-text caution** would still fire on a tweet that parsed perfectly.
+  Exempted through `Provenance::tweets`, exactly as a picture-only feed is exempted through
+  `Provenance::feed`. **The IR did not change**: text length has one currency, and inflating a
+  tweet's would hide a real extraction failure on every other page in the corpus.
+
+## Recorded, not changed
+
+- **Counts are the page's own strings.** The markup carries `2.6M` and `108.2M`. The exact
+  integers (`favorite_count:2616339`, `view_count:"108174045"`) exist only inside a `<script>` as
+  a serialized JavaScript — not JSON — object store. `script` is in `html::NOISE`, and this crate
+  parses no JavaScript. `ir::Stat::count` is therefore a `String`; expanding `2.6M` back to
+  2,600,000 would print a number nobody published.
+- **`og:description` carries the tweet text verbatim**, and hww reads it nowhere, before this
+  change or after. Reading it would hand every article a duplicate of its own opening, and the
+  tweet path does not need it. This is unchanged from Phase 0's finding that the cheap structured
+  paths do not pay.
+- **A localised count suffix fails `is_count`** and the stat is dropped rather than mislabelled.
+- **A profile timeline on x.com reads as an article, not as tweets.** Checked 2026-09-03: the
+  page server-renders three tweets, the detector weighs 47 containers and keeps 3, and the run
+  is dropped as `the page already read` because the article path found 288 characters in the
+  first `<article>`. That is the rescue floor doing what it says — a page that reads is never
+  redrawn — and the cost is a timeline drawn as one article of three bylines. Recorded; the
+  floor is not tuned for it.
+- **The avatar is content, not identity.** A face on a fetched page is a third-party picture and
+  answers `ImagePolicy` like any other; it is not the site-mark exception, which covers marks hww
+  draws on its own surfaces. Under the default policy a tweet shows a name, a handle, and an empty
+  square until the reader asks.

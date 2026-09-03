@@ -26,7 +26,7 @@ const MAX_LINK_DENSITY: f64 = 0.5;
 /// `authorLink`; the one-word forms (`authorname`, `nickname`) are listed because a token
 /// match no longer reaches inside them. The substring match that preceded it did, and a
 /// four-post thread set in `authorname`/`datetime` lost its attribution vote when it went.
-const AUTHOR_HINT: &[&str] = &[
+pub(crate) const AUTHOR_HINT: &[&str] = &[
     "hnuser",
     "author",
     "authorname",
