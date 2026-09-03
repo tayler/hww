@@ -368,7 +368,7 @@ fn downscale(img: image::DynamicImage, max_width: u32) -> image::DynamicImage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::image_formats::{DECLINED, declined_by_mime, declined_by_url};
+    use crate::reader::image_formats::{DECLINED, Format, declined_by_mime, declined_by_url};
     use image::{ImageFormat, RgbaImage};
     use std::io::Cursor;
     use url::Url;
@@ -498,17 +498,22 @@ mod tests {
     /// the table is ungated and the byte sniff rides with `image`.
     #[test]
     fn the_declines_all_name_the_same_formats() {
-        for (name, suffixes, mimes) in DECLINED {
+        for &Format {
+            name,
+            suffixes,
+            mimes,
+        } in DECLINED
+        {
             assert_eq!(
                 deliberately_unsupported(&declined_sample(name)),
-                Some(*name),
+                Some(name),
                 "{name} is refused by address but not by bytes"
             );
-            for suffix in *suffixes {
+            for suffix in suffixes {
                 let url = Url::parse(&format!("https://example.org/a.{suffix}")).unwrap();
                 assert_eq!(
                     declined_by_url(&url),
-                    Some(*name),
+                    Some(name),
                     "{name} is refused by bytes but not by a .{suffix} address"
                 );
             }
@@ -517,10 +522,10 @@ mod tests {
                 "{name} is refused by bytes and by an address, so a <source type> claiming it \
                  must be refused too; add its MIME type"
             );
-            for mime in *mimes {
+            for mime in mimes {
                 assert_eq!(
                     declined_by_mime(mime),
-                    Some(*name),
+                    Some(name),
                     "{name} is refused by bytes but not by a `{mime}` type attribute"
                 );
             }

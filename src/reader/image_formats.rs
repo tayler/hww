@@ -35,10 +35,32 @@ use url::Url;
 /// `image/avif-sequence` is here for the same reason the `avis` brand is in the byte sniff: it
 /// is the animated profile of the same codec, declined for the same missing decoder, and a
 /// `<source>` wearing it is no more usable than one wearing `image/avif`.
-pub const DECLINED: &[(&str, &[&str], &[&str])] = &[
-    ("SVG", &["svg", "svgz"], &["image/svg+xml"]),
-    ("AVIF", &["avif"], &["image/avif", "image/avif-sequence"]),
+pub const DECLINED: &[Format] = &[
+    Format {
+        name: "SVG",
+        suffixes: &["svg", "svgz"],
+        mimes: &["image/svg+xml"],
+    },
+    Format {
+        name: "AVIF",
+        suffixes: &["avif"],
+        mimes: &["image/avif", "image/avif-sequence"],
+    },
 ];
+
+/// One declined format and the claims that name it.
+///
+/// Named fields rather than a tuple because the three lookups below and the agreement test next
+/// door each want a different pair of them, and `.find(|(_, s, _)| ...).map(|(n, _, _)| n)` says
+/// nothing about which is which.
+pub struct Format {
+    /// What the reader is told, through `image_decode::DecodeError::Unsupported`.
+    pub name: &'static str,
+    /// Path suffixes that claim this format, lowercase and without the dot.
+    pub suffixes: &'static [&'static str],
+    /// MIME types that claim it, lowercase and without parameters.
+    pub mimes: &'static [&'static str],
+}
 
 /// The format an address claims by its extension, decidable before a byte is fetched.
 ///
@@ -55,11 +77,28 @@ pub fn declined_by_url(url: &Url) -> Option<&'static str> {
     // filter — fetched in full, and their host named to the reader — to be refused by the byte
     // sniff afterwards, which is the whole cost this function exists to avoid.
     let last = percent_decoded(url.path_segments()?.next_back()?);
-    let ext = last.rsplit_once('.')?.1.to_ascii_lowercase();
+    // Compared case-insensitively rather than lowercased into a `String`: three drawing
+    // surfaces ask this per picture per frame, and the table is two entries long.
+    let ext = last.rsplit_once('.')?.1;
     DECLINED
         .iter()
-        .find(|(_, suffixes, _)| suffixes.contains(&ext.as_str()))
-        .map(|(name, _, _)| *name)
+        .find(|f| f.suffixes.iter().any(|s| s.eq_ignore_ascii_case(ext)))
+        .map(|f| f.name)
+}
+
+/// The same question for a `src` a page wrote, resolved against the page it was written on.
+///
+/// The one shape every caller wants, and the one they each used to write out: a relative `src`
+/// carries the extension and no host, so the join is not optional, and a join that fails is
+/// **not** a decline — an address hww cannot resolve is a different complaint, made elsewhere,
+/// and answering "declined" here would put a format's name on a page that never had one.
+///
+/// Here rather than beside its callers because there is no one place to put it beside: the
+/// extractor asks it while choosing between a `<picture>`'s candidates, `autoload::plan` and
+/// `ReaderApp::load_all_images` ask it before requesting, and two drawing surfaces ask it
+/// before offering a control. Ungated and tested by the fast job, like the table itself.
+pub fn declined_by_href(src: &str, base: &Url) -> Option<&'static str> {
+    declined_by_url(&base.join(src).ok()?)
 }
 
 /// The format a `type` attribute claims.
@@ -74,16 +113,11 @@ pub fn declined_by_url(url: &Url) -> Option<&'static str> {
 /// draw, never a list of what it can, so a format nobody here has heard of goes to the decoder
 /// rather than being dropped on suspicion.
 pub fn declined_by_mime(mime: &str) -> Option<&'static str> {
-    let t = mime
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
+    let t = mime.split(';').next().unwrap_or_default().trim();
     DECLINED
         .iter()
-        .find(|(_, _, mimes)| mimes.contains(&t.as_str()))
-        .map(|(name, _, _)| *name)
+        .find(|f| f.mimes.iter().any(|m| m.eq_ignore_ascii_case(t)))
+        .map(|f| f.name)
 }
 
 /// `%XX` back to bytes, then lossily to text.
@@ -157,6 +191,25 @@ mod tests {
         // And the decoding must not invent an extension where the address has none.
         assert_eq!(declined("https://e.org/100%25"), None);
         assert_eq!(declined("https://e.org/photo%2Epng"), None);
+    }
+
+    /// Every caller holds the `src` a page wrote rather than a resolved URL, so resolving
+    /// against the wrong base — or not resolving at all — puts a control back on every relative
+    /// address, which is most of them. The only symptom is a press that contacts nobody and
+    /// prints what it knew before it was pressed.
+    #[test]
+    fn a_declined_address_is_recognised_relative_to_the_page_it_came_from() {
+        let base = Url::parse("https://example.org/post/one").expect("a literal URL parses");
+        assert_eq!(declined_by_href("../img/logo.svg", &base), Some("SVG"));
+        assert_eq!(declined_by_href("/hero.avif", &base), Some("AVIF"));
+        assert_eq!(declined_by_href("photo.jpg", &base), None);
+        // A join that fails is not a decline: `request_image` has the honest message for an
+        // address hww cannot resolve, and it is not a format's name.
+        assert_eq!(declined_by_href("http://[bad", &base), None);
+        // The case the bytes still have to answer, and the reason a control cannot be dropped
+        // on suspicion: an image CDN taking its source in a query says nothing about what it
+        // will serve, since the same address answers a browser with WebP.
+        assert_eq!(declined_by_href("/_i?url=%2Fa.avif&w=800", &base), None);
     }
 
     #[test]

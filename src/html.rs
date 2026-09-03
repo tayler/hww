@@ -37,7 +37,7 @@
 //! pass.
 
 use crate::ir::{Block, Document, Image, Inline};
-use crate::reader::image_formats::{declined_by_mime, declined_by_url};
+use crate::reader::image_formats::{declined_by_href, declined_by_mime};
 use scraper::{ElementRef, Html, Node, Selector};
 use std::collections::HashMap;
 use url::Url;
@@ -2272,20 +2272,20 @@ fn image_from(el: &ElementRef, base: &Url) -> Option<Image> {
 /// page said — which is why extraction is allowed to make the choice at all, and why it may
 /// consult a decoder capability here without knowing anything else about the renderer.
 ///
-/// The art-direction form is the exception and is accepted as one: sources carrying `media` are
-/// different crops for different viewports, so skipping a declined one can select a picture
-/// framed for a window this reader does not have. `media` is deliberately not consulted, because
-/// a text column has no viewport to match it against and the alternative is handing the renderer
-/// a candidate it cannot draw at any width. A differently framed picture is the smaller loss.
-///
 /// It has to. The convention is best-compression-first, so a `<picture>` in 2026 opens with
 /// AVIF and lists the JPEG the reader can see underneath it; taking the first source handed the
 /// column the one candidate hww declines while a decodable sibling sat two lines below, and the
 /// reader got a picture that could not be shown on a page where showing it was never in doubt.
 /// A `<source>` announces its format in `type` for exactly this decision.
 ///
+/// The art-direction form is the exception and is accepted as one: sources carrying `media` are
+/// different crops for different viewports, so skipping a declined one can select a picture
+/// framed for a window this reader does not have. `media` is deliberately not consulted, because
+/// a text column has no viewport to match it against and the alternative is handing the renderer
+/// a candidate it cannot draw at any width. A differently framed picture is the smaller loss.
+///
 /// Both claims are read, and neither is required: a `type` that names a declined format is
-/// skipped, and so is a candidate URL whose extension does, which is [`declined_by_url`]'s
+/// skipped, and so is a candidate URL whose extension does, which is `declined_by_url`'s
 /// existing bargain one step earlier. A source wearing neither claim is tried, because this
 /// list is what hww cannot draw and never a list of what it can.
 ///
@@ -2302,12 +2302,7 @@ fn picture_source<'a>(parent: &ElementRef<'a>, base: &Url) -> Option<&'a str> {
     };
     candidates()
         .find(|(url, mime)| {
-            mime.and_then(declined_by_mime).is_none()
-                && base
-                    .join(url)
-                    .ok()
-                    .and_then(|u| declined_by_url(&u))
-                    .is_none()
+            mime.and_then(declined_by_mime).is_none() && declined_by_href(url, base).is_none()
         })
         .or_else(|| candidates().next())
         .map(|(url, _)| url)

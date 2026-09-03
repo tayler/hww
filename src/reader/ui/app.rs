@@ -1665,14 +1665,7 @@ impl ReaderApp {
             in_band,
             &self.auto_attempts,
             self.images.pending(),
-            // Not only "the store has an answer": also "this address will never be
-            // requested", so a declined picture is not requested and failed once per frame.
-            &|src| {
-                self.images.state(src).is_some()
-                    || base
-                        .join(src)
-                        .is_ok_and(|u| image_formats::declined_by_url(&u).is_some())
-            },
+            &|src| self.images.state(src).is_some(),
         );
         let max_width = self.column_texture_width(ctx);
         for src in srcs {
@@ -2092,10 +2085,7 @@ impl ReaderApp {
         // in place of the one this removes. An unusable address still belongs in the list;
         // `request_image` has the honest message for it. Asked twice below: once to decide what
         // to request, and once to decide what to say when that comes to nothing.
-        let is_declined = |s: &str| {
-            base.join(s)
-                .is_ok_and(|u| image_formats::declined_by_url(&u).is_some())
-        };
+        let is_declined = |s: &str| image_formats::declined_by_href(s, &base).is_some();
         // Before the hosts are gathered and before the count is taken. This remark names every
         // host it is about to contact, so a declined address left in would have it name one it
         // never reaches — the same claim about the network that `autoload::plan` refuses to

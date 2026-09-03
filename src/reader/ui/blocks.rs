@@ -323,30 +323,26 @@ fn entry_ui(ui: &mut Ui, e: &ir::Entry, ctx: &mut RenderCtx<'_>) {
     // a picture, the small `[image]` control (`images::load_control`). Measure the time,
     // give the headline the rest, and let the headline wrap under both.
     let font = theme::chrome_font(ctx.opts);
-    let time_w = when.as_deref().map_or(0.0, |p| {
+    let measure = |ui: &Ui, s: String| {
         ui.painter()
-            .layout_no_wrap(p.to_owned(), font.clone(), ctx.pal.dim)
+            .layout_no_wrap(s, font.clone(), ctx.pal.dim)
             .rect
             .width()
-    });
-    // Measured, and measured against the same answer the mark itself takes: a fixed reservation
-    // for `e.image.is_some()` held four em of the first line for a picture already loaded, one
-    // whose failure refuses a retry, or one whose format is declined — none of which draw
-    // anything — and the headline wrapped early against the empty space. See
-    // `images::entry_mark`. The chrome font over the mark's own `small` is an upper bound on
-    // purpose: the headline may have a hair more room than it uses, never less.
-    let control_w = match e
+    };
+    let time_w = when.as_deref().map_or(0.0, |p| measure(ui, p.to_owned()));
+    // Decided once and handed to `load_control` below, so the reservation and the drawing are
+    // one answer rather than two that agree. A fixed reservation for `e.image.is_some()` held
+    // four em of the first line for a picture already loaded, one whose failure refuses a retry,
+    // or one whose format is declined — none of which draw anything — and the headline wrapped
+    // early against the empty space. The chrome font over the mark's own `small` is an upper
+    // bound on purpose: the headline may have a hair more room than it uses, never less.
+    let mark = e
         .image
         .as_ref()
-        .and_then(|img| super::images::entry_mark(img, ctx))
-    {
-        Some(mark) => ui
-            .painter()
-            .layout_no_wrap(mark.text(), font.clone(), ctx.pal.dim)
-            .rect
-            .width(),
-        None => 0.0,
-    };
+        .and_then(|img| super::images::entry_mark(img, ctx));
+    let control_w = mark
+        .as_ref()
+        .map_or(0.0, |m| measure(ui, m.text().into_owned()));
     // The reading list's own control, reserved like the picture's and drawn beside it. A run
     // of entries anywhere else is the page's own rows, and hww has nothing to take them off;
     // see `RenderCtx::reading_list`. A width rather than a measurement, as `control_w` is: the
@@ -386,8 +382,8 @@ fn entry_ui(ui: &mut Ui, e: &ir::Entry, ctx: &mut RenderCtx<'_>) {
                             .color(ctx.pal.dim),
                     );
                 }
-                if let Some(img) = &e.image {
-                    super::images::load_control(ui, img, ctx);
+                if let (Some(img), Some(mark)) = (&e.image, mark) {
+                    super::images::load_control(ui, img, mark, ctx);
                 }
             });
         });
