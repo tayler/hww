@@ -134,8 +134,10 @@ pub fn profile_ui(ui: &mut Ui, p: &ir::Profile, ctx: &mut RenderCtx<'_>) {
                         if let Some(h) = p.handle.as_deref().filter(|h| !h.trim().is_empty()) {
                             ui.label(RichText::new(h).color(ctx.pal.dim).font(small.clone()));
                         }
-                        if let Some(a) = &p.avatar {
-                            super::images::load_control(ui, a, ctx);
+                        if let Some(a) = &p.avatar
+                            && let Some(mark) = super::images::entry_mark(a, ctx)
+                        {
+                            super::images::load_control(ui, a, mark, ctx);
                         }
                     });
                 });
@@ -188,8 +190,10 @@ fn byline(ui: &mut Ui, tweet: &ir::Tweet, ctx: &mut RenderCtx<'_>) {
                 }
                 // The one offer for the face, beside the name it belongs to. The message's own
                 // pictures carry theirs in the column, as they do on any other page.
-                if let Some(a) = &tweet.avatar {
-                    super::images::load_control(ui, a, ctx);
+                if let Some(a) = &tweet.avatar
+                    && let Some(mark) = super::images::entry_mark(a, ctx)
+                {
+                    super::images::load_control(ui, a, mark, ctx);
                 }
             });
         });

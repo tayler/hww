@@ -173,6 +173,12 @@ cargo clippy --all-targets --locked --features gui -- -D warnings
 cargo test --locked --features gui
 ```
 
+`make ci` runs all five in that order. Point git at the committed hook once per clone and every push runs them first, with `git push --no-verify` to skip:
+
+```
+git config core.hooksPath .githooks
+```
+
 The first three run only on Linux. The last two run again on Windows and macOS, which block the same merges. Each push to `main` also attaches a development package to its [workflow run](https://github.com/tayler/hww/actions/workflows/ci.yml), kept for 14 days and meant for testing unreleased code.
 
 `Cargo.lock` is committed because this crate ships binaries.
