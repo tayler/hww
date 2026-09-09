@@ -7,9 +7,11 @@
 //!
 //! - [`RULES`]: a host swap, applied to the entry URL before the request goes out. Phase 0
 //!   measured ~7 genuine JS-only reading losses out of 87 document-shaped pages; two of them
-//!   are pages of one JS-gated discussion site that serves a fully server-rendered alternate
-//!   domain, same operator, same content. Reaching it is a host swap, and that is all a rule
-//!   does. See `docs/findings.md`, Phase 2.
+//!   are pages of one JS-gated discussion site that served a fully server-rendered alternate
+//!   domain, same operator, same content. Reaching it was a host swap, and that is all a rule
+//!   does. The table ships empty since 2026-09-03, when that alternate went behind a login;
+//!   the layer stays because its charter is the argument for the next rule. See
+//!   `docs/findings.md`, Phase 2.
 //! - [`PROFILES`]: a [`Profile`] applied to the page that arrived, keyed on the final URL.
 //!   Phase 3 measured the top-ten US news sites after the generic fixes and found what only a
 //!   selector can know: in-body chrome on otherwise good articles. The vocabulary is one
@@ -62,23 +64,16 @@ struct Rule {
     to_host: &'static str,
 }
 
-/// One rule per measured loss.
-const RULES: &[Rule] = &[
-    // The JS-gated discussion site of "The real JS-only losses" and "Where it still loses" in
-    // docs/findings.md, and its own server-rendered alternate. Measured on one comment
-    // page: 0 chars before, 8,331 after; see "Phase 2: per-site rules". Sections, not line
-    // numbers: that document grows.
-    //
-    // Gated to the site's subreddit paths, the shape that was measured. Without the gate the
-    // rule also claims the auth, moderation, and API subdomains, whose paths the alternate
-    // does not serve: a login page or a 404 in place of the URL the user asked for, explained
-    // only by one line on stderr.
-    Rule {
-        host: "reddit.com",
-        path_contains: Some("/r/"),
-        to_host: "old.reddit.com",
-    },
-];
+/// One rule per measured loss. None ships today.
+///
+/// The one rule this table carried sent a JS-gated discussion site's subreddit paths to its
+/// server-rendered alternate host, same operator: 0 chars before, 8,331 after, on one comment
+/// page (`docs/findings.md`, "Phase 2: per-site rules"). Re-checked 2026-09-03, the alternate
+/// answers the same page with a redirect to its own login form and 0 chars, so the rule traded
+/// one blank page for another and announced the swap while doing it; see "The one rule,
+/// removed" under the same heading. The mechanism tests run against a fixture, not this
+/// table, so nothing here goes untested while it is empty.
+const RULES: &[Rule] = &[];
 
 /// One host's profile, and the fixture that proves it earns its place.
 pub struct SiteProfile {

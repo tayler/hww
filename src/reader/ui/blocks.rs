@@ -147,6 +147,8 @@ pub fn block_ui(ui: &mut Ui, b: &ir::Block, ctx: &mut RenderCtx<'_>) {
         ir::Block::Embed { kind, url } => embed_ui(ui, *kind, url, ctx),
         ir::Block::Thread(comments) => super::thread_ui::thread_ui(ui, comments, ctx),
         ir::Block::Entries(entries) => entries_ui(ui, entries, ctx),
+        ir::Block::Tweets(tweets) => super::tweet_ui::tweets_ui(ui, tweets, ctx),
+        ir::Block::Profile(p) => super::tweet_ui::profile_ui(ui, p, ctx),
     }
 }
 
@@ -453,7 +455,7 @@ fn remove_control(ui: &mut Ui, href: &str, ctx: &mut RenderCtx<'_>) {
 }
 
 /// Flatten, register the run list with find-in-page, then set it.
-fn runs(ui: &mut Ui, inlines: &[ir::Inline], set: &Setting, ctx: &mut RenderCtx<'_>) {
+pub(super) fn runs(ui: &mut Ui, inlines: &[ir::Inline], set: &Setting, ctx: &mut RenderCtx<'_>) {
     runs_flat(ui, &inline::flatten(inlines), set, ctx);
 }
 

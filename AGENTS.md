@@ -87,6 +87,31 @@ Text length has one currency: `Document::text_len`, `ir::blocks_text_len`, and
 `ir::plain_text` is the presentation-neutral flatten; `reader::inline::flatten` is the styled
 flatten used by `render::inline_text`.
 
+A fourth shape ships beside the three above: `src/tweet.rs` finds a tweet — a container with a
+name over it, a date under it, and two or more counted actions beside it. It is named for X and
+not for social posts in general, because X is the only social host it was built from or measured
+against: the fixtures are X's server-rendered markup, the six `ir::StatKind`s are X's engagement
+row, and Mastodon, Bluesky, and Threads serve a JavaScript shell with no body for it to read
+(`docs/sites-checked.md`). Do not describe it as a social-post detector until a second social
+host earns a ledger row and is read by it. It is still shape-based like its siblings and reads
+`aria-label`, `data-icon`, `dir` and anchor arithmetic, never a class name and never a host: the
+name records what has been measured, not a host match. It is a **rescue with a floor**: it takes
+the document where the article and thread paths came out under `ir::THIN_TEXT`, where the root
+the scorer chose was one tweet of several (a timeline's longest post reads as an article of one),
+or where the run carries more text than what was read; one tweet alone that reads as an article
+stays the article it read as. A page that installed tweets skips the `<body>` fallback, which
+would otherwise trade a tweet that parsed for the navigation around it. `tweet::profile_of` reads
+the account over a timeline into `Block::Profile`, found by its following and followers counts
+under an `<h1>` and never through `html::in_chrome`, because X's column class tokenises as `nav`
+and the header is chrome to the walker; its bio is walked by `html::blocks_from_bio` with the
+hints off. `Block::Profile` is boxed and `ir::tests::a_block_stays_small` pins why: `html::walk_blocks`
+budgets its recursion against `Block`'s size, and an inline payload overflowed the worker stack. A tweet is short by design, so `Provenance::tweets` exempts
+it from the thin-text caution exactly as `Provenance::feed` exempts a picture-only feed — the IR
+does not grow a second text currency to make a tweet look longer. Engagement counts stay the
+page's own strings (`2.6M`), because the exact figures live only in a `<script>` and nothing
+here parses JavaScript. A tweet's avatar is content, not identity: it answers `ImagePolicy` like
+any other picture and is not a second site-mark exception.
+
 Per-site boolean extraction overrides were measured and removed. Profiles are data with a
 floor and a report; do not add `force_thread` or equivalent. Nested replies extend the generic
 thread detector. See `docs/findings.md` before reopening either decision.

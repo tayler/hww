@@ -24,6 +24,7 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | bloomberg.com | 2026-08-22 | front, section, article | newsletter page read; paywall elsewhere |
 | bostonglobe.com | 2026-08-22 | front, section | front read; no article picked |
 | breitbart.com | 2026-08-22 | front | connection refused |
+| bsky.app | 2026-09-03 | profile | JS shell, body emits 0 chars; nothing for `tweet.rs` to read |
 | businessinsider.com | 2026-08-22 | front, article | clean |
 | cbc.ca | 2026-08-22 | front, article | clean |
 | cbsnews.com | 2026-08-22 | front, section, article | clean |
@@ -62,6 +63,7 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | lefigaro.fr | 2026-08-22 | front, section, article | profile: strip consent banner (root walked with hints off) |
 | lemonde.fr | 2026-08-22 | front, section, article | clean |
 | lwn.net | 2026-08-22 | front, article | mailing-list page read; fine |
+| mastodon.social | 2026-09-03 | profile | JS shell, body emits 0 chars; nothing for `tweet.rs` to read |
 | medium.com | 2026-08-22 | front | front gave the picker no article; not read |
 | mg.co.za | 2026-08-22 | front, article | clean |
 | milenio.com | 2026-08-22 | front, section, article | clean |
@@ -90,6 +92,7 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | punchng.com | 2026-08-22 | front, section, article | clean |
 | quantamagazine.org | 2026-08-22 | front, article | clean |
 | reason.com | 2026-08-22 | front, article | clean |
+| reddit.com | 2026-09-03 | subreddit comment page | JS shell, 0 chars; its server-rendered alternate host now 302s to a login form, 0 chars. The rewrite to it was removed; see findings, Phase 2 |
 | reuters.com | 2026-08-22 | front | 401 |
 | sciencedaily.com | 2026-08-22 | front, section, article | "related stories" thread false positive, fixed generically |
 | scmp.com | 2026-08-22 | front, section, article | profile: strip TTS speed menu |
@@ -107,11 +110,14 @@ under its profile shows as `strip matched nothing` in `--why`, which is the othe
 | thehill.com | 2026-08-22 | front, section, article | related-card remnant at the tail, left |
 | thehindu.com | 2026-08-22 | front, section, article | clean |
 | theverge.com | 2026-08-22 | front, article | native-ad block at the foot: tail trimmer handles it (profile tried and removed) |
+| threads.com | 2026-09-03 | profile | JS shell, body emits 0 chars; nothing for `tweet.rs` to read |
 | time.com | 2026-08-22 | front, section, article | clean |
 | timesofindia.indiatimes.com | 2026-08-22 | front, section, article | clean |
 | usatoday.com | 2026-08-22 | front, section, article | clean |
 | vox.com | 2026-08-22 | front, section, article | native-ad block at the foot: tail trimmer handles it (profile tried and removed) |
 | washingtonpost.com | 2026-08-22 | front | h2 reset on every request |
+| wikipedia.org | 2026-09-03 | portal | `<nav>` was the page: 446 chars of fundraising banner before, 4,886 of language links after; generic rule in `html.rs` (`NAV_RATIO`), no profile |
 | wired.com | 2026-08-22 | front, article | clean |
 | wsj.com | 2026-08-22 | front | 401 |
 | wyborcza.pl | 2026-08-22 | front, article | adblock wall in place of the article |
+| x.com | 2026-09-03 | status permalink, profile | permalink and profile server-rendered whole; article scoring lost both (139 chars and a false JS caution; the header is chrome by a `nav-xl:` class). `tweet.rs` added, named for this host: no rewrite, no `sites.rs` profile. A profile reads as its header and every tweet on it |

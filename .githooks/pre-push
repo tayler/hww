@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Runs the CI gates (`make ci`) before a push leaves this machine, so a broken push is caught
+# here rather than by a runner. Installed per clone with:
+#
+#     git config core.hooksPath .githooks
+#
+# `git push --no-verify` skips it. A push that only deletes remote refs has nothing to check.
+set -euo pipefail
+
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+pushing=0
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+    if [[ "$local_sha" != "$zero" ]]; then
+        pushing=1
+    fi
+done
+if [[ "$pushing" -eq 0 ]]; then
+    exit 0
+fi
+
+cd "$(git rev-parse --show-toplevel)"
+printf 'pre-push: running CI gates (skip with --no-verify)\n' >&2
+exec make ci

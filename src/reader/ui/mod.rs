@@ -15,6 +15,7 @@ mod pageinfo_ui;
 mod prefs_ui;
 pub mod theme;
 mod thread_ui;
+mod tweet_ui;
 
 use crate::reader::inline::{self, Run};
 use crate::reader::opts::ReadOpts;

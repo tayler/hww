@@ -264,6 +264,30 @@ The rewrite table is the only place in the crate that contains a hostname, and t
 keeps it that way: it imports no extractor, and no extractor imports it. (It has since moved to
 `src/sites.rs`, where Phase 3's profile table joined it under the same host matcher.)
 
+## The one rule, removed
+
+Re-checked 2026-09-03, on a subreddit comment page of the same site:
+
+| | requested host | alternate host |
+|---|---:|---:|
+| response | 200, JavaScript shell | 302 to the alternate's own `/login/?reason=lor2&dest=…` |
+| bytes | 8,421 | 352,462 |
+| extracted | **0** | **0** |
+
+The alternate host now answers every page hww asks for with its login form. A generic
+User-Agent gets a 403 "blocked due to a network policy" from both hosts instead. Nothing hww
+can fetch on either side reads, so the rule traded one blank page for another and announced
+the swap on stderr while doing it. It is gone, and `RULES` ships empty: `--show-rewrites` says
+so. The layer stays. Its charter is the argument for the next rule, `--no-rewrite` and the
+bare reload still mean something, and the mechanism tests run against a fixture rather than
+the shipped table, so none of it goes untested while the table is empty.
+
+One gap the re-check exposed, recorded and not changed: the dead-rule report fires when a
+response *leaves* the alternate host, and a bounce to a login page on that same host passes
+it. A rule that dies this way is silent until somebody reads the blank page. With no rule
+shipping, a same-host detector would be mechanism with no caller, the standard this phase
+already applied once.
+
 
 ---
 
@@ -613,7 +637,364 @@ it was, and being drawn is the only way they can be re-measured.
   comment argues single-threadedness *within the test*, which is not the condition that matters.
   Observed failing once in about a dozen runs, on a tree that does not touch settings.
 
-# Phase 7: a picture hww cannot open
+# Phase 7: a tweet is a shape
+
+Measured 2026-09-02 against one status permalink on x.com, requested with hww's own client.
+
+## The page was never the problem
+
+| | |
+|---|---:|
+| status | 200 `text/html` |
+| bytes | 192,483 |
+| redirects | 0 |
+| cookie attempts discarded | 1 |
+| extracted | **139** |
+
+hww's UA and Accept headers get byte-identical bytes to a plain `curl`, and the response
+server-renders the whole tweet: the display name, the at-name, the words, the picture with a full
+`srcset`, the date, the view count, four engagement counts, and three replies. No JavaScript is
+required to read any of it, and **no rewrite is warranted** — the operator serves the content at
+the address the reader typed. The four-condition charter in `src/sites.rs` is never reached, and
+`sites.rs` was not touched.
+
+## What broke, and why it is the worst kind of break
+
+```
+root candidates: none cleared the floor
+thread: no thread
+cards: 1 group(s) look like story cards; 0 chars outside chrome
+body fallback: fired (body would emit 139)
+result: 1 blocks, 139 chars
+```
+
+139 is under `ir::THIN_TEXT`, so `reader::notice::about_page` told the reader the page "may need
+JavaScript to show its content". Not a blank screen — a confident wrong diagnosis, about a page
+hww had complete in memory. That is the failure this document keeps returning to, and it is the
+reason the fix had to be a shape rather than a loosened floor.
+
+Each detector lost for its own structural reason, and none of them was wrong to:
+
+| detector | why it lost |
+|---|---|
+| content root | `score = raw_text × (1 − link_density)`; a tweet is short **and** nearly all links, so the product is small twice over and clears no floor |
+| thread | needs three same-signature siblings over `MIN_MEDIAN_TEXT` and under `MAX_LINK_DENSITY`; a permalink shows one tweet, and its text is mostly inside anchors |
+| cards | needs a link of `MIN_HEADLINE` length; a tweet's longest link is a handle |
+
+## The shape, and whose it is
+
+An article is one subtree, a discussion is N sibling subtrees, a front page is N sibling cards.
+A tweet is a fourth shape: one short, link-dense container carrying an attributed message and a
+row of counts. `src/tweet.rs` accepts a container with a name over it, a date under it, and **two
+or more counted actions** beside it. The counts are what separate a tweet from a comment; the name
+and the date are what separate it from a card.
+
+The module is named `tweet` and the block `Block::Tweets`, for X and not for social posts in
+general, because X is the only social host the shape was built from or has been measured
+against. Checked 2026-09-03 with `--why`: mastodon.social, bsky.app, and threads.com each answer
+a client without JavaScript with a shell whose body emits 0 characters, so no tweet, no article,
+and no thread can be read from any of them, and nothing on those networks has ever exercised
+this code. The fixtures reproduce X's server-rendered markup — `aria-label="Reply"` beside
+`data-icon="icon-reply-stroke"`, `dir="auto"` on the message, `/status/<id>` on the date, an
+`<img alt="@name">` inside the profile link — and the six `ir::StatKind`s are X's engagement
+row and no other network's. Where the code names another network's word (`boost`, `renote`,
+`favourite`), it is on paper only. A Mastodon at-name of the `@user@host` form fails
+`is_handle`, a Reddit post carries no at-name at all, and a Facebook post counts reactions and
+shares, which no kind names. The first draft called this a social-post detector; the name was
+narrowed to what it fits, and it widens when a second social host earns a ledger row.
+
+Nothing in the detector is a class name and nothing is a host. The hooks are `<article>`,
+`dir`, `aria-label`, `data-icon`, `<img alt>`, `<time>`, and the arithmetic of anchors — the parts
+of the markup a redesign does not rotate. The first draft let the name and the date fall back to
+the class-name hints `thread` keeps; that fallback could decide acceptance on a class alone and
+was removed, so a forum entry attributed only by `.author` stays the thread detector's. Where a page stops carrying them the failure is graceful and
+total: no tweet, and the page reads exactly as it did before.
+
+## A candidate with a floor, not an override
+
+The tweet run takes the document **only where the article and thread paths came out under
+`ir::THIN_TEXT`**. It rescues a page nothing else could read; it never competes with one that
+reads. A forum whose posts each carry a like count stays a thread, because the thread carried
+text. A news article with a share row stays an article, for the same reason, and
+`an_article_that_reads_is_never_replaced_by_a_tweet` pins it.
+
+The `<body>` fallback then has to be skipped on a page that installed tweets. Without that guard
+the correct answer is overwritten by the wrong one on every tweet page, because a tweet is under
+the fallback's floor having parsed perfectly.
+
+## Two floors that had to learn about shortness
+
+- **`flush_pending`'s `MIN_LOOSE_TEXT`** dropped every run under 40 characters that carried no
+  link. The measured tweet is nine words. `html::blocks_from_tweet` lifts the floor for a tweet
+  body, on the argument `blocks_from_public_unhinted` already makes for a feed summary: the
+  container is known to be the content, so a guess about *page* text does not apply to it.
+- **`notice::about_page`'s thin-text caution** would still fire on a tweet that parsed perfectly.
+  Exempted through `Provenance::tweets`, exactly as a picture-only feed is exempted through
+  `Provenance::feed`. **The IR did not change**: text length has one currency, and inflating a
+  tweet's would hide a real extraction failure on every other page in the corpus.
+
+## Recorded, not changed
+
+- **Counts are the page's own strings.** The markup carries `2.6M` and `108.2M`. The exact
+  integers (`favorite_count:2616339`, `view_count:"108174045"`) exist only inside a `<script>` as
+  a serialized JavaScript — not JSON — object store. `script` is in `html::NOISE`, and this crate
+  parses no JavaScript. `ir::Stat::count` is therefore a `String`; expanding `2.6M` back to
+  2,600,000 would print a number nobody published.
+- **`og:description` carries the tweet text verbatim**, and hww reads it nowhere, before this
+  change or after. Reading it would hand every article a duplicate of its own opening, and the
+  tweet path does not need it. This is unchanged from Phase 0's finding that the cheap structured
+  paths do not pay.
+- **A localised count suffix fails `is_count`** and the stat is dropped rather than mislabelled.
+- **The avatar is content, not identity.** A face on a fetched page is a third-party picture and
+  answers `ImagePolicy` like any other; it is not the site-mark exception, which covers marks hww
+  draws on its own surfaces. Under the default policy a tweet shows a name, a handle, and an empty
+  square until the reader asks.
+
+---
+
+# Phase 8: a page that is navigation
+
+The encyclopedia everyone reads keeps a portal at its bare domain: a logo, ten language boxes,
+a search form, three hundred more languages behind a button, and this season a fundraising
+banner. Its markup is honest — the ten boxes are one `<nav>` and the long list is another — and
+`<nav>` is a noise tag, dropped by every walk before anything is scored. What remained was the
+banner, and the scorer chose it. Measured 2026-09-03:
+
+| | chars |
+|---|---:|
+| chosen root, `div.txt1` inside `div.banner` | 446 |
+| `<body>` walked as every root is (hints off: the banner was most of what was left) | 792 |
+| `<body>` with its two `<nav>`s kept | **4,886** |
+
+Nothing on the page said "English". A reader who typed the domain got a pitch for money and no
+way on.
+
+## The rule
+
+The sliver rule already sends a root under 1,000 characters to the body when the body emits
+five times as much, and the note beside it has said since Phase 3 that "the body with its
+navigation beats a legal notice with nothing". The body's navigation was the part that walk
+dropped. The fallback now walks the body a second time with `<nav>` kept, and where that walk
+out-emits the plain one `html::NAV_RATIO` (two) to one, it is the body the sliver rule weighs.
+The ratio is the hint guard's, one tag over: a tag that deletes most of a page is not describing
+chrome. The comparison is of emitted text, as root ranking is, and each walk answers the hint
+guard on its own, so a `<nav class="nav">` is still a hint's business.
+
+A page that is navigation ends in links because it is links. The tail trimmer reads a closing
+link-only list as rubble and stops at the floor, so on the portal it would have cut 4,886
+characters back to about 200, list by list, from the bottom up. It is skipped where the
+navigation was kept, as the thin-text floors are skipped for a tweet.
+
+## What was tried first, and what the rule does not do
+
+- **A profile `strip` of the banner was tried first and refused**: the banner was more than
+  half the text the page had, which is the floor doing its job on the wrong page. With the
+  languages in the walk it is no longer most of anything, and the `banner` hint drops it the way
+  it drops one beside an article. The reader asked for the languages "instead or in addition";
+  it is instead.
+- `<nav>` stays chrome for every root candidate, for the card and thread detectors, and for
+  `in_chrome`. Only the body fallback of a sliver page asks the second walk, and `--why` prints
+  `navigation kept` when it took it.
+- **An article with a mega-menu.** The menu would have to out-emit the article and everything
+  else the walker keeps two to one, and the whole would then have to out-emit the chosen root
+  five to one. A brief under a thousand characters beside a four-thousand-character menu crosses
+  both. None was seen in the samples; one that arrives keeps the brief on the page under the
+  menu, and `--why` says which rule put it there.
+- The search form is `<form>`, which is noise; hww's own search bar stands in for it. The
+  `<main>` element was never a candidate: its link density counts the anchors inside `<nav>`
+  against a text that excludes them, and comes out at 1.0. Recorded, not changed.
+
+## The profile timeline
+
+Measured 2026-09-03 against one account's profile on x.com. The page server-renders the header
+and five tweets; the reader drew two tweets and no header.
+
+| | |
+|---:|---|
+| bytes | 216,278 |
+| `<article>`s served | 5 |
+| tweets kept, before | 2 |
+| tweets kept, after | 5 |
+| extracted, before → after | 38 → 264 chars, header included |
+
+Three faults, and none of them was the floor.
+
+- **The wrapper rule read a carousel as a wrapper.** A tweet with three or four pictures draws
+  them as slides of one class, the census reads the slides as a sibling group, and the group's
+  members are lent to the tweet detector as candidates. "Wraps another candidate" then refused
+  the tweet for wrapping its own pictures — the three of five that carried more than one. The
+  detector now weighs candidates innermost first, so the wrapper rule and the body walk's skip
+  set are asked of *accepted tweets* and not of every candidate; the login-prompt wrapper it
+  was written for is still refused, one step later.
+  `a_tweet_with_a_photo_carousel_is_not_refused_for_wrapping_its_slides` pins it.
+- **The header is chrome.** The column's class carries Tailwind's `nav-xl:` breakpoint prefix,
+  `hint::matches_in` tokenises `nav-xl` as `nav`, and the whole column under `<main>` is noise
+  to the walker. That is why no root candidate ever cleared the floor on this page — the right
+  answer for the wrong reason — and why a bio walked with the hints on comes back empty.
+  `tweet::profile_of` finds the header by its following and followers counts under an `<h1>`
+  with no tweet beside them, never asks `in_chrome`, and walks the bio through
+  `html::blocks_from_bio` with the hints off, on the argument a feed summary already makes. The
+  banner and the post count are both printed above the container that holds the name and the
+  counts — the count in the bar over the banner, the banner several containers up — and are read
+  from the column above the header and nowhere else. The banner is the picture inside the link
+  to the account's header photo, `/<name>/header_photo`: the one route in the module that is
+  X's and nothing more general, because a wide picture over a name is also what an
+  advertisement is, and the alt text and the link's label are English words.
+- **One long tweet made a timeline an article.** On a second profile the longest tweet cleared
+  the floor as a root, the scorer read it — name, date, and counts included — as an article,
+  and the run was `dropped (the page already read)` with three tweets kept. The merge now takes
+  the run where the root the scorer chose sits inside one tweet of several, or where the run
+  carries more text than what was read, which is the thread's rule one clause longer. One
+  tweet alone that reads as an article stays the article it read as, because by shape it is
+  one; `an_article_that_reads_is_never_replaced_by_a_tweet` still holds and
+  `a_timeline_whose_longest_tweet_reads_as_an_article_is_still_a_timeline` holds beside it.
+- **Every tweet after the first was drawn as a reply.** `assemble` put the focal tweet at depth
+  0 and the rest at 1, and on a timeline, where no tweet is the address, that made the first
+  post the subject and the other four its answers, indented under it. Depth 1 is now given only
+  where a focal tweet exists; a timeline stands every tweet at 0. The header lost its border
+  for the neighbouring reason: bordered, it read as the first post on its own timeline.
+
+Two costs found on the way and paid:
+
+- **`Block::Profile` inline overflowed the worker stack.** Eight fields in the enum trebled
+  `Block`, `html::walk_blocks` keeps `Block` temporaries in a frame it enters up to `MAX_DEPTH`
+  times, and the 5,000-div page aborted at 197 levels on 2 MiB. The payload is boxed and
+  `a_block_stays_small` pins the size: a variant that trips it is boxed, not budgeted for.
+- **Weighing wrappers made the counts walk cubic.** `stats_of` built every descendant's text,
+  which is quadratic in a candidate, and a page of nested candidates asked it of every level:
+  45 s on `nested_story_cards_do_not_walk_off_the_stack`. A capped text walk (`text_over`, 32
+  characters, early exit) skips any control too long to be a count and its word, and the name
+  is asked before the counts because it is the cheap question most candidates fail. Back to
+  the prior figure.
+
+Recorded, not changed: the header's counts nest their two words in boxes
+(`<a><div><div>11</div><div>Following</div></div></a>`), which neither the flat text nor the
+direct-children reading could see; `pair_stat_of_leaves` reads exactly two leaf texts and is the
+third reading `stats_of` tries. The profile's three counts are three more `ir::StatKind`s and
+not a second kind of stat.
+
+# Phase 8: a page that is navigation
+
+The encyclopedia everyone reads keeps a portal at its bare domain: a logo, ten language boxes,
+a search form, three hundred more languages behind a button, and this season a fundraising
+banner. Its markup is honest — the ten boxes are one `<nav>` and the long list is another — and
+`<nav>` is a noise tag, dropped by every walk before anything is scored. What remained was the
+banner, and the scorer chose it. Measured 2026-09-03:
+
+| | chars |
+|---|---:|
+| chosen root, `div.txt1` inside `div.banner` | 446 |
+| `<body>` walked as every root is (hints off: the banner was most of what was left) | 792 |
+| `<body>` with its two `<nav>`s kept | **4,886** |
+
+Nothing on the page said "English". A reader who typed the domain got a pitch for money and no
+way on.
+
+## The rule
+
+The sliver rule already sends a root under 1,000 characters to the body when the body emits
+five times as much, and the note beside it has said since Phase 3 that "the body with its
+navigation beats a legal notice with nothing". The body's navigation was the part that walk
+dropped. The fallback now walks the body a second time with `<nav>` kept, and where that walk
+out-emits the plain one `html::NAV_RATIO` (two) to one, it is the body the sliver rule weighs.
+The ratio is the hint guard's, one tag over: a tag that deletes most of a page is not describing
+chrome. The comparison is of emitted text, as root ranking is, and each walk answers the hint
+guard on its own, so a `<nav class="nav">` is still a hint's business.
+
+A page that is navigation ends in links because it is links. The tail trimmer reads a closing
+link-only list as rubble and stops at the floor, so on the portal it would have cut 4,886
+characters back to about 200, list by list, from the bottom up. It is skipped where the
+navigation was kept, as the thin-text floors are skipped for a tweet.
+
+## What was tried first, and what the rule does not do
+
+- **A profile `strip` of the banner was tried first and refused**: the banner was more than
+  half the text the page had, which is the floor doing its job on the wrong page. With the
+  languages in the walk it is no longer most of anything, and the `banner` hint drops it the way
+  it drops one beside an article. The reader asked for the languages "instead or in addition";
+  it is instead.
+- `<nav>` stays chrome for every root candidate, for the card and thread detectors, and for
+  `in_chrome`. Only the body fallback of a sliver page asks the second walk, and `--why` prints
+  `navigation kept` when it took it.
+- **An article with a mega-menu.** The menu would have to out-emit the article and everything
+  else the walker keeps two to one, and the whole would then have to out-emit the chosen root
+  five to one. A brief under a thousand characters beside a four-thousand-character menu crosses
+  both. None was seen in the samples; one that arrives keeps the brief on the page under the
+  menu, and `--why` says which rule put it there.
+- The search form is `<form>`, which is noise; hww's own search bar stands in for it. The
+  `<main>` element was never a candidate: its link density counts the anchors inside `<nav>`
+  against a text that excludes them, and comes out at 1.0. Recorded, not changed.
+
+## The profile timeline
+
+Measured 2026-09-03 against one account's profile on x.com. The page server-renders the header
+and five tweets; the reader drew two tweets and no header.
+
+| | |
+|---:|---|
+| bytes | 216,278 |
+| `<article>`s served | 5 |
+| tweets kept, before | 2 |
+| tweets kept, after | 5 |
+| extracted, before → after | 38 → 264 chars, header included |
+
+Three faults, and none of them was the floor.
+
+- **The wrapper rule read a carousel as a wrapper.** A tweet with three or four pictures draws
+  them as slides of one class, the census reads the slides as a sibling group, and the group's
+  members are lent to the tweet detector as candidates. "Wraps another candidate" then refused
+  the tweet for wrapping its own pictures — the three of five that carried more than one. The
+  detector now weighs candidates innermost first, so the wrapper rule and the body walk's skip
+  set are asked of *accepted tweets* and not of every candidate; the login-prompt wrapper it
+  was written for is still refused, one step later.
+  `a_tweet_with_a_photo_carousel_is_not_refused_for_wrapping_its_slides` pins it.
+- **The header is chrome.** The column's class carries Tailwind's `nav-xl:` breakpoint prefix,
+  `hint::matches_in` tokenises `nav-xl` as `nav`, and the whole column under `<main>` is noise
+  to the walker. That is why no root candidate ever cleared the floor on this page — the right
+  answer for the wrong reason — and why a bio walked with the hints on comes back empty.
+  `tweet::profile_of` finds the header by its following and followers counts under an `<h1>`
+  with no tweet beside them, never asks `in_chrome`, and walks the bio through
+  `html::blocks_from_bio` with the hints off, on the argument a feed summary already makes. The
+  banner and the post count are both printed above the container that holds the name and the
+  counts — the count in the bar over the banner, the banner several containers up — and are read
+  from the column above the header and nowhere else. The banner is the picture inside the link
+  to the account's header photo, `/<name>/header_photo`: the one route in the module that is
+  X's and nothing more general, because a wide picture over a name is also what an
+  advertisement is, and the alt text and the link's label are English words.
+- **One long tweet made a timeline an article.** On a second profile the longest tweet cleared
+  the floor as a root, the scorer read it — name, date, and counts included — as an article,
+  and the run was `dropped (the page already read)` with three tweets kept. The merge now takes
+  the run where the root the scorer chose sits inside one tweet of several, or where the run
+  carries more text than what was read, which is the thread's rule one clause longer. One
+  tweet alone that reads as an article stays the article it read as, because by shape it is
+  one; `an_article_that_reads_is_never_replaced_by_a_tweet` still holds and
+  `a_timeline_whose_longest_tweet_reads_as_an_article_is_still_a_timeline` holds beside it.
+- **Every tweet after the first was drawn as a reply.** `assemble` put the focal tweet at depth
+  0 and the rest at 1, and on a timeline, where no tweet is the address, that made the first
+  post the subject and the other four its answers, indented under it. Depth 1 is now given only
+  where a focal tweet exists; a timeline stands every tweet at 0. The header lost its border
+  for the neighbouring reason: bordered, it read as the first post on its own timeline.
+
+Two costs found on the way and paid:
+
+- **`Block::Profile` inline overflowed the worker stack.** Eight fields in the enum trebled
+  `Block`, `html::walk_blocks` keeps `Block` temporaries in a frame it enters up to `MAX_DEPTH`
+  times, and the 5,000-div page aborted at 197 levels on 2 MiB. The payload is boxed and
+  `a_block_stays_small` pins the size: a variant that trips it is boxed, not budgeted for.
+- **Weighing wrappers made the counts walk cubic.** `stats_of` built every descendant's text,
+  which is quadratic in a candidate, and a page of nested candidates asked it of every level:
+  45 s on `nested_story_cards_do_not_walk_off_the_stack`. A capped text walk (`text_over`, 32
+  characters, early exit) skips any control too long to be a count and its word, and the name
+  is asked before the counts because it is the cheap question most candidates fail. Back to
+  the prior figure.
+
+Recorded, not changed: the header's counts nest their two words in boxes
+(`<a><div><div>11</div><div>Following</div></div></a>`), which neither the flat text nor the
+direct-children reading could see; `pair_stat_of_leaves` reads exactly two leaf texts and is the
+third reading `stats_of` tries. The profile's three counts are three more `ir::StatKind`s and
+not a second kind of stat.
+
+# Phase 9: a picture hww cannot open
 
 Measured 2026-09-02, from one page a reader was actually on. The report was that a figure
 offered "load from host", and only the press said the format was AVIF. Three separate things

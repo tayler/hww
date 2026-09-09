@@ -130,6 +130,16 @@ pub struct Provenance {
     /// JavaScript caution over a feed that parsed perfectly. The IR must not change to fix it —
     /// text length has one currency — so the pipeline says the page was a feed instead.
     pub feed: Option<crate::feed::Report>,
+    /// The document is a run of tweets: `Block::Tweets`, the shape X serves and the one social
+    /// host measured.
+    ///
+    /// Here for exactly the reason `feed` above is, and against the same failure. A tweet is a
+    /// few dozen words by design, so a page that parsed perfectly still measures under
+    /// `ir::THIN_TEXT` and would draw the JavaScript caution over content hww has in hand — the
+    /// confidently-wrong diagnosis that `tweet.rs` was written to end. The IR does not change to
+    /// fix it, because text length has one currency; the pipeline says the page was tweets
+    /// instead, and `notice::about_page` and `pageinfo::rows` both read this one field.
+    pub tweets: bool,
 }
 
 impl std::fmt::Display for Provenance {
@@ -202,6 +212,7 @@ impl Provenance {
             truncation: Truncation::Complete,
             profile: None,
             feed: None,
+            tweets: false,
         }
     }
 }
@@ -228,6 +239,7 @@ impl Provenance {
             truncation: Truncation::Complete,
             profile: None,
             feed: None,
+            tweets: false,
         }
     }
 }
@@ -448,7 +460,13 @@ impl Session {
             r
         });
         let doc = x.doc;
-        let prov = f.provenance(requested, doc.text_len(), report);
+        let mut prov = f.provenance(requested, doc.text_len(), report);
+        // Asked of the document rather than tracked through the extractor: one question, one
+        // answer, and `explain` below reaches the same fact by the same route.
+        prov.tweets = doc
+            .blocks
+            .iter()
+            .any(|b| matches!(b, ir::Block::Tweets(_) | ir::Block::Profile(_)));
         Ok(Loaded { doc, prov })
     }
 
@@ -504,6 +522,7 @@ impl Session {
             });
         let mut prov = f.provenance(requested, why.text_len, why.profile.clone());
         prov.feed = feed;
+        prov.tweets = why.tweets;
         Ok((why, prov))
     }
 
@@ -653,6 +672,7 @@ impl Fetched {
             // already takes three arguments, two of them `Option`s, and a fourth would be one
             // more thing to pass `None` to from every caller that never saw a feed.
             feed: None,
+            tweets: false,
         }
     }
 }
@@ -821,10 +841,10 @@ mod tests {
     #[test]
     fn rewrite_notice_names_hosts_not_urls() {
         let n = Rewrite::Applied {
-            from: Url::parse("https://reddit.com/r/rust/x").unwrap(),
-            to: Url::parse("https://old.reddit.com/r/rust/x").unwrap(),
+            from: Url::parse("https://example.com/r/rust/x").unwrap(),
+            to: Url::parse("https://old.example.com/r/rust/x").unwrap(),
         };
-        assert_eq!(n.to_string(), "[rewrote reddit.com -> old.reddit.com]");
+        assert_eq!(n.to_string(), "[rewrote example.com -> old.example.com]");
     }
 
     /// Every shipped profile, run over its own fixture with and without the profile: every

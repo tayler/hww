@@ -78,6 +78,18 @@ impl Setting {
         }
     }
 
+    /// A dated line under a message, in the page's family at the small size and the dim
+    /// colour: a tweet's date, which is also its link. Underlined, because it sits under prose
+    /// and the hue alone would not say "link" (see `underline`).
+    pub fn dateline(opts: &ReadOpts, pal: &Palette) -> Self {
+        Self {
+            font: theme::small_font(opts),
+            color: pal.dim,
+            role: opts.family,
+            underline: true,
+        }
+    }
+
     /// Chrome, so monospace regardless of what the page is set in.
     pub fn dim(opts: &ReadOpts, pal: &Palette) -> Self {
         Self {

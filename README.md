@@ -29,7 +29,7 @@ hww fetches a web page, parses the HTML, then displays it using hww's own render
 - **Four typefaces.** IBM Plex Sans, Serif, and Mono, plus Atkinson Hyperlegible Next for low vision. All of them are compiled into the binary.
 - **Screen-reader support.** An AccessKit tree, with the off-screen layout skip suspended while an assistive technology is attached.
 - **RSS and Atom feeds.** Open a feed's address and it is read as a list of entries with their summaries, not as a wall of XML. Nothing behind a headline is requested until you follow it, and how much of each entry to show is a setting.
-- **Per-site rules, compiled in and reported.** A rewrite table, a profile table, a search-engine table. Every application is announced before the request goes out, and `Ctrl+Shift+R` reloads bare.
+- **Per-site rules, compiled in and reported.** A rewrite table (empty at present: its one rule died behind a login and was removed), a profile table, a search-engine table. Every application is announced before the request goes out, and `Ctrl+Shift+R` reloads bare.
 
 ## Install
 
@@ -135,6 +135,7 @@ Before 0.4 this file was called `library.json` and bookmarks were called the lib
 | `src/fetch.rs` | HTTP client with no cookie jar, redirect inspection, and request limits |
 | `src/html.rs` | Parses HTML into `Document`: article scoring, cards, thread hooks |
 | `src/thread.rs` | Detects comment lists from repeated siblings with the same classes |
+| `src/tweet.rs` | Detects tweets, the shape X serves, and the account header over a timeline of them |
 | `src/ir.rs` | Semantic document intermediate representation (IR); extractors write the IR, renderers read it |
 
 ## Developing
@@ -170,6 +171,12 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 cargo clippy --all-targets --locked --features gui -- -D warnings
 cargo test --locked --features gui
+```
+
+`make ci` runs all five in that order. Point git at the committed hook once per clone and every push runs them first, with `git push --no-verify` to skip:
+
+```
+git config core.hooksPath .githooks
 ```
 
 The first three run only on Linux. The last two run again on Windows and macOS, which block the same merges. Each push to `main` also attaches a development package to its [workflow run](https://github.com/tayler/hww/actions/workflows/ci.yml), kept for 14 days and meant for testing unreleased code.

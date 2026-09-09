@@ -191,11 +191,18 @@ fn draw_item(
             // bullet. `Checkbox` is drawn from `Shape::line`, so there is no glyph to be
             // missing.
             let mut on = checks.is_on(*checked);
-            let widget = egui::Checkbox::new(&mut on, RichText::new(*label).font(font.clone()));
-            let mut resp = ui.add_enabled(enable.allows(*needs), widget);
+            // The key sits in the same right column the `Run` rows above and below it use.
+            // `Checkbox` has no `shortcut_text`, but it lays out the same atoms `Button` does,
+            // and `Button::shortcut_text` is nothing more than a grow atom followed by the
+            // weak text; building the tuple here is the same column by hand. It was a hover
+            // tooltip before, which is a key no reader finds by looking at the bar.
+            let mut atoms = egui::Atoms::new(RichText::new(*label).font(font.clone()));
             if !keys.is_empty() {
-                resp = resp.on_hover_text(*keys);
+                atoms.push_right(egui::Atom::grow());
+                atoms.push_right(RichText::new(*keys).color(pal.dim).font(font));
             }
+            let widget = egui::Checkbox::new(&mut on, atoms);
+            let resp = ui.add_enabled(enable.allows(*needs), widget);
             if resp.changed() {
                 choose(*c);
                 ui.close();
