@@ -166,7 +166,7 @@ jobs:
       - uses: ./.github/actions/build-deb
 
       - name: Upload Ubuntu package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hww-linux-amd64
           path: dist/*.deb
@@ -201,7 +201,7 @@ jobs:
       - uses: ./.github/actions/build-windows
 
       - name: Upload Windows package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hww-windows-amd64
           path: dist/*.zip
@@ -237,7 +237,7 @@ jobs:
       - uses: ./.github/actions/build-macos
 
       - name: Upload macOS package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hww-macos-arm64
           path: dist/*.dmg
@@ -284,7 +284,7 @@ jobs:
           version: ${{ steps.version.outputs.version }}
 
       - name: Upload Windows package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hww-windows-amd64
           path: dist/*.zip
@@ -322,7 +322,7 @@ jobs:
           version: ${{ steps.version.outputs.version }}
 
       - name: Upload macOS package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hww-macos-arm64
           path: dist/*.dmg
